@@ -144,4 +144,19 @@ public class ContentStreamTests : IDisposable
         Assert.Equal(HttpStatusCode.RequestedRangeNotSatisfiable, response.StatusCode);
         Assert.Equal("bytes */3", response.Content.Headers.ContentRange?.ToString());
     }
+
+    [Fact]
+    public async Task GetContent_MalformedRangeHeader_FallsBackToFullContent()
+    {
+        var bytes = new byte[] { 1, 2, 3, 4, 5 };
+        var contentId = await SeedCompletedContentAsync(bytes);
+
+        var request = new HttpRequestMessage(HttpMethod.Get, $"/api/messages/{contentId}/content");
+        request.Headers.TryAddWithoutValidation("Range", "not-a-valid-range");
+
+        var response = await _fixture.Client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(bytes, await response.Content.ReadAsByteArrayAsync());
+    }
 }

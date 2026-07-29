@@ -97,6 +97,34 @@ public class SettingsControllerTests : IDisposable
     }
 
     [Fact]
+    public async Task UpdateKeyword_SwitchingToApplyToAllGroups_ClearsPreviousGroupScope()
+    {
+        var createResponse = await _fixture.Client.PostAsJsonAsync(
+            "/api/settings/keywords", new UpsertMaskKeywordDto("word", null, false, ["G1", "G2"]));
+        var created = await createResponse.Content.ReadFromJsonAsync<MaskKeywordDto>();
+
+        var updateResponse = await _fixture.Client.PutAsJsonAsync(
+            $"/api/settings/keywords/{created!.Id}", new UpsertMaskKeywordDto("word", null, true, null));
+        Assert.Equal(HttpStatusCode.NoContent, updateResponse.StatusCode);
+
+        var keywords = await _fixture.Client.GetFromJsonAsync<List<MaskKeywordDto>>("/api/settings/keywords");
+        var updated = Assert.Single(keywords!);
+        Assert.True(updated.ApplyToAllGroups);
+        Assert.Empty(updated.GroupIds);
+    }
+
+    [Fact]
+    public async Task CreateKeyword_ApplyToAllGroupsTrue_IgnoresSuppliedGroupIds()
+    {
+        var response = await _fixture.Client.PostAsJsonAsync(
+            "/api/settings/keywords", new UpsertMaskKeywordDto("word", null, true, ["G1", "G2"]));
+        var created = await response.Content.ReadFromJsonAsync<MaskKeywordDto>();
+
+        Assert.True(created!.ApplyToAllGroups);
+        Assert.Empty(created.GroupIds);
+    }
+
+    [Fact]
     public async Task UpdateKeyword_NonExistentId_ReturnsNotFound()
     {
         var response = await _fixture.Client.PutAsJsonAsync(

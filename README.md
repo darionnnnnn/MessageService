@@ -1,10 +1,26 @@
 # MessageService
 
-LINE bot webhook 訊息收錄服務。bot 加入群組後，透過 LINE webhook 接收群組內的訊息並寫入資料庫。
+LINE 群組訊息收錄與檢視系統，兩個獨立部署的 ASP.NET Core 專案共用同一顆資料庫：
 
-本專案職責只有三件事：**收 webhook → 落地資料庫 → 每日清除逾期資料**。不提供查詢 API、不做 UI，資料表 schema 設計上假設會有其他應用程式直接連同一顆資料庫讀取顯示。
+- **MessageService**（收錄端）：LINE bot webhook，收訊息、下載媒體、每日清除逾期資料。只寫不查。
+- **MessageService.Web**（檢視端）：唯讀網頁，把收錄到的對話用類似 LINE 聊天視窗的介面呈現，並提供關鍵字/名稱遮蔽設定。
 
-## 架構
+```
+MessageService.sln
+├── MessageService/          # 收錄端（webhook + 背景服務）
+├── MessageService.Data/     # 共用：實體、DbContext、EF Core migrations
+├── MessageService.Web/      # 檢視端（MVC + API + 前端）
+├── MessageService.Tests/
+└── MessageService.Web.Tests/
+```
+
+---
+
+## MessageService（收錄端）
+
+bot 加入群組後，透過 LINE webhook 接收群組內的訊息並寫入資料庫。職責只有三件事：**收 webhook → 落地資料庫 → 每日清除逾期資料**，不提供查詢 API。
+
+### 架構
 
 ```
 LINE Platform ──POST──▶ LineWebhookController
@@ -16,15 +32,17 @@ LINE Platform ──POST──▶ LineWebhookController
                             ▼
                 ┌── GroupMessages / MessageContents(Pending) ──┐
                 │                                              │
-                ▼ 入列                                          │
-     ContentDownloadQueue（Channel）                            │
+                ▼ 入列                                          │ 入列
+     ContentDownloadQueue（Channel）              ProfileRefreshQueue（Channel）
                 ▼                                              ▼
-     ContentDownloadService（背景下載原檔）          RetentionCleanupService
-       影片先等 LINE 轉檔，失敗重試，                  （每日刪除超過保留年限的訊息，
-        完成後寫回 MessageContents）                   內容檔案靠 CASCADE 一併刪除）
+     ContentDownloadService（背景下載原檔）          ProfileRefreshService
+       影片/語音先等 LINE 轉檔，失敗重試，              （背景快取群組名稱與成員顯示名稱，
+        完成後寫回 MessageContents）                    7 天 TTL，呼叫 LINE profile API）
+
+RetentionCleanupService（每日固定時間刪除超過保留年限的訊息，內容檔案靠 CASCADE 一併刪除）
 ```
 
-## 訊息型別處理
+### 訊息型別處理
 
 | 型別 | Text 欄位 | 內容下載 |
 |---|---|---|
@@ -36,7 +54,108 @@ LINE Platform ──POST──▶ LineWebhookController
 | 檔案 | null（檔名存於內容表） | 原檔，背景下載 |
 | 其他（位置等） | 略過不存 | — |
 
-## 資料表
+### 設定
+
+| 設定鍵 | 說明 |
+|---|---|
+| `Database:Provider` | `SqlServer`（正式，appsettings.json 預設）或 `Sqlite`（開發，appsettings.Development.json 預設） |
+| `ConnectionStrings:SqlServer` / `Sqlite` | 連線字串 |
+| `Line:ChannelSecret` | 簽章驗證用。**勿進版控**，開發用 user-secrets、正式用環境變數 |
+| `Line:ChannelAccessToken` | 內容下載與 profile API 用，同上 |
+| `Retention:Years` | 保留年限（預設 3） |
+| `Retention:CleanupTimeOfDay` | 每日清除時間（本地時間，預設 03:00:00） |
+| `ContentDownload:MaxRetries` | 下載重試次數（預設 3） |
+| `ContentDownload:RetryDelayMilliseconds` | 重試間隔基數，逐次遞增（預設 2000） |
+| `ContentDownload:TranscodingPollSeconds` / `TranscodingMaxPolls` | 影片/語音轉檔輪詢間隔與次數上限（預設 5 秒 × 24 次） |
+| `ProfileCache:RefreshAfter` | 群組/成員名稱快取的過期時間（預設 7 天） |
+
+開發環境設定機密（在 `MessageService/` 目錄下）：
+
+```bash
+dotnet user-secrets init
+dotnet user-secrets set "Line:ChannelSecret" "<你的 channel secret>"
+dotnet user-secrets set "Line:ChannelAccessToken" "<你的 access token>"
+```
+
+### 本機串接 LINE 測試
+
+1. LINE Developers Console 建立 Messaging API channel，取得 Channel Secret / Access Token
+2. `dotnet run --project MessageService` 啟動本機服務
+3. 用 dev tunnel 或 ngrok 將本機 port 開成 HTTPS URL
+4. 在 LINE console 設定 Webhook URL 為 `https://<tunnel>/api/line/webhook` 並啟用
+5. 將 bot 拉進測試群組，發文字/貼圖/圖片/影片/語音/檔案各一，確認 SQLite 落地與 `DownloadStatus` 流轉
+
+---
+
+## MessageService.Web（檢視端）
+
+唯讀網頁，值班/維運人員用來瀏覽 LINE 群組對話。除了讀取訊息，**設定頁會寫入自己的設定資料**（遮蔽規則、名稱顯示模式、別名），這是本專案唯一會寫資料庫的地方。
+
+### 頁面與 API
+
+**對話頁（`/`）**：Bootstrap + 原生 JS 模擬 LINE 對話視窗，所有資料透過 API 取得（不走 MVC Model 傳遞）。
+
+- 預設載入 3 天內對話，「載入更早 7 天」按鈕以最舊訊息 Id 當游標往前翻頁，沒有更早歷史時自動 disable
+- 「回到最新」置底按鈕：使用者往上捲動時自動退出跟隨模式並顯示未讀數，點擊或捲回底部即恢復跟隨並自動捲到新訊息
+- 每 4 秒輪詢新訊息與 Pending 內容的下載狀態；分頁隱藏（`document.hidden`）時暫停輪詢
+- 新訊息進場有淡入＋位移動效（`prefers-reduced-motion` 使用者會停用）
+- 圖片／影片／語音／檔案依 `DownloadStatus` 顯示 spinner／播放器／下載連結／失敗訊息
+- 所有文字一律用 `textContent` 塞入 DOM，不用 `innerHTML`，避免訊息內容造成 XSS
+
+**設定頁（`/Home/Settings`）**：關鍵字遮蔽規則（新增/刪除，預設等長 `*` 或自訂替換字串，全部群組或指定群組）；名稱顯示模式（原名／首尾保留中間遮蔽／自訂別名，別名編輯器可依群組篩選成員）。變更即存，PUT 後顯示 toast。
+
+**API**（都在 `MessageService.Web/Controllers/Api/`）：
+
+| 端點 | 用途 |
+|---|---|
+| `GET /api/groups` | 群組清單（僅列出有訊息的群組，名稱取自快取，無快取則顯示 GroupId） |
+| `GET /api/groups/{groupId}/messages?days=` / `?beforeId=&days=` / `?afterId=` | 初載 / 往前加載 / 輪詢新訊息，回應已套用遮蔽 |
+| `GET /api/messages/{id}/content` | 內容串流，支援 HTTP Range（見下方實作說明） |
+| `GET /api/messages/statuses?ids=` | 查詢多筆內容目前的 `DownloadStatus` |
+| `GET/PUT /api/settings/display` | 名稱顯示模式 |
+| `GET/POST/PUT/DELETE /api/settings/keywords[/{id}]` | 關鍵字遮蔽規則 CRUD |
+| `GET/PUT/DELETE /api/settings/aliases[/{userId}]` | 使用者別名對照 |
+| `GET /api/users?groupId=` | 別名編輯器用的成員清單（可選群組篩選） |
+
+**內容串流的技術重點**：影片/語音的 Range 請求（拖拉進度）不能靠 ADO.NET 的 blob stream 做 `Seek`——SQL Server 與 SQLite 的 blob stream 都是 forward-only，不支援真正的隨機存取。因此 Range 切片直接在 SQL 端用 `SUBSTRING`/`substr` 完成，每個 Range 請求只讀取實際要傳送的位元組，不會把整個檔案載進應用程式記憶體（`MessageService.Web/Services/ContentStreamService.cs`）。
+
+### 遮蔽機制
+
+`IMaskingService.LoadRulesAsync()` 每個請求只呼叫一次，把當下的名稱顯示模式、關鍵字規則、別名對照載成一份 `IMaskingRuleSet` 快照，套用到該次回應的每則訊息時全是同步運算，避免每則訊息各打一次 DB。
+
+- **關鍵字遮蔽**：不分大小寫的純字串比對（不用 regex），可設定全部群組或指定群組套用；預設遮蔽為與關鍵字等長的 `*`，也可設定自訂替換字串
+- **名稱顯示三模式**：
+  - `Original`：顯示原始快取的 LINE 顯示名稱，沒有快取則顯示 UserId
+  - `MaskMiddle`：首尾字保留、中間 `*`（1 字全遮；2 字只留首字，如「小明」→「小*」；3 字以上首尾各留一字，如「王小明」→「王*明」）
+  - `CustomAlias`：依 `UserAliases` 對照表顯示别名；沒設定別名的人 fallback 為 `MaskMiddle`
+
+### IP 白名單（沒有登入機制）
+
+`IpAllowlistMiddleware` 掛在管線最前面，擋下所有請求。**空白名單視為全拒**（寧嚴勿鬆）。
+
+```jsonc
+// appsettings.json
+"AllowedClientIps": [ "127.0.0.1", "::1", "10.1.0.0/24" ],  // 支援單一 IP 與 CIDR 網段
+"UseForwardedHeaders": false  // 部署在反向代理（IIS/nginx）後面時才需要開啟
+```
+
+放行與拒絕的來源 IP 都會記 NLog。若部署在反向代理後面卻沒開 `UseForwardedHeaders`，中介層看到的會是代理的 IP 而非真實來源，白名單會失效——這是最容易忘記的坑。
+
+### 資料庫存取
+
+`MessageDbContext` 不設全域 `NoTracking`：查詢型端點（對話、群組、遮蔽規則載入）各自在查詢上加 `.AsNoTracking()`，設定頁的「讀取實體→改屬性→存檔」寫入流程才能正常被 change tracker 偵測到。這是實測踩到的坑——曾經設過全域 `NoTracking` 以為整個 Web 專案只讀，結果讓 `UpdateKeyword`/`UpsertAlias` 的更新靜默失敗（改了值但沒真的寫進 DB，因為沒有東西被追蹤）。
+
+### 設定
+
+| 設定鍵 | 說明 |
+|---|---|
+| `Database:Provider` / `ConnectionStrings:*` | 與收錄端指向同一顆資料庫 |
+| `AllowedClientIps` | IP 白名單，見上 |
+| `UseForwardedHeaders` | 反向代理後方時開啟 |
+
+---
+
+## 共用資料表（`MessageService.Data`）
 
 **GroupMessages**
 
@@ -47,10 +166,10 @@ LINE Platform ──POST──▶ LineWebhookController
 | LineMessageId | nvarchar(max) | LINE 的 message id |
 | GroupId | nvarchar(max) | 來源群組 |
 | UserId | nvarchar(max), null | 發言者（未加 bot 好友時可能為 null） |
-| MessageType | nvarchar(max) | text / sticker / image / video / file |
-| Text | nvarchar(max), null | 文字內容或 `(貼圖)` |
+| MessageType | nvarchar(max) | text / sticker / image / video / audio / file |
+| Text | nvarchar(max), null | 文字內容或 `(貼圖)`（顯示時會套遮蔽規則） |
 | EventTimestamp | datetimeoffset | LINE 事件時間 |
-| ReceivedAt | datetimeoffset | 本服務收到時間 |
+| ReceivedAt | datetimeoffset | 收錄端收到時間 |
 
 **MessageContents**（1:1 對 GroupMessages，ON DELETE CASCADE）
 
@@ -64,62 +183,42 @@ LINE Platform ──POST──▶ LineWebhookController
 | Content | varbinary(max), null | 原始檔案內容，Pending/Failed 時為 null |
 | CompletedAt | datetimeoffset, null | 下載完成時間 |
 
-外部應用程式可依 `DownloadStatus` 呈現三種狀態：抓取中（Pending）、可檢視（Completed）、抓取失敗（Failed）。若要修改欄位，注意這是外部應用程式讀取的既有 schema，異動需評估相容性。
+**Groups** / **GroupMembers**：收錄端背景快取的群組名稱、成員顯示名稱與頭像 URL（7 天 TTL，來源是 LINE 的 group summary / member profile API），檢視端用來把 GroupId/UserId 轉成人看得懂的名稱。快取失敗時 fallback 顯示原始 ID。
 
-## 設定
+**ViewerSettings**（單列，Id 固定為 1）／**MaskKeywords** + **MaskKeywordGroups**／**UserAliases**：檢視端設定頁寫入的遮蔽設定，只有這幾張表是 Web 專案會寫入的。
 
-| 設定鍵 | 說明 |
-|---|---|
-| `Database:Provider` | `SqlServer`（正式，appsettings.json 預設）或 `Sqlite`（開發，appsettings.Development.json 預設） |
-| `ConnectionStrings:SqlServer` / `Sqlite` | 連線字串 |
-| `Line:ChannelSecret` | 簽章驗證用。**勿進版控**，開發用 user-secrets、正式用環境變數 |
-| `Line:ChannelAccessToken` | 內容下載 API 用，同上 |
-| `Retention:Years` | 保留年限（預設 3） |
-| `Retention:CleanupTimeOfDay` | 每日清除時間（本地時間，預設 03:00:00） |
-| `ContentDownload:MaxRetries` | 下載重試次數（預設 3） |
-| `ContentDownload:RetryDelayMilliseconds` | 重試間隔基數，逐次遞增（預設 2000） |
-| `ContentDownload:TranscodingPollSeconds` / `TranscodingMaxPolls` | 影片轉檔輪詢間隔與次數上限（預設 5 秒 × 24 次） |
-
-開發環境設定機密（在 `MessageService/` 目錄下）：
-
-```bash
-dotnet user-secrets init
-dotnet user-secrets set "Line:ChannelSecret" "<你的 channel secret>"
-dotnet user-secrets set "Line:ChannelAccessToken" "<你的 access token>"
-```
+這些表的欄位是兩個專案間（以及未來其他消費端）的共用契約，異動需評估相容性。
 
 ## 資料庫初始化
 
-- **SQLite（開發）**：啟動時自動 `EnsureCreated()`，免手動。
-- **SQL Server（正式）**：需套用 migration：
+Migrations 統一放在 `MessageService.Data`，用 `MessageService` 當 startup project：
+
+- **SQLite（開發）**：兩個專案啟動時都各自 `EnsureCreated()`，免手動（收錄端在 `Program.cs`；檢視端目前假設 schema 已由收錄端建立）。
+- **SQL Server（正式）**：
 
 ```bash
-ASPNETCORE_ENVIRONMENT=Production dotnet ef database update --project MessageService
+ASPNETCORE_ENVIRONMENT=Production dotnet ef database update --project MessageService.Data --startup-project MessageService
 ```
 
-> 注意：`dotnet ef` 指令會讀 `launchSettings.json` 的 `ASPNETCORE_ENVIRONMENT=Development` 而套到 Sqlite 設定，所以操作 SQL Server migration 時必須顯式指定 `ASPNETCORE_ENVIRONMENT=Production`。
-
-## 本機串接 LINE 測試
-
-1. LINE Developers Console 建立 Messaging API channel，取得 Channel Secret / Access Token
-2. `dotnet run` 啟動本機服務
-3. 用 dev tunnel 或 ngrok 將本機 port 開成 HTTPS URL
-4. 在 LINE console 設定 Webhook URL 為 `https://<tunnel>/api/line/webhook` 並啟用
-5. 將 bot 拉進測試群組，發文字/貼圖/圖片/影片/檔案各一，確認 SQLite 落地與 `DownloadStatus` 流轉
+> 注意：`dotnet ef` 指令預設會讀 `MessageService/Properties/launchSettings.json` 的 `ASPNETCORE_ENVIRONMENT=Development`，套到 SQLite 設定。操作 SQL Server migration（`migrations add`/`database update`）時必須顯式指定 `ASPNETCORE_ENVIRONMENT=Production`，否則會產生 SQLite 語法的 migration。
 
 ## 設計決策備忘
 
-- **圖片/影片/檔案存 DB（varbinary）而非磁碟**：外部應用程式只要連 DB 就能讀到；保留期清除靠 CASCADE 一次帶走，不會產生孤兒檔案。代價是 DB 容量成長快，若量大屆時再評估 FILESTREAM 或磁碟存放（內容獨立一表已為搬遷留好最小改動面）
+- **圖片/影片/語音/檔案存 DB（varbinary）而非磁碟**：檢視端只要連 DB 就能讀到；保留期清除靠 CASCADE 一次帶走，不會產生孤兒檔案。代價是 DB 容量成長快，若量大屆時再評估 FILESTREAM 或磁碟存放（內容獨立一表已為搬遷留好最小改動面）
 - **webhook 一律回 200**（簽章合法後）：回非 2xx 會讓 LINE 重送並可能判定 webhook 失效；個別事件失敗只記 log
-- **下載走背景佇列**：影片要等 LINE 轉檔、檔案可達數百 MB，不能在 webhook 請求內同步處理；服務重啟會自動撈回殘留的 Pending 接續下載
-- **SQLite 的 DateTimeOffset 限制**：SQLite 只支援相等比較，`<`/`>` 無法轉譯。`MessageDbContext` 在 SQLite 環境對 `EventTimestamp` 套 `DateTimeOffsetToBinaryConverter`；SQL Server 維持原生 `datetimeoffset`（保持型別對其他工具可讀）
-- **BackgroundService 例外一律就地捕捉**：.NET 6+ 預設未捕捉例外會停掉整個 host，清除或下載失敗只能記 log 等下輪，不能讓 webhook 服務跟著死
+- **下載走背景佇列**：影片/語音要等 LINE 轉檔、檔案可達數百 MB，不能在 webhook 請求內同步處理；服務重啟會自動撈回殘留的 Pending 接續下載
+- **群組/成員名稱背景快取**：同樣不在 webhook 請求內同步呼叫 LINE profile API，避免拖慢 webhook 回應
+- **SQLite 的 DateTimeOffset 限制**：SQLite 只支援相等比較，`<`/`>` 無法轉譯。`MessageDbContext` 在 SQLite 環境對需要範圍比較的 `DateTimeOffset` 欄位（`EventTimestamp`、`Groups`/`GroupMembers` 的 `UpdatedAt`）套 `DateTimeOffsetToBinaryConverter`；SQL Server 維持原生 `datetimeoffset`（保持型別對其他工具可讀）
+- **BackgroundService 例外一律就地捕捉**：.NET 6+ 預設未捕捉例外會停掉整個 host，清除或下載失敗只能記 log 等下輪，不能讓服務跟著死
+- **檢視端沒有登入機制**：IP 白名單是最低防護，空白名單視為全拒
+- **檢視端 DbContext 不設全域 NoTracking**：設定頁需要寫入，只在真正唯讀的查詢路徑個別加 `.AsNoTracking()`（見上方「資料庫存取」）
 
 ## 日誌（NLog）
 
-設定檔為 [MessageService/nlog.config](MessageService/nlog.config)，輸出到 Console 與**執行檔目錄下的 `logs/messageservice-{日期}.log`**（每日一檔，保留 30 天）。`Microsoft.*` 的雜訊只留 Warning 以上。
+兩個專案都用 NLog，各自輸出到 Console 與**執行檔目錄下的 `logs/{專案名}-{日期}.log`**（每日一檔，保留 30 天）。`Microsoft.*` 的雜訊只留 Warning 以上。
 
-關鍵事件都有紀錄：收到並存檔的每則訊息（型別/群組/是否排入下載）、內容下載完成（大小/MIME）、下載重試與最終失敗、影片轉檔失敗、啟動接續補跑數量、保留期清除筆數與下次排程時間、簽章驗證拒絕。
+- **收錄端**：收到並存檔的每則訊息（型別/群組/是否排入下載）、內容下載完成（大小/MIME）、下載重試與最終失敗、影片/語音轉檔失敗、啟動接續補跑數量、保留期清除筆數與下次排程時間、簽章驗證拒絕
+- **檢視端**：IP 白名單放行/拒絕的來源
 
 ## 測試
 
@@ -127,4 +226,7 @@ ASPNETCORE_ENVIRONMENT=Production dotnet ef database update --project MessageSer
 dotnet test
 ```
 
-測試使用 SQLite（in-memory 或暫存檔），涵蓋簽章驗證、五種型別分流、防重送、背景下載（成功/轉檔輪詢/轉檔失敗/重試耗盡/啟動接續）、保留期清除（含 CASCADE 驗證）、Controller 整合測試（401/200/畸形 body 仍 200）。
+- `MessageService.Tests`：簽章驗證、五種型別分流（含 audio）、防重送、背景下載（成功/轉檔輪詢/轉檔失敗/重試耗盡/啟動接續）、群組/成員名稱快取（新增/過期更新/API 失敗 fallback）、保留期清除（含 CASCADE 驗證）、Controller 整合測試（401/200/畸形 body 仍 200）
+- `MessageService.Web.Tests`：Groups/Messages API（分頁游標、hasMore、遮蔽套用）、內容串流（200/206/416/malformed Range）、Settings API（CRUD、群組範圍替換）、`MaskingService`/`MaskingRuleSet`（含名稱遮蔽邊界情況）、IP 白名單 middleware（允許/拒絕/空白名單/CIDR）
+
+測試都使用 SQLite（in-memory 或暫存檔），Web 端整合測試用 `IStartupFilter` 在 TestServer 補一個固定來源 IP（TestServer 的請求沒有真正 TCP 連線，`Connection.RemoteIpAddress` 預設是 null）。
