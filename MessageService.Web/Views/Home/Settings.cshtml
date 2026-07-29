@@ -2,4 +2,97 @@
     ViewData["Title"] = "設定";
 }
 
-<p>設定頁面尚未實作。</p>
+<div id="settings-app">
+    <div id="toast-container" class="toast-container position-fixed bottom-0 end-0 p-3"></div>
+
+    <section class="mb-5">
+        <h4>關鍵字遮蔽</h4>
+        <table class="table table-sm align-middle">
+            <thead>
+                <tr>
+                    <th>關鍵字</th>
+                    <th>替換方式</th>
+                    <th>套用群組</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody id="keyword-tbody"></tbody>
+        </table>
+
+        <form id="keyword-form" class="row g-3 align-items-start border-top pt-3">
+            <div class="col-auto">
+                <label for="keyword-input" class="form-label">關鍵字</label>
+                <input type="text" class="form-control form-control-sm" id="keyword-input" required>
+            </div>
+
+            <div class="col-auto">
+                <span class="form-label d-block">替換方式</span>
+                <div class="form-check">
+                    <input class="form-check-input" type="radio" name="replacement-mode" id="replacement-default" checked>
+                    <label class="form-check-label" for="replacement-default">預設（等長 *）</label>
+                </div>
+                <div class="form-check d-flex align-items-center gap-2">
+                    <input class="form-check-input" type="radio" name="replacement-mode" id="replacement-custom">
+                    <label class="form-check-label" for="replacement-custom">自訂</label>
+                    <input type="text" class="form-control form-control-sm" style="width:8rem" id="replacement-input" disabled>
+                </div>
+            </div>
+
+            <div class="col-auto">
+                <span class="form-label d-block">套用範圍</span>
+                <div class="form-check">
+                    <input class="form-check-input" type="radio" name="scope-mode" id="scope-all" checked>
+                    <label class="form-check-label" for="scope-all">全部群組</label>
+                </div>
+                <div class="form-check">
+                    <input class="form-check-input" type="radio" name="scope-mode" id="scope-selected">
+                    <label class="form-check-label" for="scope-selected">指定群組</label>
+                </div>
+                <div id="scope-group-checkboxes" class="ms-3 mt-1 d-none"></div>
+            </div>
+
+            <div class="col-auto align-self-end">
+                <button type="submit" class="btn btn-primary btn-sm">新增規則</button>
+            </div>
+        </form>
+    </section>
+
+    <section>
+        <h4>名稱顯示</h4>
+        <div class="mb-3">
+            <div class="form-check">
+                <input class="form-check-input" type="radio" name="display-mode" id="mode-original" value="Original">
+                <label class="form-check-label" for="mode-original">原名</label>
+            </div>
+            <div class="form-check">
+                <input class="form-check-input" type="radio" name="display-mode" id="mode-mask" value="MaskMiddle">
+                <label class="form-check-label" for="mode-mask">首尾保留、中間 *</label>
+            </div>
+            <div class="form-check">
+                <input class="form-check-input" type="radio" name="display-mode" id="mode-alias" value="CustomAlias">
+                <label class="form-check-label" for="mode-alias">自訂別名（沒設定別名的人 fallback 首尾遮蔽）</label>
+            </div>
+        </div>
+
+        <div id="alias-editor" class="d-none">
+            <div class="mb-2">
+                <label for="alias-group-filter" class="form-label me-2">篩選群組</label>
+                <select id="alias-group-filter" class="form-select form-select-sm d-inline-block" style="width:auto"></select>
+            </div>
+            <table class="table table-sm">
+                <thead>
+                    <tr>
+                        <th>使用者</th>
+                        <th>別名</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody id="alias-tbody"></tbody>
+            </table>
+        </div>
+    </section>
+</div>
+
+@section Scripts {
+    <script src="~/js/settings.js" asp-append-version="true"></script>
+}
