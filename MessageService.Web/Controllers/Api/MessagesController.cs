@@ -13,6 +13,8 @@ public class MessagesController(
     ContentStreamService contentStreamService,
     IMaskingService maskingService) : ControllerBase
 {
+    public const int MaxDays = 3650;
+
     [HttpGet("api/groups/{groupId}/messages")]
     public async Task<ActionResult<MessagesPageDto>> GetMessages(
         string groupId,
@@ -21,7 +23,9 @@ public class MessagesController(
         [FromQuery] long? afterId = null,
         CancellationToken cancellationToken = default)
     {
-        days = Math.Clamp(days, 1, 365);
+        // 上限刻意遠高於收錄端的保留年限（預設 3 年），這樣前端在沒有游標可用時
+        // 靠放大天數視窗也一定能觸及所有仍保留的訊息
+        days = Math.Clamp(days, 1, MaxDays);
 
         IQueryable<GroupMessage> query = dbContext.GroupMessages.Where(m => m.GroupId == groupId);
 
@@ -41,7 +45,23 @@ public class MessagesController(
                 return NotFound();
             }
 
-            var cutoff = cursor.EventTimestamp.AddDays(-days);
+            // 下一則更早訊息（依 Id，即實際到達順序）。若它跟游標之間的空窗比 days 還長，
+            // 就改以它為基準開窗；否則群組沉寂超過一個視窗時，查詢永遠回空、游標不會前進，
+            // 使用者會一直按「載入更早」卻什麼都不會出現
+            var nextOlder = await dbContext.GroupMessages
+                .Where(m => m.GroupId == groupId && m.Id < before)
+                .OrderByDescending(m => m.Id)
+                .Select(m => new { m.EventTimestamp })
+                .FirstOrDefaultAsync(cancellationToken);
+
+            var anchor = cursor.EventTimestamp;
+            var plainCutoff = anchor.AddDays(-days);
+            if (nextOlder is not null && nextOlder.EventTimestamp < plainCutoff)
+            {
+                anchor = nextOlder.EventTimestamp;
+            }
+
+            var cutoff = anchor.AddDays(-days);
             query = query.Where(m => m.Id < before && m.EventTimestamp >= cutoff);
         }
         else

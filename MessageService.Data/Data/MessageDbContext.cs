@@ -36,6 +36,9 @@ public class MessageDbContext(DbContextOptions<MessageDbContext> options) : DbCo
 
         modelBuilder.Entity<ViewerSettings>(entity =>
         {
+            // 單列設定，Id 固定為 SingletonId 而非資料庫產生：若留成 identity，
+            // 程式碼補建這列時帶著 Id=1 會在 SQL Server 撞上 IDENTITY_INSERT OFF
+            entity.Property(v => v.Id).ValueGeneratedNever();
             entity.Property(v => v.NameDisplayMode).HasConversion<string>();
             entity.HasData(new ViewerSettings { Id = Models.ViewerSettings.SingletonId });
         });

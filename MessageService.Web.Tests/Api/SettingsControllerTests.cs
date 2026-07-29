@@ -41,6 +41,25 @@ public class SettingsControllerTests : IDisposable
     }
 
     [Fact]
+    public async Task UpdateDisplaySettings_WhenSingletonRowMissing_RecreatesItWithFixedId()
+    {
+        // 設定列是 migration 種下的，但若被人為刪掉，補建時必須仍用固定的 SingletonId，
+        // 否則之後所有以 Id == SingletonId 為條件的讀取都會找不到而永遠退回預設值
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            dbContext.ViewerSettings.RemoveRange(dbContext.ViewerSettings);
+            await Task.CompletedTask;
+        });
+
+        var response = await _fixture.Client.PutAsJsonAsync(
+            "/api/settings/display", new DisplaySettingsDto(nameof(NameDisplayMode.Original)));
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+
+        var settings = await _fixture.Client.GetFromJsonAsync<DisplaySettingsDto>("/api/settings/display");
+        Assert.Equal(nameof(NameDisplayMode.Original), settings!.NameDisplayMode);
+    }
+
+    [Fact]
     public async Task CreateKeyword_ThenListIncludesIt()
     {
         var response = await _fixture.Client.PostAsJsonAsync(

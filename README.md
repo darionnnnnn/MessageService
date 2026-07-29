@@ -95,7 +95,7 @@ dotnet user-secrets set "Line:ChannelAccessToken" "<你的 access token>"
 
 **對話頁（`/`）**：Bootstrap + 原生 JS 模擬 LINE 對話視窗，所有資料透過 API 取得（不走 MVC Model 傳遞）。
 
-- 預設載入 3 天內對話，「載入更早 7 天」按鈕以最舊訊息 Id 當游標往前翻頁，沒有更早歷史時自動 disable
+- 預設載入 3 天內對話，「載入更早 7 天」按鈕以最舊訊息 Id 當游標往前翻頁，沒有更早歷史時自動 disable。兩個「按了會沒反應」的空窗情況都有處理：畫面上一則訊息都沒有（沒有游標可用）時改成放大天數視窗重繪；群組沉寂比一個視窗還久時由 API 把視窗錨定到下一則更早訊息，保證每次點擊都會前進
 - 「回到最新」置底按鈕：使用者往上捲動時自動退出跟隨模式並顯示未讀數，點擊或捲回底部即恢復跟隨並自動捲到新訊息
 - 每 4 秒輪詢新訊息與 Pending 內容的下載狀態；分頁隱藏（`document.hidden`）時暫停輪詢
 - 新訊息進場有淡入＋位移動效（`prefers-reduced-motion` 使用者會停用）
@@ -212,6 +212,8 @@ ASPNETCORE_ENVIRONMENT=Production dotnet ef database update --project MessageSer
 - **BackgroundService 例外一律就地捕捉**：.NET 6+ 預設未捕捉例外會停掉整個 host，清除或下載失敗只能記 log 等下輪，不能讓服務跟著死
 - **檢視端沒有登入機制**：IP 白名單是最低防護，空白名單視為全拒
 - **檢視端 DbContext 不設全域 NoTracking**：設定頁需要寫入，只在真正唯讀的查詢路徑個別加 `.AsNoTracking()`（見上方「資料庫存取」）
+- **`ViewerSettings.Id` 是固定值而非資料庫產生**（`ValueGeneratedNever`）：這是單列設定，Id 恆為 1。留成 SQL Server identity 的話，程式碼補建這列時帶著 Id=1 會撞上 `IDENTITY_INSERT` 關閉而失敗
+- **往前翻頁一定要能前進**：純粹「以游標時間往前 N 天」開窗，遇到比視窗還長的沉寂期會永遠回空、游標不動，按鈕看起來可按卻沒反應。API 因此會在視窗落空時把視窗錨定到下一則更早訊息
 
 ## 日誌（NLog）
 
@@ -227,6 +229,6 @@ dotnet test
 ```
 
 - `MessageService.Tests`：簽章驗證、五種型別分流（含 audio）、防重送、背景下載（成功/轉檔輪詢/轉檔失敗/重試耗盡/啟動接續）、群組/成員名稱快取（新增/過期更新/API 失敗 fallback）、保留期清除（含 CASCADE 驗證）、Controller 整合測試（401/200/畸形 body 仍 200）
-- `MessageService.Web.Tests`：Groups/Messages API（分頁游標、hasMore、遮蔽套用）、內容串流（200/206/416/malformed Range）、Settings API（CRUD、群組範圍替換）、`MaskingService`/`MaskingRuleSet`（含名稱遮蔽邊界情況）、IP 白名單 middleware（允許/拒絕/空白名單/CIDR）
+- `MessageService.Web.Tests`：Groups/Messages API（分頁游標、hasMore、空視窗仍回 latestId、沉寂期長於視窗仍能翻頁、遮蔽套用）、內容串流（200/206/416/malformed Range）、Settings API（CRUD、群組範圍替換、單列設定被刪後補建）、`MaskingService`/`MaskingRuleSet`（含名稱遮蔽邊界情況）、IP 白名單 middleware（允許/拒絕/空白名單/CIDR）
 
 測試都使用 SQLite（in-memory 或暫存檔），Web 端整合測試用 `IStartupFilter` 在 TestServer 補一個固定來源 IP（TestServer 的請求沒有真正 TCP 連線，`Connection.RemoteIpAddress` 預設是 null）。

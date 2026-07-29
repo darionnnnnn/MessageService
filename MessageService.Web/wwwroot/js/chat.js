@@ -3,14 +3,22 @@
 
     const POLL_INTERVAL_MS = 4000;
     const NEAR_BOTTOM_THRESHOLD_PX = 80;
+    const INITIAL_DAYS = 3;
+    const LOAD_MORE_DAYS = 7;
+    // 與 MessagesController.MaxDays 對齊；超過就別再放大視窗，免得按鈕變成按了沒反應
+    const MAX_DAYS_WINDOW = 3650;
     const AVATAR_COLORS = ['#f28b82', '#fbbc04', '#34a853', '#4285f4', '#a142f4', '#ff6d01', '#00acc1', '#c2185b'];
 
     const state = {
         groupId: null,
         oldestId: null,
         newestId: null,
+        daysWindow: INITIAL_DAYS,
         hasMoreOlder: false,
         loadingOlder: false,
+        polling: false,
+        // 每次切換群組就 +1；非同步請求回來時若對不上，代表是前一個群組的過期回應，必須丟棄
+        requestToken: 0,
         following: true,
         unreadCount: 0,
         pendingContentIds: new Set(),
@@ -343,20 +351,44 @@
     }
 
     async function selectGroup(groupId) {
+        const token = ++state.requestToken;
+
         state.groupId = groupId;
         state.oldestId = null;
         state.newestId = null;
+        state.daysWindow = INITIAL_DAYS;
         state.hasMoreOlder = false;
-        state.pendingContentIds.clear();
-        state.lastAppendedDateKey = null;
-        state.lastAppendedSenderId = null;
         setFollowing(true);
+        clearMessageList();
 
-        els.messageList.innerHTML = '';
         els.groupSelect.value = groupId;
         updateLoadMoreButton();
 
-        const page = await fetchJson(`/api/groups/${encodeURIComponent(groupId)}/messages?days=3`);
+        try {
+            const page = await fetchJson(
+                `/api/groups/${encodeURIComponent(groupId)}/messages?days=${state.daysWindow}`);
+            if (token !== state.requestToken) {
+                return;
+            }
+            renderWindow(page);
+            setConnectionOk(true);
+        } catch {
+            if (token === state.requestToken) {
+                setConnectionOk(false);
+            }
+        }
+    }
+
+    function clearMessageList() {
+        els.messageList.innerHTML = '';
+        state.pendingContentIds.clear();
+        state.lastAppendedDateKey = null;
+        state.lastAppendedSenderId = null;
+    }
+
+    /// 用一次完整的天數視窗查詢結果重繪整個清單（初次載入、以及沒有游標可用時的「載入更早」都走這裡）
+    function renderWindow(page) {
+        clearMessageList();
         appendMessages(page.messages, false);
         if (page.messages.length > 0) {
             state.oldestId = page.messages[0].id;
@@ -373,19 +405,40 @@
     }
 
     async function loadOlder() {
-        if (state.loadingOlder || !state.hasMoreOlder || state.oldestId == null) {
+        if (state.loadingOlder || !state.hasMoreOlder) {
             return;
         }
+        const token = state.requestToken;
+        // 目前視窗內一則訊息都沒有（但更早還有歷史）時沒有游標可用，改成把天數視窗往前拉並重繪；
+        // 否則按鈕看起來可按、按下去卻什麼都不會發生
+        const growWindow = state.oldestId == null;
+        if (growWindow && state.daysWindow >= MAX_DAYS_WINDOW) {
+            state.hasMoreOlder = false;
+            updateLoadMoreButton();
+            return;
+        }
+
         state.loadingOlder = true;
         els.loadMoreBtn.disabled = true;
         try {
-            const page = await fetchJson(
-                `/api/groups/${encodeURIComponent(state.groupId)}/messages?beforeId=${state.oldestId}&days=7`);
-            if (page.messages.length > 0) {
-                prependMessages(page.messages);
-                state.oldestId = page.messages[0].id;
+            const url = growWindow
+                ? `/api/groups/${encodeURIComponent(state.groupId)}/messages?days=${state.daysWindow + LOAD_MORE_DAYS}`
+                : `/api/groups/${encodeURIComponent(state.groupId)}/messages?beforeId=${state.oldestId}&days=${LOAD_MORE_DAYS}`;
+            const page = await fetchJson(url);
+            if (token !== state.requestToken) {
+                return;
             }
-            state.hasMoreOlder = page.hasMore;
+
+            if (growWindow) {
+                state.daysWindow += LOAD_MORE_DAYS;
+                renderWindow(page);
+            } else {
+                if (page.messages.length > 0) {
+                    prependMessages(page.messages);
+                    state.oldestId = page.messages[0].id;
+                }
+                state.hasMoreOlder = page.hasMore;
+            }
             setConnectionOk(true);
         } catch {
             setConnectionOk(false);
@@ -396,13 +449,19 @@
     }
 
     async function pollNewer() {
-        if (!state.groupId || document.hidden) {
+        // 連線慢時輪詢可能比間隔還久，沒有這個旗標的話兩輪會讀到同一個 newestId 而把訊息插兩次
+        if (!state.groupId || document.hidden || state.polling || state.loadingOlder) {
             return;
         }
+        const token = state.requestToken;
+        state.polling = true;
         try {
             if (state.newestId != null) {
                 const page = await fetchJson(
                     `/api/groups/${encodeURIComponent(state.groupId)}/messages?afterId=${state.newestId}`);
+                if (token !== state.requestToken) {
+                    return;
+                }
                 if (page.messages.length > 0) {
                     const wasFollowing = state.following;
                     appendMessages(page.messages, true);
@@ -415,19 +474,24 @@
                     }
                 }
             }
-            await pollPendingStatuses();
+            await pollPendingStatuses(token);
             setConnectionOk(true);
         } catch {
             setConnectionOk(false);
+        } finally {
+            state.polling = false;
         }
     }
 
-    async function pollPendingStatuses() {
+    async function pollPendingStatuses(token) {
         if (state.pendingContentIds.size === 0) {
             return;
         }
         const ids = Array.from(state.pendingContentIds).join(',');
         const statuses = await fetchJson(`/api/messages/statuses?ids=${ids}`);
+        if (token !== state.requestToken) {
+            return;
+        }
         for (const status of statuses) {
             if (status.downloadStatus !== 'Pending') {
                 state.pendingContentIds.delete(status.contentId);

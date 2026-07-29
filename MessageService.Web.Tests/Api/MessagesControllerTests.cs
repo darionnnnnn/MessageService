@@ -129,6 +129,30 @@ public class MessagesControllerTests : IDisposable
     }
 
     [Fact]
+    public async Task GetMessages_BeforeId_GapLongerThanWindow_StillReturnsNextOlderMessage()
+    {
+        // 群組沉寂比一個視窗還久時，若死守「游標時間往前 days 天」會永遠回空、游標不前進，
+        // 使用者按「載入更早」就會毫無反應
+        var now = DateTimeOffset.UtcNow;
+        long cursorId = 0;
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            var ancient = TextMessage("e1", "U1", now.AddDays(-90), "90 天前");
+            var cursor = TextMessage("e2", "U1", now.AddDays(-1), "昨天");
+            dbContext.GroupMessages.AddRange(ancient, cursor);
+            await dbContext.SaveChangesAsync();
+            cursorId = cursor.Id;
+        });
+
+        var page = await _fixture.Client.GetFromJsonAsync<MessagesPageDto>(
+            $"/api/groups/{GroupId}/messages?beforeId={cursorId}&days=7");
+
+        var message = Assert.Single(page!.Messages);
+        Assert.Equal("90 天前", message.Text);
+        Assert.False(page.HasMore);
+    }
+
+    [Fact]
     public async Task GetMessages_AfterId_ReturnsOnlyNewerMessages()
     {
         var now = DateTimeOffset.UtcNow;

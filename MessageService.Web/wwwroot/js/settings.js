@@ -224,7 +224,12 @@
                     body: JSON.stringify({ alias })
                 });
             } else {
-                await fetch(`/api/settings/aliases/${encodeURIComponent(userId)}`, { method: 'DELETE' });
+                // 清空別名等於刪除；本來就沒有別名時會回 404，那也是想要的結果，
+                // 但其他錯誤碼要真的當成失敗，不能一律當成功
+                const response = await fetch(`/api/settings/aliases/${encodeURIComponent(userId)}`, { method: 'DELETE' });
+                if (!response.ok && response.status !== 404) {
+                    throw new Error(`HTTP ${response.status}`);
+                }
             }
             showToast('別名已更新');
         } catch {
