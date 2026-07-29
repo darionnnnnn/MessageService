@@ -79,11 +79,14 @@ dotnet user-secrets set "Line:ChannelAccessToken" "<你的 access token>"
 
 ### 本機串接 LINE 測試
 
-1. LINE Developers Console 建立 Messaging API channel，取得 Channel Secret / Access Token
-2. `dotnet run --project MessageService` 啟動本機服務
-3. 用 dev tunnel 或 ngrok 將本機 port 開成 HTTPS URL
-4. 在 LINE console 設定 Webhook URL 為 `https://<tunnel>/api/line/webhook` 並啟用
-5. 將 bot 拉進測試群組，發文字/貼圖/圖片/影片/語音/檔案各一，確認 SQLite 落地與 `DownloadStatus` 流轉
+完整的逐步操作（建立 Bot、取得金鑰、Webhook 設定、測試驗收、疑難排解）see **[LINE-BOT-SETUP.md](LINE-BOT-SETUP.md)**。快速版：
+
+1. LINE Developers Console 建立 Messaging API channel，**啟用 Allow bot to join group chats**（不開就完全收不到群組訊息）
+2. 取得 Channel Secret（Basic settings 分頁）與 Channel Access Token（Messaging API 分頁），用 user-secrets 寫入
+3. `dotnet run --project MessageService --urls http://localhost:5072` 啟動（刻意只掛 HTTP，避免 `UseHttpsRedirection` 把 LINE 的 webhook 轉址掉）
+4. 用 dev tunnel 或 ngrok 將該 port 開成 HTTPS URL
+5. 在 LINE console 設定 Webhook URL 為 `https://<tunnel>/api/line/webhook`、啟用 Use webhook，按 Verify 確認
+6. 將 bot 拉進測試群組，發文字/貼圖/圖片/影片/語音/檔案各一，確認 SQLite 落地與 `DownloadStatus` 流轉
 
 ---
 
