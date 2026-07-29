@@ -67,6 +67,7 @@ public class MessagesController(
 
         var userIds = rows.Select(r => r.UserId).Where(id => id is not null).Cast<string>().Distinct().ToList();
         var members = await dbContext.GroupMembers
+            .AsNoTracking()
             .Where(m => m.GroupId == groupId && userIds.Contains(m.UserId))
             .ToDictionaryAsync(m => m.UserId, cancellationToken);
 

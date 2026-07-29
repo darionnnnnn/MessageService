@@ -24,9 +24,6 @@ builder.Services.AddDbContext<MessageDbContext>(options =>
     {
         options.UseSqlite(builder.Configuration.GetConnectionString("Sqlite"));
     }
-
-    // 這個專案只讀不寫，關掉 change tracking 省記憶體、避免誤用
-    options.UseQueryTrackingBehavior(QueryTrackingBehavior.NoTracking);
 });
 
 builder.Services.AddScoped<ContentStreamService>();

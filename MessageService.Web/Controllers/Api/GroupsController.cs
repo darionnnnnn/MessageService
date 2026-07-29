@@ -18,6 +18,7 @@ public class GroupsController(MessageDbContext dbContext) : ControllerBase
             .ToListAsync(cancellationToken);
 
         var groupCache = await dbContext.Groups
+            .AsNoTracking()
             .Where(g => groupIds.Contains(g.GroupId))
             .ToDictionaryAsync(g => g.GroupId, cancellationToken);
 
