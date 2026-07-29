@@ -22,6 +22,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\MessageService\MessageService.csproj" />
+    <ProjectReference Include="..\MessageService.Data\MessageService.Data.csproj" />
   </ItemGroup>
 
 </Project>
