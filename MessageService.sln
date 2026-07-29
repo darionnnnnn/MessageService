@@ -9,6 +9,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MessageService.Tests", "Mes
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MessageService.Data", "MessageService.Data\MessageService.Data.csproj", "{FC1B0A49-0A8C-4B80-B2E4-ABCC29DCCD93}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MessageService.Web", "MessageService.Web\MessageService.Web.csproj", "{1EA465B6-3325-46A1-B103-0823A02EC70D}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -55,6 +57,18 @@ Global
 		{FC1B0A49-0A8C-4B80-B2E4-ABCC29DCCD93}.Release|x64.Build.0 = Release|Any CPU
 		{FC1B0A49-0A8C-4B80-B2E4-ABCC29DCCD93}.Release|x86.ActiveCfg = Release|Any CPU
 		{FC1B0A49-0A8C-4B80-B2E4-ABCC29DCCD93}.Release|x86.Build.0 = Release|Any CPU
+		{1EA465B6-3325-46A1-B103-0823A02EC70D}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{1EA465B6-3325-46A1-B103-0823A02EC70D}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{1EA465B6-3325-46A1-B103-0823A02EC70D}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{1EA465B6-3325-46A1-B103-0823A02EC70D}.Debug|x64.Build.0 = Debug|Any CPU
+		{1EA465B6-3325-46A1-B103-0823A02EC70D}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{1EA465B6-3325-46A1-B103-0823A02EC70D}.Debug|x86.Build.0 = Debug|Any CPU
+		{1EA465B6-3325-46A1-B103-0823A02EC70D}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{1EA465B6-3325-46A1-B103-0823A02EC70D}.Release|Any CPU.Build.0 = Release|Any CPU
+		{1EA465B6-3325-46A1-B103-0823A02EC70D}.Release|x64.ActiveCfg = Release|Any CPU
+		{1EA465B6-3325-46A1-B103-0823A02EC70D}.Release|x64.Build.0 = Release|Any CPU
+		{1EA465B6-3325-46A1-B103-0823A02EC70D}.Release|x86.ActiveCfg = Release|Any CPU
+		{1EA465B6-3325-46A1-B103-0823A02EC70D}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
