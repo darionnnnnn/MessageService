@@ -30,7 +30,7 @@ builder.Services.AddDbContext<MessageDbContext>(options =>
 });
 
 builder.Services.AddScoped<ContentStreamService>();
-builder.Services.AddScoped<IMaskingService, PassthroughMaskingService>();
+builder.Services.AddScoped<IMaskingService, MaskingService>();
 
 var app = builder.Build();
 

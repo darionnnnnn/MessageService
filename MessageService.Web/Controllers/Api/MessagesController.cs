@@ -70,11 +70,14 @@ public class MessagesController(
             .Where(m => m.GroupId == groupId && userIds.Contains(m.UserId))
             .ToDictionaryAsync(m => m.UserId, cancellationToken);
 
+        // 一個請求只載入一次遮蔽規則，套用到每則訊息時全是同步運算，不會每則訊息各打一次 DB
+        var maskingRules = await maskingService.LoadRulesAsync(cancellationToken);
+
         var messages = rows.Select(r =>
         {
             members.TryGetValue(r.UserId ?? "", out var member);
-            var displayName = r.UserId is null ? "(未知)" : maskingService.ResolveDisplayName(r.UserId, member?.DisplayName);
-            var text = r.Text is null ? null : maskingService.MaskText(groupId, r.Text);
+            var displayName = r.UserId is null ? "(未知)" : maskingRules.ResolveDisplayName(r.UserId, member?.DisplayName);
+            var text = r.Text is null ? null : maskingRules.MaskText(groupId, r.Text);
             var content = r.Content is null
                 ? null
                 : new MessageContentDto(r.Content.Id, r.Content.FileName, r.Content.ContentType, r.Content.DownloadStatus.ToString());

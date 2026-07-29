@@ -107,8 +107,9 @@ public class MessagesControllerTests : IDisposable
     }
 
     [Fact]
-    public async Task GetMessages_DisplayName_FallsBackToUserIdWhenNoCachedProfile()
+    public async Task GetMessages_DisplayName_IsMaskedByDefault_AndFallsBackToMaskedUserIdWhenNoCachedProfile()
     {
+        // 預設 ViewerSettings.NameDisplayMode = MaskMiddle（migration 種子值），驗證真的 MaskingService 有接進來
         var now = DateTimeOffset.UtcNow;
         await _fixture.SeedAsync(async dbContext =>
         {
@@ -120,8 +121,24 @@ public class MessagesControllerTests : IDisposable
 
         var page = await _fixture.Client.GetFromJsonAsync<MessagesPageDto>($"/api/groups/{GroupId}/messages?days=3");
 
-        Assert.Equal("小明", page!.Messages.Single(m => m.UserId == "U1").DisplayName);
-        Assert.Equal("U2", page.Messages.Single(m => m.UserId == "U2").DisplayName);
+        Assert.Equal("小*", page!.Messages.Single(m => m.UserId == "U1").DisplayName);
+        Assert.Equal("U*", page.Messages.Single(m => m.UserId == "U2").DisplayName);
+    }
+
+    [Fact]
+    public async Task GetMessages_Text_IsMaskedByActiveKeywordRules()
+    {
+        var now = DateTimeOffset.UtcNow;
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            dbContext.MaskKeywords.Add(new MaskKeyword { Keyword = "密碼", ApplyToAllGroups = true });
+            dbContext.GroupMessages.Add(TextMessage("e1", "U1", now, "我的密碼是1234"));
+            await Task.CompletedTask;
+        });
+
+        var page = await _fixture.Client.GetFromJsonAsync<MessagesPageDto>($"/api/groups/{GroupId}/messages?days=3");
+
+        Assert.Equal("我的**是1234", Assert.Single(page!.Messages).Text);
     }
 
     [Fact]

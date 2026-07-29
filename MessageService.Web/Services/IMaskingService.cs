@@ -1,8 +1,7 @@
 namespace MessageService.Web.Services;
 
-/// <summary>套用關鍵字遮蔽與名稱顯示模式。實作於獨立任務中補上；此為 Messages API 提前定義的介面契約。</summary>
+/// <summary>每個請求呼叫一次，載入當下的遮蔽設定與規則，避免每則訊息各打一次 DB。</summary>
 public interface IMaskingService
 {
-    string MaskText(string groupId, string text);
-    string ResolveDisplayName(string userId, string? rawDisplayName);
+    Task<IMaskingRuleSet> LoadRulesAsync(CancellationToken cancellationToken);
 }
