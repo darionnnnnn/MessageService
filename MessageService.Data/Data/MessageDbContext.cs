@@ -10,6 +10,10 @@ public class MessageDbContext(DbContextOptions<MessageDbContext> options) : DbCo
     public DbSet<MessageContent> MessageContents => Set<MessageContent>();
     public DbSet<Group> Groups => Set<Group>();
     public DbSet<GroupMember> GroupMembers => Set<GroupMember>();
+    public DbSet<ViewerSettings> ViewerSettings => Set<ViewerSettings>();
+    public DbSet<MaskKeyword> MaskKeywords => Set<MaskKeyword>();
+    public DbSet<MaskKeywordGroup> MaskKeywordGroups => Set<MaskKeywordGroup>();
+    public DbSet<UserAlias> UserAliases => Set<UserAlias>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -29,6 +33,23 @@ public class MessageDbContext(DbContextOptions<MessageDbContext> options) : DbCo
 
         modelBuilder.Entity<Group>().HasKey(g => g.GroupId);
         modelBuilder.Entity<GroupMember>().HasKey(m => new { m.GroupId, m.UserId });
+
+        modelBuilder.Entity<ViewerSettings>(entity =>
+        {
+            entity.Property(v => v.NameDisplayMode).HasConversion<string>();
+            entity.HasData(new ViewerSettings { Id = Models.ViewerSettings.SingletonId });
+        });
+
+        modelBuilder.Entity<MaskKeyword>()
+            .HasMany(k => k.Groups)
+            .WithOne(g => g.MaskKeyword)
+            .HasForeignKey(g => g.MaskKeywordId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<MaskKeywordGroup>()
+            .HasKey(g => new { g.MaskKeywordId, g.GroupId });
+
+        modelBuilder.Entity<UserAlias>().HasKey(a => a.UserId);
 
         // SQLite only supports equality on DateTimeOffset, not <, > comparisons — needed for
         // retention cleanup's and profile cache staleness date-range queries. SQL Server keeps the
