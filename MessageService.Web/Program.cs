@@ -1,5 +1,6 @@
 using MessageService.Data;
 using MessageService.Web.Middleware;
+using MessageService.Web.Services;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.EntityFrameworkCore;
 using NLog.Web;
@@ -27,6 +28,9 @@ builder.Services.AddDbContext<MessageDbContext>(options =>
     // 這個專案只讀不寫，關掉 change tracking 省記憶體、避免誤用
     options.UseQueryTrackingBehavior(QueryTrackingBehavior.NoTracking);
 });
+
+builder.Services.AddScoped<ContentStreamService>();
+builder.Services.AddScoped<IMaskingService, PassthroughMaskingService>();
 
 var app = builder.Build();
 
