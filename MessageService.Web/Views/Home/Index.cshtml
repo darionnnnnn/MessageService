@@ -1,8 +1,38 @@
-﻿@{
-    ViewData["Title"] = "Home Page";
+@{
+    ViewData["Title"] = "對話";
 }
 
-<div class="text-center">
-    <h1 class="display-4">Welcome</h1>
-    <p>Learn about <a href="https://learn.microsoft.com/aspnet/core">building Web apps with ASP.NET Core</a>.</p>
+<div id="chat-app" class="chat-app">
+    <div class="chat-toolbar">
+        <select id="group-select" class="form-select form-select-sm" aria-label="選擇群組">
+            <option value="">載入群組中…</option>
+        </select>
+    </div>
+
+    <div id="connection-banner" class="connection-banner d-none">連線中斷，正在嘗試重新連線…</div>
+
+    <div class="load-more-row">
+        <button id="load-more-btn" type="button" class="btn btn-outline-secondary btn-sm" disabled>載入更早 7 天</button>
+    </div>
+
+    <div id="message-list" class="message-list"></div>
+
+    <button id="scroll-bottom-btn" type="button" class="scroll-bottom-btn d-none">
+        <span id="unread-badge" class="badge text-bg-danger d-none">0</span>
+        <span>回到最新</span>
+    </button>
 </div>
+
+<div class="modal fade" id="image-modal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered modal-lg">
+        <div class="modal-content bg-dark">
+            <div class="modal-body p-0 text-center">
+                <img id="image-modal-img" src="" class="img-fluid" alt="圖片預覽">
+            </div>
+        </div>
+    </div>
+</div>
+
+@section Scripts {
+    <script src="~/js/chat.js" asp-append-version="true"></script>
+}

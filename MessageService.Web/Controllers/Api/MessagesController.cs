@@ -91,7 +91,18 @@ public class MessagesController(
         var hasMore = afterId is null &&
             await dbContext.GroupMessages.AnyAsync(m => m.GroupId == groupId && m.Id < oldestFetchedId, cancellationToken);
 
-        return Ok(new MessagesPageDto(messages, hasMore));
+        // 初載時即使畫面上顯示的天數視窗內剛好沒有訊息，前端輪詢仍需要一個基準 id 才能偵測後續新訊息；
+        // 往前加載/輪詢本身不需要，只有初載才算，省不必要的查詢
+        long? latestId = null;
+        if (beforeId is null && afterId is null)
+        {
+            latestId = await dbContext.GroupMessages
+                .Where(m => m.GroupId == groupId)
+                .Select(m => (long?)m.Id)
+                .MaxAsync(cancellationToken);
+        }
+
+        return Ok(new MessagesPageDto(messages, hasMore, latestId));
     }
 
     [HttpGet("api/messages/{id:long}/content")]

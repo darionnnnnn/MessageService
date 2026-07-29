@@ -1,0 +1,473 @@
+(() => {
+    'use strict';
+
+    const POLL_INTERVAL_MS = 4000;
+    const NEAR_BOTTOM_THRESHOLD_PX = 80;
+    const AVATAR_COLORS = ['#f28b82', '#fbbc04', '#34a853', '#4285f4', '#a142f4', '#ff6d01', '#00acc1', '#c2185b'];
+
+    const state = {
+        groupId: null,
+        oldestId: null,
+        newestId: null,
+        hasMoreOlder: false,
+        loadingOlder: false,
+        following: true,
+        unreadCount: 0,
+        pendingContentIds: new Set(),
+        lastAppendedDateKey: null,
+        lastAppendedSenderId: null,
+        connectionOk: true
+    };
+
+    const els = {};
+
+    function $(id) {
+        return document.getElementById(id);
+    }
+
+    async function fetchJson(url, options) {
+        const response = await fetch(url, options);
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status} for ${url}`);
+        }
+        return response.json();
+    }
+
+    function setConnectionOk(ok) {
+        if (ok === state.connectionOk) {
+            return;
+        }
+        state.connectionOk = ok;
+        els.connectionBanner.classList.toggle('d-none', ok);
+    }
+
+    function avatarColorFor(key) {
+        let hash = 0;
+        for (let i = 0; i < key.length; i++) {
+            hash = (hash * 31 + key.charCodeAt(i)) >>> 0;
+        }
+        return AVATAR_COLORS[hash % AVATAR_COLORS.length];
+    }
+
+    function dateKey(iso) {
+        const d = new Date(iso);
+        return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+    }
+
+    function formatDateSeparator(iso) {
+        const d = new Date(iso);
+        const now = new Date();
+        const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        const that = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+        const diffDays = Math.round((today - that) / 86400000);
+        if (diffDays === 0) return '今天';
+        if (diffDays === 1) return '昨天';
+        const weekday = ['日', '一', '二', '三', '四', '五', '六'][d.getDay()];
+        return `${d.getMonth() + 1}/${d.getDate()}（${weekday}）`;
+    }
+
+    function formatTime(iso) {
+        return new Date(iso).toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit', hour12: false });
+    }
+
+    function createDateSeparator(iso) {
+        const sep = document.createElement('div');
+        sep.className = 'date-separator';
+        const span = document.createElement('span');
+        span.textContent = formatDateSeparator(iso);
+        sep.appendChild(span);
+        return sep;
+    }
+
+    // === 訊息內容渲染 ===
+
+    function buildReadyContentNode(messageType, contentId, fileName) {
+        const url = `/api/messages/${contentId}/content`;
+
+        if (messageType === 'image') {
+            const img = document.createElement('img');
+            img.className = 'msg-image';
+            img.loading = 'lazy';
+            img.src = url;
+            img.alt = '圖片';
+            img.addEventListener('click', () => openImageModal(url));
+            return img;
+        }
+        if (messageType === 'video') {
+            const video = document.createElement('video');
+            video.className = 'msg-video';
+            video.controls = true;
+            video.preload = 'none';
+            video.src = url;
+            return video;
+        }
+        if (messageType === 'audio') {
+            const audio = document.createElement('audio');
+            audio.className = 'msg-audio';
+            audio.controls = true;
+            audio.preload = 'none';
+            audio.src = url;
+            return audio;
+        }
+        if (messageType === 'file') {
+            const wrap = document.createElement('div');
+            wrap.className = 'msg-file';
+            const icon = document.createElement('span');
+            icon.textContent = '📄';
+            wrap.appendChild(icon);
+            const link = document.createElement('a');
+            link.href = url;
+            link.textContent = fileName || '下載檔案';
+            link.target = '_blank';
+            link.rel = 'noopener';
+            wrap.appendChild(link);
+            return wrap;
+        }
+
+        const fallback = document.createElement('div');
+        fallback.textContent = '（不支援的訊息類型）';
+        return fallback;
+    }
+
+    function buildPendingNode(contentId, messageType, fileName) {
+        const wrap = document.createElement('div');
+        wrap.className = 'msg-pending';
+        wrap.dataset.contentId = String(contentId);
+        wrap.dataset.messageType = messageType;
+        wrap.dataset.fileName = fileName || '';
+
+        const spinner = document.createElement('span');
+        spinner.className = 'spinner-border spinner-border-sm';
+        spinner.setAttribute('role', 'status');
+        wrap.appendChild(spinner);
+
+        const label = document.createElement('span');
+        label.textContent = '內容抓取中…';
+        wrap.appendChild(label);
+
+        return wrap;
+    }
+
+    function buildFailedNode() {
+        const wrap = document.createElement('div');
+        wrap.className = 'msg-failed';
+        wrap.textContent = '⚠ 內容抓取失敗';
+        return wrap;
+    }
+
+    function buildContentNode(message) {
+        const type = message.messageType;
+
+        if (type === 'text') {
+            const div = document.createElement('div');
+            div.textContent = message.text ?? '';
+            return div;
+        }
+        if (type === 'sticker') {
+            const div = document.createElement('div');
+            div.textContent = message.text ?? '(貼圖)';
+            return div;
+        }
+
+        const content = message.content;
+        if (!content) {
+            const div = document.createElement('div');
+            div.textContent = message.text ?? '';
+            return div;
+        }
+
+        if (content.downloadStatus === 'Pending') {
+            return buildPendingNode(content.id, type, content.fileName);
+        }
+        if (content.downloadStatus === 'Failed') {
+            return buildFailedNode();
+        }
+        return buildReadyContentNode(type, content.id, content.fileName);
+    }
+
+    function createMessageRow(message, showAvatarAndName) {
+        const row = document.createElement('div');
+        row.className = 'message-row' + (showAvatarAndName ? ' show-avatar' : '');
+        row.dataset.messageId = String(message.id);
+
+        const avatar = document.createElement('div');
+        avatar.className = 'avatar';
+        const avatarKey = message.userId || message.displayName || '?';
+        avatar.style.background = avatarColorFor(avatarKey);
+        avatar.textContent = (message.displayName || '?').charAt(0);
+        avatar.title = message.userId ? `${message.displayName}（${message.userId}）` : message.displayName;
+        row.appendChild(avatar);
+
+        const group = document.createElement('div');
+        group.className = 'message-group';
+
+        if (showAvatarAndName) {
+            const name = document.createElement('div');
+            name.className = 'message-sender-name';
+            name.textContent = message.displayName;
+            if (message.userId) {
+                name.title = message.userId;
+            }
+            group.appendChild(name);
+        }
+
+        const bubble = document.createElement('div');
+        bubble.className = 'bubble' + (message.messageType === 'sticker' ? ' sticker' : '');
+        bubble.appendChild(buildContentNode(message));
+
+        const time = document.createElement('span');
+        time.className = 'msg-time';
+        time.textContent = formatTime(message.eventTimestamp);
+        bubble.appendChild(time);
+
+        group.appendChild(bubble);
+        row.appendChild(group);
+
+        if (message.content && message.content.downloadStatus === 'Pending') {
+            state.pendingContentIds.add(message.content.id);
+        }
+
+        return row;
+    }
+
+    function appendMessages(messages, animate) {
+        const list = els.messageList;
+        for (const message of messages) {
+            const key = dateKey(message.eventTimestamp);
+            if (key !== state.lastAppendedDateKey) {
+                list.appendChild(createDateSeparator(message.eventTimestamp));
+                state.lastAppendedDateKey = key;
+                state.lastAppendedSenderId = null;
+            }
+
+            const showAvatarAndName = message.userId !== state.lastAppendedSenderId;
+            state.lastAppendedSenderId = message.userId;
+
+            const row = createMessageRow(message, showAvatarAndName);
+            if (animate) {
+                row.classList.add('message-enter');
+            }
+            list.appendChild(row);
+        }
+    }
+
+    function prependMessages(messages) {
+        const list = els.messageList;
+        const previousScrollHeight = list.scrollHeight;
+        const previousScrollTop = list.scrollTop;
+
+        const fragment = document.createDocumentFragment();
+        let lastDateKey = null;
+        let lastSenderId = null;
+        for (const message of messages) {
+            const key = dateKey(message.eventTimestamp);
+            if (key !== lastDateKey) {
+                fragment.appendChild(createDateSeparator(message.eventTimestamp));
+                lastDateKey = key;
+                lastSenderId = null;
+            }
+            const showAvatarAndName = message.userId !== lastSenderId;
+            lastSenderId = message.userId;
+            fragment.appendChild(createMessageRow(message, showAvatarAndName));
+        }
+
+        list.insertBefore(fragment, list.firstChild);
+        list.scrollTop = previousScrollTop + (list.scrollHeight - previousScrollHeight);
+    }
+
+    function updateContentNode(status) {
+        const pendingEl = els.messageList.querySelector(`.msg-pending[data-content-id="${status.contentId}"]`);
+        if (!pendingEl) {
+            return;
+        }
+        const replacement = status.downloadStatus === 'Completed'
+            ? buildReadyContentNode(pendingEl.dataset.messageType, status.contentId, pendingEl.dataset.fileName)
+            : buildFailedNode();
+        pendingEl.replaceWith(replacement);
+    }
+
+    function openImageModal(url) {
+        els.imageModalImg.src = url;
+        bootstrap.Modal.getOrCreateInstance(els.imageModal).show();
+    }
+
+    // === 置底跟隨 ===
+
+    function isNearBottom() {
+        const list = els.messageList;
+        return list.scrollHeight - list.scrollTop - list.clientHeight < NEAR_BOTTOM_THRESHOLD_PX;
+    }
+
+    function scrollToBottom(smooth) {
+        els.messageList.scrollTo({ top: els.messageList.scrollHeight, behavior: smooth ? 'smooth' : 'auto' });
+    }
+
+    function updateFollowUi() {
+        els.scrollBottomBtn.classList.toggle('d-none', state.following);
+        els.unreadBadge.classList.toggle('d-none', state.unreadCount === 0);
+        els.unreadBadge.textContent = String(state.unreadCount);
+    }
+
+    function setFollowing(following) {
+        state.following = following;
+        if (following) {
+            state.unreadCount = 0;
+        }
+        updateFollowUi();
+    }
+
+    // === 資料載入 ===
+
+    async function loadGroups() {
+        const groups = await fetchJson('/api/groups');
+        els.groupSelect.innerHTML = '';
+
+        if (groups.length === 0) {
+            const opt = document.createElement('option');
+            opt.value = '';
+            opt.textContent = '尚無群組資料';
+            els.groupSelect.appendChild(opt);
+            els.groupSelect.disabled = true;
+            return;
+        }
+
+        els.groupSelect.disabled = false;
+        for (const group of groups) {
+            const opt = document.createElement('option');
+            opt.value = group.groupId;
+            opt.textContent = group.displayName;
+            els.groupSelect.appendChild(opt);
+        }
+
+        await selectGroup(groups[0].groupId);
+    }
+
+    async function selectGroup(groupId) {
+        state.groupId = groupId;
+        state.oldestId = null;
+        state.newestId = null;
+        state.hasMoreOlder = false;
+        state.pendingContentIds.clear();
+        state.lastAppendedDateKey = null;
+        state.lastAppendedSenderId = null;
+        setFollowing(true);
+
+        els.messageList.innerHTML = '';
+        els.groupSelect.value = groupId;
+        updateLoadMoreButton();
+
+        const page = await fetchJson(`/api/groups/${encodeURIComponent(groupId)}/messages?days=3`);
+        appendMessages(page.messages, false);
+        if (page.messages.length > 0) {
+            state.oldestId = page.messages[0].id;
+        }
+        state.newestId = page.latestId ?? state.newestId;
+        state.hasMoreOlder = page.hasMore;
+        updateLoadMoreButton();
+        scrollToBottom(false);
+    }
+
+    function updateLoadMoreButton() {
+        els.loadMoreBtn.disabled = !state.hasMoreOlder;
+        els.loadMoreBtn.textContent = state.hasMoreOlder ? '載入更早 7 天' : '沒有更早的訊息';
+    }
+
+    async function loadOlder() {
+        if (state.loadingOlder || !state.hasMoreOlder || state.oldestId == null) {
+            return;
+        }
+        state.loadingOlder = true;
+        els.loadMoreBtn.disabled = true;
+        try {
+            const page = await fetchJson(
+                `/api/groups/${encodeURIComponent(state.groupId)}/messages?beforeId=${state.oldestId}&days=7`);
+            if (page.messages.length > 0) {
+                prependMessages(page.messages);
+                state.oldestId = page.messages[0].id;
+            }
+            state.hasMoreOlder = page.hasMore;
+            setConnectionOk(true);
+        } catch {
+            setConnectionOk(false);
+        } finally {
+            state.loadingOlder = false;
+            updateLoadMoreButton();
+        }
+    }
+
+    async function pollNewer() {
+        if (!state.groupId || document.hidden) {
+            return;
+        }
+        try {
+            if (state.newestId != null) {
+                const page = await fetchJson(
+                    `/api/groups/${encodeURIComponent(state.groupId)}/messages?afterId=${state.newestId}`);
+                if (page.messages.length > 0) {
+                    const wasFollowing = state.following;
+                    appendMessages(page.messages, true);
+                    state.newestId = page.messages[page.messages.length - 1].id;
+                    if (wasFollowing) {
+                        scrollToBottom(true);
+                    } else {
+                        state.unreadCount += page.messages.length;
+                        updateFollowUi();
+                    }
+                }
+            }
+            await pollPendingStatuses();
+            setConnectionOk(true);
+        } catch {
+            setConnectionOk(false);
+        }
+    }
+
+    async function pollPendingStatuses() {
+        if (state.pendingContentIds.size === 0) {
+            return;
+        }
+        const ids = Array.from(state.pendingContentIds).join(',');
+        const statuses = await fetchJson(`/api/messages/statuses?ids=${ids}`);
+        for (const status of statuses) {
+            if (status.downloadStatus !== 'Pending') {
+                state.pendingContentIds.delete(status.contentId);
+                updateContentNode(status);
+            }
+        }
+    }
+
+    // === 初始化 ===
+
+    function init() {
+        els.groupSelect = $('group-select');
+        els.connectionBanner = $('connection-banner');
+        els.loadMoreBtn = $('load-more-btn');
+        els.messageList = $('message-list');
+        els.scrollBottomBtn = $('scroll-bottom-btn');
+        els.unreadBadge = $('unread-badge');
+        els.imageModal = $('image-modal');
+        els.imageModalImg = $('image-modal-img');
+
+        els.loadMoreBtn.addEventListener('click', loadOlder);
+        els.groupSelect.addEventListener('change', (e) => {
+            if (e.target.value) {
+                selectGroup(e.target.value);
+            }
+        });
+        els.scrollBottomBtn.addEventListener('click', () => {
+            setFollowing(true);
+            scrollToBottom(true);
+        });
+        els.messageList.addEventListener('scroll', () => {
+            const near = isNearBottom();
+            if (near !== state.following) {
+                setFollowing(near);
+            }
+        });
+
+        loadGroups().catch(() => setConnectionOk(false));
+        setInterval(pollNewer, POLL_INTERVAL_MS);
+    }
+
+    document.addEventListener('DOMContentLoaded', init);
+})();

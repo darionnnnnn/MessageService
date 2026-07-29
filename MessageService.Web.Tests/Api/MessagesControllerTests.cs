@@ -44,6 +44,49 @@ public class MessagesControllerTests : IDisposable
         Assert.Equal("recent-1", page.Messages[0].Text);
         Assert.Equal("recent-2", page.Messages[1].Text);
         Assert.True(page.HasMore);
+        Assert.Equal(page.Messages[1].Id, page.LatestId);
+    }
+
+    [Fact]
+    public async Task GetMessages_InitialLoad_EmptyWindowButOlderHistoryExists_StillReturnsLatestId()
+    {
+        // 群組在顯示視窗內剛好沒有訊息時，前端輪詢仍需要一個基準 id 才能偵測後續新訊息
+        var now = DateTimeOffset.UtcNow;
+        long oldMessageId = 0;
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            var oldMessage = TextMessage("e1", "U1", now.AddDays(-10), "too-old-to-show");
+            dbContext.GroupMessages.Add(oldMessage);
+            await dbContext.SaveChangesAsync();
+            oldMessageId = oldMessage.Id;
+        });
+
+        var page = await _fixture.Client.GetFromJsonAsync<MessagesPageDto>($"/api/groups/{GroupId}/messages?days=3");
+
+        Assert.Empty(page!.Messages);
+        Assert.Equal(oldMessageId, page.LatestId);
+    }
+
+    [Fact]
+    public async Task GetMessages_BeforeIdOrAfterId_LatestIdIsNull()
+    {
+        var now = DateTimeOffset.UtcNow;
+        long messageId = 0;
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            var message = TextMessage("e1", "U1", now, "hi");
+            dbContext.GroupMessages.Add(message);
+            await dbContext.SaveChangesAsync();
+            messageId = message.Id;
+        });
+
+        var afterPage = await _fixture.Client.GetFromJsonAsync<MessagesPageDto>(
+            $"/api/groups/{GroupId}/messages?afterId={messageId}");
+        Assert.Null(afterPage!.LatestId);
+
+        var beforePage = await _fixture.Client.GetFromJsonAsync<MessagesPageDto>(
+            $"/api/groups/{GroupId}/messages?beforeId={messageId}&days=3");
+        Assert.Null(beforePage!.LatestId);
     }
 
     [Fact]
