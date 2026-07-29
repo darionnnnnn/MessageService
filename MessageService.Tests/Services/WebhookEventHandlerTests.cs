@@ -14,6 +14,7 @@ public class WebhookEventHandlerTests : IDisposable
     private readonly SqliteConnection _connection;
     private readonly MessageDbContext _dbContext;
     private readonly FakeContentDownloadQueue _queue = new();
+    private readonly FakeProfileRefreshQueue _profileRefreshQueue = new();
     private readonly WebhookEventHandler _handler;
 
     public WebhookEventHandlerTests()
@@ -22,7 +23,7 @@ public class WebhookEventHandlerTests : IDisposable
         var options = new DbContextOptionsBuilder<MessageDbContext>().UseSqlite(_connection).Options;
         _dbContext = new MessageDbContext(options);
         _dbContext.Database.EnsureCreated();
-        _handler = new WebhookEventHandler(_dbContext, _queue, NullLogger<WebhookEventHandler>.Instance);
+        _handler = new WebhookEventHandler(_dbContext, _queue, _profileRefreshQueue, NullLogger<WebhookEventHandler>.Instance);
     }
 
     public void Dispose()
@@ -58,6 +59,28 @@ public class WebhookEventHandlerTests : IDisposable
     }
 
     [Fact]
+    public async Task SavedMessage_EnqueuesProfileRefreshForGroupAndUser()
+    {
+        var evt = GroupMessageEvent("evt-1", new LineMessage { Id = "m1", Type = "text", Text = "hello" }, groupId: "G1", userId: "U1");
+
+        await _handler.HandleAsync(new WebhookRequest { Events = [evt] }, CancellationToken.None);
+
+        var task = Assert.Single(_profileRefreshQueue.Enqueued);
+        Assert.Equal("G1", task.GroupId);
+        Assert.Equal("U1", task.UserId);
+    }
+
+    [Fact]
+    public async Task DuplicateOrIgnoredEvent_DoesNotEnqueueProfileRefresh()
+    {
+        var evt = GroupMessageEvent("evt-1", new LineMessage { Id = "m1", Type = "location" });
+
+        await _handler.HandleAsync(new WebhookRequest { Events = [evt] }, CancellationToken.None);
+
+        Assert.Empty(_profileRefreshQueue.Enqueued);
+    }
+
+    [Fact]
     public async Task StickerMessage_SavesPlaceholderText()
     {
         var evt = GroupMessageEvent("evt-1", new LineMessage { Id = "m1", Type = "sticker" });
@@ -73,7 +96,8 @@ public class WebhookEventHandlerTests : IDisposable
     [Theory]
     [InlineData("image")]
     [InlineData("video")]
-    public async Task ImageOrVideoMessage_CreatesPendingContentAndEnqueues(string messageType)
+    [InlineData("audio")]
+    public async Task ImageOrVideoOrAudioMessage_CreatesPendingContentAndEnqueues(string messageType)
     {
         var evt = GroupMessageEvent("evt-1", new LineMessage { Id = "m1", Type = messageType });
 

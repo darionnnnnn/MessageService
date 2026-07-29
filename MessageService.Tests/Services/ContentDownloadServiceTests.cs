@@ -92,10 +92,12 @@ public class ContentDownloadServiceTests : IDisposable
         Assert.NotNull(content.CompletedAt);
     }
 
-    [Fact]
-    public async Task ProcessAsync_Video_WaitsForTranscodingThenDownloads()
+    [Theory]
+    [InlineData("video")]
+    [InlineData("audio")]
+    public async Task ProcessAsync_VideoOrAudio_WaitsForTranscodingThenDownloads(string messageType)
     {
-        var contentId = await SeedPendingContentAsync("video");
+        var contentId = await SeedPendingContentAsync(messageType);
         var callCount = 0;
         _contentClient.OnGetTranscodingStatus = _ =>
         {

@@ -8,10 +8,11 @@ namespace MessageService.Services;
 public class WebhookEventHandler(
     MessageDbContext dbContext,
     IContentDownloadQueue downloadQueue,
+    IProfileRefreshQueue profileRefreshQueue,
     ILogger<WebhookEventHandler> logger) : IWebhookEventHandler
 {
-    private static readonly HashSet<string> DownloadableTypes = ["image", "video", "file"];
-    private static readonly HashSet<string> SupportedTypes = ["text", "sticker", "image", "video", "file"];
+    private static readonly HashSet<string> DownloadableTypes = ["image", "video", "audio", "file"];
+    private static readonly HashSet<string> SupportedTypes = ["text", "sticker", "image", "video", "audio", "file"];
 
     public async Task HandleAsync(WebhookRequest request, CancellationToken cancellationToken)
     {
@@ -90,5 +91,7 @@ public class WebhookEventHandler(
         {
             downloadQueue.Enqueue(groupMessage.Content.Id);
         }
+
+        profileRefreshQueue.Enqueue(new ProfileRefreshTask(groupMessage.GroupId, groupMessage.UserId));
     }
 }

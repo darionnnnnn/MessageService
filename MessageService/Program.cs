@@ -19,6 +19,7 @@ builder.Services.AddSwaggerGen();
 builder.Services.Configure<LineOptions>(builder.Configuration.GetSection(LineOptions.SectionName));
 builder.Services.Configure<RetentionOptions>(builder.Configuration.GetSection(RetentionOptions.SectionName));
 builder.Services.Configure<ContentDownloadOptions>(builder.Configuration.GetSection(ContentDownloadOptions.SectionName));
+builder.Services.Configure<ProfileCacheOptions>(builder.Configuration.GetSection(ProfileCacheOptions.SectionName));
 
 var databaseProvider = builder.Configuration["Database:Provider"] ?? "Sqlite";
 builder.Services.AddDbContext<MessageDbContext>(options =>
@@ -34,15 +35,19 @@ builder.Services.AddDbContext<MessageDbContext>(options =>
 });
 
 builder.Services.AddSingleton<IContentDownloadQueue, ContentDownloadQueue>();
+builder.Services.AddSingleton<IProfileRefreshQueue, ProfileRefreshQueue>();
 builder.Services.AddScoped<ILineSignatureValidator, LineSignatureValidator>();
 builder.Services.AddScoped<IWebhookEventHandler, WebhookEventHandler>();
 builder.Services.AddScoped<ILineContentClient, LineContentClient>();
+builder.Services.AddScoped<ILineProfileClient, LineProfileClient>();
 // 影片/檔案原檔可達數百 MB，預設 100 秒 timeout 不夠
 builder.Services.AddHttpClient(LineContentClient.HttpClientName,
     client => client.Timeout = TimeSpan.FromMinutes(10));
+builder.Services.AddHttpClient(LineProfileClient.HttpClientName);
 
 builder.Services.AddHostedService<ContentDownloadService>();
 builder.Services.AddHostedService<RetentionCleanupService>();
+builder.Services.AddHostedService<ProfileRefreshService>();
 
 var app = builder.Build();
 

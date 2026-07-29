@@ -80,12 +80,13 @@ public class ContentDownloadService(
 
         var lineMessageId = content.GroupMessage.LineMessageId;
 
-        if (content.GroupMessage.MessageType == "video")
+        // 影片與語音在 LINE 端都要等轉檔完成才能下載原檔，圖片/檔案不需要
+        if (content.GroupMessage.MessageType is "video" or "audio")
         {
             var transcoded = await WaitForTranscodingAsync(contentClient, lineMessageId, cancellationToken);
             if (!transcoded)
             {
-                logger.LogWarning("Video transcoding did not succeed for message {LineMessageId}, marking content {MessageContentId} as Failed",
+                logger.LogWarning("Transcoding did not succeed for message {LineMessageId}, marking content {MessageContentId} as Failed",
                     lineMessageId, messageContentId);
                 content.DownloadStatus = DownloadStatus.Failed;
                 await dbContext.SaveChangesAsync(cancellationToken);

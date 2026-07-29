@@ -32,8 +32,9 @@ LINE Platform ──POST──▶ LineWebhookController
 | 貼圖 | `(貼圖)` | — |
 | 圖片 | null | 原圖（非縮圖），背景下載 |
 | 影片 | null | 原檔，先輪詢 LINE transcoding 完成才下載 |
+| 語音 | null | 原檔，同影片先等 transcoding 完成才下載 |
 | 檔案 | null（檔名存於內容表） | 原檔，背景下載 |
-| 其他（語音、位置…） | 略過不存 | — |
+| 其他（位置等） | 略過不存 | — |
 
 ## 資料表
 
