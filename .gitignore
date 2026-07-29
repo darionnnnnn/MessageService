@@ -1,0 +1,17 @@
+## .NET
+bin/
+obj/
+*.user
+
+## Visual Studio
+.vs/
+
+## Logs
+logs/
+
+## Local databases
+*.db
+*.db-shm
+*.db-wal
+
+## User secrets are stored outside the repo by design; nothing to ignore here.
