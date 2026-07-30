@@ -8,11 +8,25 @@
     // 與 MessagesController.MaxDays 對齊；超過就別再放大視窗，免得按鈕變成按了沒反應
     const MAX_DAYS_WINDOW = 3650;
     const AVATAR_COLORS = ['#f28b82', '#fbbc04', '#34a853', '#4285f4', '#a142f4', '#ff6d01', '#00acc1', '#c2185b'];
+    const GROUP_AVATAR_COLOR = '#9AACC2';
     const FONT_SIZE_STORAGE_KEY = 'chat-font-size';
     const FONT_SIZES = ['small', 'medium', 'large'];
     const DEFAULT_FONT_SIZE = 'medium';
+    const PREVIEW_URL_REGEX = /(https?:\/\/[^\s]+)/g;
+
+    // 對應後端 AvatarIconCatalog 的 IconKey；同一份代號清單，兩邊各自維護一份對照表
+    const ICON_EMOJI = {
+        bear: '🐻', cat: '🐱', rabbit: '🐰', bird: '🐦', deer: '🦌', penguin: '🐧',
+        dolphin: '🐬', owl: '🦉', koala: '🐨', panda: '🐼', sheep: '🐑', otter: '🦦',
+        hedgehog: '🦔', seal: '🦭', swan: '🦢', whale: '🐳', flower: '🌼',
+        'cherry-blossom': '🌸', 'maple-leaf': '🍁', sunflower: '🌻', tulip: '🌷',
+        clover: '🍀', 'ginkgo-leaf': '🍂', lotus: '🪷',
+        group: '👥'
+    };
+    const UNKNOWN_AVATAR_EMOJI = '❔';
 
     const state = {
+        groups: [],
         groupId: null,
         oldestId: null,
         newestId: null,
@@ -50,6 +64,8 @@
         }
         state.connectionOk = ok;
         els.connectionBanner.classList.toggle('d-none', ok);
+        els.composerStatusDot.classList.toggle('offline', !ok);
+        els.composerStatusText.textContent = ok ? '唯讀檢視模式・同步中' : '唯讀檢視模式・連線中斷';
     }
 
     function avatarColorFor(key) {
@@ -58,6 +74,36 @@
             hash = (hash * 31 + key.charCodeAt(i)) >>> 0;
         }
         return AVATAR_COLORS[hash % AVATAR_COLORS.length];
+    }
+
+    // === 頭貼 / 代號圖示 ===
+    // 有真實 pictureUrl 就優先顯示，並在載入失敗時 fallback 換成代號圖示；
+    // 沒有 pictureUrl（遮蔽/匿名模式，或群組沒有快取到照片）就直接顯示圖示
+    function buildAvatarElement(extraClassName, { pictureUrl, iconKey, colorSeed, isGroup }) {
+        const el = document.createElement('div');
+        el.className = 'avatar' + (extraClassName ? ` ${extraClassName}` : '');
+
+        const applyIcon = () => {
+            el.classList.add('avatar-icon');
+            el.style.background = isGroup ? GROUP_AVATAR_COLOR : avatarColorFor(colorSeed || '?');
+            el.textContent = ICON_EMOJI[iconKey] || (isGroup ? ICON_EMOJI.group : UNKNOWN_AVATAR_EMOJI);
+        };
+
+        if (pictureUrl) {
+            const img = document.createElement('img');
+            img.src = pictureUrl;
+            img.alt = '';
+            img.referrerPolicy = 'no-referrer';
+            img.addEventListener('error', () => {
+                el.innerHTML = '';
+                applyIcon();
+            }, { once: true });
+            el.appendChild(img);
+        } else {
+            applyIcon();
+        }
+
+        return el;
     }
 
     function dateKey(iso) {
@@ -91,6 +137,27 @@
     }
 
     // === 訊息內容渲染 ===
+
+    // 純文字訊息把網址轉成可點連結，其餘一律當純文字節點，不解析 HTML（訊息內容是外部輸入）
+    function appendLinkifiedText(container, text) {
+        let lastIndex = 0;
+        for (const match of text.matchAll(PREVIEW_URL_REGEX)) {
+            const url = match[0];
+            if (match.index > lastIndex) {
+                container.appendChild(document.createTextNode(text.slice(lastIndex, match.index)));
+            }
+            const link = document.createElement('a');
+            link.href = url;
+            link.textContent = url;
+            link.target = '_blank';
+            link.rel = 'noopener noreferrer';
+            container.appendChild(link);
+            lastIndex = match.index + url.length;
+        }
+        if (lastIndex < text.length) {
+            container.appendChild(document.createTextNode(text.slice(lastIndex)));
+        }
+    }
 
     function buildReadyContentNode(messageType, contentId, fileName) {
         const url = `/api/messages/${contentId}/content`;
@@ -171,7 +238,7 @@
 
         if (type === 'text') {
             const div = document.createElement('div');
-            div.textContent = message.text ?? '';
+            appendLinkifiedText(div, message.text ?? '');
             return div;
         }
         if (type === 'sticker') {
@@ -201,11 +268,11 @@
         row.className = 'message-row' + (showAvatarAndName ? ' show-avatar' : '');
         row.dataset.messageId = String(message.id);
 
-        const avatar = document.createElement('div');
-        avatar.className = 'avatar';
-        const avatarKey = message.userId || message.displayName || '?';
-        avatar.style.background = avatarColorFor(avatarKey);
-        avatar.textContent = (message.displayName || '?').charAt(0);
+        const avatar = buildAvatarElement('', {
+            pictureUrl: message.pictureUrl,
+            iconKey: message.avatarIcon,
+            colorSeed: message.userId || message.displayName || '?'
+        });
         avatar.title = message.userId ? `${message.displayName}（${message.userId}）` : message.displayName;
         row.appendChild(avatar);
 
@@ -223,7 +290,9 @@
         }
 
         const bubble = document.createElement('div');
-        bubble.className = 'bubble' + (message.messageType === 'sticker' ? ' sticker' : '');
+        bubble.className = 'bubble'
+            + (message.messageType === 'sticker' ? ' sticker' : '')
+            + (showAvatarAndName ? ' has-tail' : '');
         bubble.appendChild(buildContentNode(message));
 
         // LINE 的時間戳貼在泡泡外側，不是泡泡裡面
@@ -332,27 +401,109 @@
         updateFollowUi();
     }
 
+    // === 側欄：群組列表 ===
+
+    function renderGroupList(filterText) {
+        const filter = (filterText || '').trim().toLowerCase();
+        const groups = filter
+            ? state.groups.filter(g => g.displayName.toLowerCase().includes(filter))
+            : state.groups;
+
+        els.groupList.innerHTML = '';
+
+        if (state.groups.length === 0) {
+            const empty = document.createElement('div');
+            empty.className = 'group-list-empty';
+            empty.textContent = '尚無群組資料';
+            els.groupList.appendChild(empty);
+            return;
+        }
+
+        if (groups.length === 0) {
+            const empty = document.createElement('div');
+            empty.className = 'group-list-empty';
+            empty.textContent = '找不到符合的群組';
+            els.groupList.appendChild(empty);
+            return;
+        }
+
+        for (const group of groups) {
+            els.groupList.appendChild(createGroupItem(group));
+        }
+    }
+
+    function createGroupItem(group) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'group-item' + (group.groupId === state.groupId ? ' active' : '');
+        btn.dataset.groupId = group.groupId;
+
+        const avatar = buildAvatarElement('group-avatar', {
+            pictureUrl: group.pictureUrl,
+            iconKey: 'group',
+            isGroup: true
+        });
+        btn.appendChild(avatar);
+
+        const text = document.createElement('div');
+        text.className = 'group-item-text';
+
+        const name = document.createElement('div');
+        name.className = 'group-item-name';
+        name.textContent = group.displayName;
+        text.appendChild(name);
+
+        if (group.lastMessagePreview) {
+            const preview = document.createElement('div');
+            preview.className = 'group-item-preview';
+            preview.textContent = group.lastMessagePreview;
+            text.appendChild(preview);
+        }
+
+        btn.appendChild(text);
+
+        if (group.lastMessageAt) {
+            const time = document.createElement('div');
+            time.className = 'group-item-time';
+            time.textContent = formatTime(group.lastMessageAt);
+            btn.appendChild(time);
+        }
+
+        btn.addEventListener('click', () => {
+            selectGroup(group.groupId);
+            els.chatApp.classList.add('mobile-chat-open');
+        });
+
+        return btn;
+    }
+
+    function updateActiveGroupItem() {
+        for (const item of els.groupList.querySelectorAll('.group-item')) {
+            item.classList.toggle('active', item.dataset.groupId === state.groupId);
+        }
+    }
+
+    function updateChatHeader(group) {
+        els.chatHeaderAvatar.replaceWith(buildAvatarElement('chat-header-avatar', {
+            pictureUrl: group?.pictureUrl,
+            iconKey: 'group',
+            isGroup: true
+        }));
+        els.chatHeaderAvatar = els.chatApp.querySelector('.chat-header-avatar');
+
+        els.chatHeaderName.textContent = group?.displayName ?? '選擇一個群組';
+        els.chatHeaderMembers.textContent = group && group.memberCount > 0 ? `(${group.memberCount})` : '';
+    }
+
     // === 資料載入 ===
 
     async function loadGroups() {
         const groups = await fetchJson('/api/groups');
-        els.groupSelect.innerHTML = '';
+        state.groups = groups;
+        renderGroupList(els.groupSearch.value);
 
         if (groups.length === 0) {
-            const opt = document.createElement('option');
-            opt.value = '';
-            opt.textContent = '尚無群組資料';
-            els.groupSelect.appendChild(opt);
-            els.groupSelect.disabled = true;
             return;
-        }
-
-        els.groupSelect.disabled = false;
-        for (const group of groups) {
-            const opt = document.createElement('option');
-            opt.value = group.groupId;
-            opt.textContent = group.displayName;
-            els.groupSelect.appendChild(opt);
         }
 
         await selectGroup(groups[0].groupId);
@@ -369,7 +520,8 @@
         setFollowing(true);
         clearMessageList();
 
-        els.groupSelect.value = groupId;
+        updateActiveGroupItem();
+        updateChatHeader(state.groups.find(g => g.groupId === groupId));
         updateLoadMoreButton();
 
         try {
@@ -545,8 +697,16 @@
 
     function init() {
         els.chatApp = $('chat-app');
-        els.groupSelect = $('group-select');
+        els.sidebar = $('sidebar');
+        els.groupSearch = $('group-search');
+        els.groupList = $('group-list');
+        els.mobileBackBtn = $('mobile-back-btn');
+        els.chatHeaderAvatar = $('chat-header-avatar');
+        els.chatHeaderName = $('chat-header-name');
+        els.chatHeaderMembers = $('chat-header-members');
         els.connectionBanner = $('connection-banner');
+        els.composerStatusDot = $('composer-status-dot');
+        els.composerStatusText = $('composer-status-text');
         els.loadMoreBtn = $('load-more-btn');
         els.messageList = $('message-list');
         els.scrollBottomBtn = $('scroll-bottom-btn');
@@ -558,11 +718,8 @@
         initFontSizeToggle();
 
         els.loadMoreBtn.addEventListener('click', loadOlder);
-        els.groupSelect.addEventListener('change', (e) => {
-            if (e.target.value) {
-                selectGroup(e.target.value);
-            }
-        });
+        els.groupSearch.addEventListener('input', () => renderGroupList(els.groupSearch.value));
+        els.mobileBackBtn.addEventListener('click', () => els.chatApp.classList.remove('mobile-chat-open'));
         els.scrollBottomBtn.addEventListener('click', () => {
             setFollowing(true);
             scrollToBottom(true);

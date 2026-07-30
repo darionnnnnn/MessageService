@@ -1,45 +1,33 @@
-/* chat-page（Index）拿掉一般頁面的 container 邊距與 footer，讓聊天區真正吃滿剩餘視窗高度，
-   不用 calc(100vh - 魔術數字) 去猜 header 高度——沒改到 chat-page 以外的頁面（例如設定頁）*/
+/* LINE 風格檢視器的視覺 token，數值取樣自 LINE 官方 App 實機截圖（詳見 WEB-UI-REDESIGN-PLAN.md §2.6）。
+   只做亮色主題，本次刻意不做深色模式。 */
+:root {
+    --line-chat-bg: #8CABDC;
+    --line-bubble-bg: #FFFFFF;
+    --line-text: #111111;
+    --line-sender-name: #3D4A5C;
+    --line-timestamp: #4A5A73;
+    --line-green: #06C755;
+    --line-composer-bg: #FFFFFF;
+    --line-composer-pill: #F0F1F3;
+    --line-date-pill: rgba(0, 0, 0, .18);
+    --line-link: #2C64C6;
+    --sidebar-border: #E5E5E5;
+    --sidebar-hover: #F5F6F8;
+    --sidebar-active: #EAF3FF;
+}
+
+/* chat-page 拿掉一般頁面的邊距，讓雙欄版面吃滿整個視窗高度，不用 calc(100vh - 魔術數字) 猜 header 高度 */
 body.chat-page {
     height: 100dvh;
-    margin-bottom: 0;
-    display: flex;
-    flex-direction: column;
+    margin: 0;
     overflow: hidden;
-}
-
-body.chat-page .navbar {
-    padding-top: .35rem;
-    padding-bottom: .35rem;
-    margin-bottom: 0 !important;
-}
-
-body.chat-page > .container {
-    flex: 1 1 auto;
-    min-height: 0;
-    display: flex;
-    flex-direction: column;
-    padding-top: .5rem;
-    padding-bottom: .5rem;
-}
-
-body.chat-page main {
-    flex: 1 1 auto;
-    min-height: 0;
-    display: flex;
-    flex-direction: column;
-}
-
-body.chat-page footer {
-    display: none;
 }
 
 .chat-app {
     display: flex;
-    flex-direction: column;
-    flex: 1 1 auto;
+    flex-direction: row;
+    height: 100%;
     min-height: 320px;
-    position: relative;
     --chat-font-size: .95rem;
 }
 
@@ -51,48 +39,301 @@ body.chat-page footer {
     --chat-font-size: 1.15rem;
 }
 
-.chat-toolbar {
+/* === 側欄（群組列表） === */
+
+.sidebar {
+    width: 320px;
+    flex: none;
+    background: #fff;
+    border-right: 1px solid var(--sidebar-border);
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+}
+
+.sidebar-header {
+    flex: none;
+    padding: .9rem 1rem;
+    font-weight: 600;
+    font-size: 1.05rem;
     display: flex;
     align-items: center;
     gap: .5rem;
-    padding-bottom: .5rem;
+    border-bottom: 1px solid #eee;
+    color: #1b1b1b;
 }
 
-.chat-toolbar .form-select {
-    max-width: 20rem;
+.app-brand-dot {
+    width: .55rem;
+    height: .55rem;
+    border-radius: 50%;
+    background: var(--line-green);
+    flex: none;
 }
 
-.font-size-toggle {
-    margin-left: auto;
+.sidebar-search {
+    flex: none;
+    position: relative;
+    padding: .6rem .75rem;
 }
 
-.font-size-toggle .btn.active {
-    background: #06c755;
-    border-color: #06c755;
+.sidebar-search-icon {
+    position: absolute;
+    left: 1.35rem;
+    top: 50%;
+    transform: translateY(-50%);
+    opacity: .45;
+    font-size: .8rem;
+    pointer-events: none;
+}
+
+.sidebar-search input {
+    padding-left: 1.9rem;
+}
+
+.group-list {
+    flex: 1 1 auto;
+    overflow-y: auto;
+    min-height: 0;
+}
+
+.group-list-empty {
+    padding: 1rem;
+    color: #888;
+    font-size: .85rem;
+    text-align: center;
+}
+
+.group-item {
+    display: flex;
+    width: 100%;
+    align-items: center;
+    gap: .6rem;
+    padding: .55rem .9rem;
+    border: none;
+    background: transparent;
+    text-align: left;
+    cursor: pointer;
+}
+
+.group-item:hover {
+    background: var(--sidebar-hover);
+}
+
+.group-item.active {
+    background: var(--sidebar-active);
+}
+
+.group-item-text {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: .05rem;
+}
+
+.group-item-name {
+    font-size: .92rem;
+    font-weight: 600;
+    color: #1b1b1b;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.group-item-preview {
+    font-size: .8rem;
+    color: #767676;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.group-item-time {
+    font-size: .7rem;
+    color: #9a9a9a;
+    flex: none;
+    align-self: flex-start;
+    margin-top: .15rem;
+}
+
+.sidebar-footer {
+    flex: none;
+    border-top: 1px solid #eee;
+    padding: .5rem;
+}
+
+.sidebar-settings-link {
+    display: flex;
+    align-items: center;
+    gap: .5rem;
+    padding: .5rem .75rem;
+    border-radius: .5rem;
+    color: #333;
+    text-decoration: none;
+    font-size: .85rem;
+}
+
+.sidebar-settings-link:hover {
+    background: var(--sidebar-hover);
+}
+
+/* === 圓形頭貼／代號圖示 === */
+
+.avatar {
+    flex: none;
+    border-radius: 50%;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #fff;
+    background: #ccc;
+}
+
+.avatar img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.group-avatar {
+    width: 44px;
+    height: 44px;
+    font-size: 1.4rem;
+}
+
+.chat-header-avatar {
+    width: 34px;
+    height: 34px;
+    font-size: 1.1rem;
+}
+
+.message-row .avatar {
+    width: 2.1rem;
+    height: 2.1rem;
+    font-size: 1.05rem;
+    visibility: hidden;
+}
+
+.message-row.show-avatar .avatar {
+    visibility: visible;
+}
+
+/* === 聊天面板 === */
+
+.chat-panel {
+    flex: 1 1 auto;
+    min-width: 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    position: relative;
+    background: var(--line-chat-bg);
+}
+
+.chat-header {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: .6rem;
+    padding: .55rem .9rem;
+    background: var(--line-chat-bg);
+}
+
+.mobile-back-btn {
+    display: none;
+    flex: none;
+    border: none;
+    background: transparent;
+    font-size: 1.5rem;
+    line-height: 1;
+    color: #12314f;
+    padding: 0 .2rem;
+}
+
+.chat-header-info {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    align-items: baseline;
+    gap: .35rem;
+}
+
+.chat-header-name {
+    font-weight: 600;
+    font-size: 1rem;
+    color: #12314f;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.chat-header-members {
+    font-size: .78rem;
+    color: #2c4a68;
+    flex: none;
+}
+
+.btn-header-action {
+    color: #12314f;
+    border: none;
+    background: transparent;
+    font-weight: 700;
+    padding: .25rem .5rem;
+}
+
+.btn-header-action::after {
+    display: none;
+}
+
+.font-size-toggle .dropdown-item.active {
+    background: var(--line-green);
     color: #fff;
 }
 
 .connection-banner {
+    flex: none;
     background: #fff3cd;
     color: #664d03;
-    padding: .4rem .75rem;
-    border-radius: .375rem;
-    font-size: .875rem;
-    margin-bottom: .5rem;
+    padding: .35rem .75rem;
+    font-size: .8rem;
     text-align: center;
 }
 
-.load-more-row {
-    text-align: center;
-    padding: .25rem 0 .5rem;
+/* === 訊息區 === */
+
+.message-area {
+    position: relative;
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+.load-more-pill {
+    position: absolute;
+    top: .6rem;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 2;
+    border: none;
+    border-radius: 1rem;
+    padding: .3rem .9rem;
+    font-size: .75rem;
+    color: #33475b;
+    background: rgba(255, 255, 255, .85);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, .15);
+}
+
+.load-more-pill:disabled {
+    opacity: .6;
 }
 
 .message-list {
     flex: 1 1 auto;
     overflow-y: auto;
-    background: #8db2c4;
-    border-radius: .5rem;
-    padding: .75rem;
+    padding: 2.6rem .75rem .75rem;
     display: flex;
     flex-direction: column;
 }
@@ -105,35 +346,17 @@ body.chat-page footer {
 }
 
 .date-separator span {
-    background: rgba(0, 0, 0, .2);
+    background: var(--line-date-pill);
     padding: .15rem .75rem;
     border-radius: 1rem;
 }
 
 .message-row {
     display: flex;
-    align-items: flex-end;
+    align-items: flex-start;
     gap: .5rem;
     margin: .15rem 0;
     max-width: 75%;
-}
-
-.message-row .avatar {
-    width: 2rem;
-    height: 2rem;
-    border-radius: 50%;
-    flex: none;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: #fff;
-    font-size: .8rem;
-    font-weight: 600;
-    visibility: hidden;
-}
-
-.message-row.show-avatar .avatar {
-    visibility: visible;
 }
 
 .message-group {
@@ -144,8 +367,8 @@ body.chat-page footer {
 
 .message-sender-name {
     font-size: .75rem;
-    color: #f1f1f1;
-    margin-left: .2rem;
+    color: var(--line-sender-name);
+    margin-left: .3rem;
 }
 
 .bubble-row {
@@ -155,13 +378,33 @@ body.chat-page footer {
 }
 
 .bubble {
-    background: #fff;
-    border-radius: .8rem;
+    position: relative;
+    background: var(--line-bubble-bg);
+    color: var(--line-text);
+    border-radius: 1.1rem;
     padding: .5rem .7rem;
     word-break: break-word;
     box-shadow: 0 1px 1px rgba(0, 0, 0, .1);
     max-width: 100%;
     font-size: var(--chat-font-size, .95rem);
+}
+
+.bubble a {
+    color: var(--line-link);
+    text-decoration: underline;
+    word-break: break-all;
+}
+
+/* 同一組第一顆泡泡指向頭貼的小尾巴，仿 LINE 樣式 */
+.bubble.has-tail::before {
+    content: '';
+    position: absolute;
+    left: -5px;
+    bottom: 0;
+    width: 11px;
+    height: 11px;
+    background: var(--line-bubble-bg);
+    clip-path: polygon(100% 0, 100% 100%, 0% 100%);
 }
 
 .bubble.sticker {
@@ -172,11 +415,15 @@ body.chat-page footer {
     padding: 0;
 }
 
+.bubble.sticker.has-tail::before {
+    display: none;
+}
+
 /* LINE 的時間戳是貼在泡泡外側，不是泡泡裡面 */
 .msg-time {
     flex: none;
     font-size: .65rem;
-    color: #f1f1f1;
+    color: var(--line-timestamp);
     white-space: nowrap;
     padding-bottom: .15rem;
 }
@@ -219,18 +466,66 @@ body.chat-page footer {
     right: 1rem;
     bottom: 1rem;
     border: none;
-    border-radius: 2rem;
-    background: #06c755;
-    color: #fff;
-    padding: .5rem 1rem;
+    border-radius: .9rem;
+    background: #fff;
+    color: #33475b;
+    width: 2.75rem;
+    height: 2.75rem;
     display: flex;
     align-items: center;
-    gap: .4rem;
+    justify-content: center;
+    font-size: 1.1rem;
     box-shadow: 0 2px 6px rgba(0, 0, 0, .25);
 }
 
 .scroll-bottom-btn .badge {
-    position: static;
+    position: absolute;
+    top: -.35rem;
+    right: -.35rem;
+}
+
+/* === 底部列（仿 LINE 輸入列，全站唯讀，不能互動） === */
+
+.composer-bar {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: .6rem;
+    padding: .5rem .75rem;
+    background: var(--line-composer-bg);
+    border-top: 1px solid #e2e2e2;
+}
+
+.composer-icon {
+    flex: none;
+    font-size: 1.25rem;
+    opacity: .35;
+    user-select: none;
+}
+
+.composer-pill {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: .45rem;
+    background: var(--line-composer-pill);
+    border-radius: 1.2rem;
+    padding: .4rem .9rem;
+    font-size: .78rem;
+    color: #666;
+}
+
+.composer-status-dot {
+    flex: none;
+    width: .5rem;
+    height: .5rem;
+    border-radius: 50%;
+    background: var(--line-green);
+}
+
+.composer-status-dot.offline {
+    background: #b0b0b0;
 }
 
 /* 新訊息進來的動態效果 */
@@ -253,5 +548,33 @@ body.chat-page footer {
 @media (prefers-reduced-motion: reduce) {
     .message-row.message-enter {
         animation: none;
+    }
+}
+
+/* === 手機版：群組列表與聊天面板全螢幕切換 === */
+
+@media (max-width: 768px) {
+    .chat-app {
+        display: block;
+        position: relative;
+    }
+
+    .sidebar,
+    .chat-panel {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+    }
+
+    #chat-app:not(.mobile-chat-open) .chat-panel {
+        display: none;
+    }
+
+    #chat-app.mobile-chat-open .sidebar {
+        display: none;
+    }
+
+    .mobile-back-btn {
+        display: inline-block;
     }
 }
