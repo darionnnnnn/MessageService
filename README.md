@@ -96,22 +96,26 @@ dotnet user-secrets set "Line:ChannelAccessToken" "<你的 access token>"
 
 ### 頁面與 API
 
-**對話頁（`/`）**：Bootstrap + 原生 JS 模擬 LINE 對話視窗，所有資料透過 API 取得（不走 MVC Model 傳遞）。
+**對話頁（`/`）**：原生 JS 模擬 LINE 的雙欄版面（Bootstrap 只保留 modal/toast/表單控件），所有資料透過 API 取得（不走 MVC Model 傳遞）。
 
-- 預設載入 3 天內對話，「載入更早 7 天」按鈕以最舊訊息 Id 當游標往前翻頁，沒有更早歷史時自動 disable。兩個「按了會沒反應」的空窗情況都有處理：畫面上一則訊息都沒有（沒有游標可用）時改成放大天數視窗重繪；群組沉寂比一個視窗還久時由 API 把視窗錨定到下一則更早訊息，保證每次點擊都會前進
-- 「回到最新」置底按鈕：使用者往上捲動時自動退出跟隨模式並顯示未讀數，點擊或捲回底部即恢復跟隨並自動捲到新訊息
+- **左側欄**：群組列表（頭貼、名稱、最後訊息預覽、時間，依最後活動倒序），前端即時搜尋過濾，底部為設定頁入口。取代早期的下拉選單
+- **聊天面板**：與背景同色的透明標頭（群組頭貼＋名稱＋成員數＋「Aa」字級下拉）、訊息泡泡（首顆帶指向頭貼的小尾巴、時間戳貼泡泡外側）、底部仿 LINE 輸入列但唯讀化（圖示灰化不可點、中央膠囊顯示同步狀態）
+- **頭貼**：`Original` 模式顯示真實 LINE 頭貼（`referrerpolicy="no-referrer"`，載入失敗 fallback 代號圖示）；其他模式一律顯示伺服器指派的動植物代號圖示（emoji 渲染，前端 `ICON_EMOJI` 對照表需與後端 `AvatarIconCatalog` 的 IconKey 同步維護）
+- 預設載入 3 天內對話，「載入更早 7 天」膠囊以最舊訊息 Id 當游標往前翻頁，沒有更早歷史時自動 disable。兩個「按了會沒反應」的空窗情況都有處理：畫面上一則訊息都沒有（沒有游標可用）時改成放大天數視窗重繪；群組沉寂比一個視窗還久時由 API 把視窗錨定到下一則更早訊息，保證每次點擊都會前進
+- 「回到最新」浮動按鈕：使用者往上捲動時自動退出跟隨模式並顯示未讀數，點擊或捲回底部即恢復跟隨並自動捲到新訊息
 - 每 4 秒輪詢新訊息與 Pending 內容的下載狀態；分頁隱藏（`document.hidden`）時暫停輪詢
 - 新訊息進場有淡入＋位移動效（`prefers-reduced-motion` 使用者會停用）
 - 圖片／影片／語音／檔案依 `DownloadStatus` 顯示 spinner／播放器／下載連結／失敗訊息
-- 所有文字一律用 `textContent` 塞入 DOM，不用 `innerHTML`，避免訊息內容造成 XSS
+- 文字訊息中的網址會轉成可點連結（`target="_blank"` + `rel="noopener noreferrer"`）；所有內容一律用 DOM 節點組裝（`textContent`／`createElement`），不用 `innerHTML`，避免訊息內容造成 XSS
+- **手機版（<768px）**：群組列表與聊天面板全螢幕切換，標頭出現「‹」返回鈕，仿 LINE 手機版導覽
 
-**設定頁（`/Home/Settings`）**：關鍵字遮蔽規則（新增/刪除，預設等長 `*` 或自訂替換字串，全部群組或指定群組）；名稱顯示模式（原名／首尾保留中間遮蔽／自訂別名，別名編輯器可依群組篩選成員）。變更即存，PUT 後顯示 toast。
+**設定頁（`/Home/Settings`）**：卡片式版面。隱私與匿名（名稱顯示四模式，含完全匿名動植物代號；別名編輯器可依群組篩選成員）；關鍵字遮蔽規則（新增/刪除，預設等長 `*` 或自訂替換字串，全部群組或指定群組）。變更即存，PUT 後顯示 toast。
 
 **API**（都在 `MessageService.Web/Controllers/Api/`）：
 
 | 端點 | 用途 |
 |---|---|
-| `GET /api/groups` | 群組清單（僅列出有訊息的群組，名稱取自快取，無快取則顯示 GroupId） |
+| `GET /api/groups` | 群組清單（僅列出有訊息的群組，名稱取自快取，無快取則顯示 GroupId；含最後訊息預覽〔已套遮蔽〕、最後訊息時間、成員數，依最後活動倒序） |
 | `GET /api/groups/{groupId}/messages?days=` / `?beforeId=&days=` / `?afterId=` | 初載 / 往前加載 / 輪詢新訊息，回應已套用遮蔽 |
 | `GET /api/messages/{id}/content` | 內容串流，支援 HTTP Range（見下方實作說明） |
 | `GET /api/messages/statuses?ids=` | 查詢多筆內容目前的 `DownloadStatus` |

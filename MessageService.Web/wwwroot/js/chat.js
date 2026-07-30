@@ -12,7 +12,7 @@
     const FONT_SIZE_STORAGE_KEY = 'chat-font-size';
     const FONT_SIZES = ['small', 'medium', 'large'];
     const DEFAULT_FONT_SIZE = 'medium';
-    const PREVIEW_URL_REGEX = /(https?:\/\/[^\s]+)/g;
+    const URL_REGEX = /(https?:\/\/[^\s]+)/g;
 
     // 對應後端 AvatarIconCatalog 的 IconKey；同一份代號清單，兩邊各自維護一份對照表
     const ICON_EMOJI = {
@@ -127,6 +127,18 @@
         return new Date(iso).toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit', hour12: false });
     }
 
+    // 側欄的最後訊息時間仿 LINE：今天顯示時刻、昨天顯示「昨天」、更早顯示月/日
+    function formatListTime(iso) {
+        const d = new Date(iso);
+        const now = new Date();
+        const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        const that = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+        const diffDays = Math.round((today - that) / 86400000);
+        if (diffDays === 0) return formatTime(iso);
+        if (diffDays === 1) return '昨天';
+        return `${d.getMonth() + 1}/${d.getDate()}`;
+    }
+
     function createDateSeparator(iso) {
         const sep = document.createElement('div');
         sep.className = 'date-separator';
@@ -141,7 +153,7 @@
     // 純文字訊息把網址轉成可點連結，其餘一律當純文字節點，不解析 HTML（訊息內容是外部輸入）
     function appendLinkifiedText(container, text) {
         let lastIndex = 0;
-        for (const match of text.matchAll(PREVIEW_URL_REGEX)) {
+        for (const match of text.matchAll(URL_REGEX)) {
             const url = match[0];
             if (match.index > lastIndex) {
                 container.appendChild(document.createTextNode(text.slice(lastIndex, match.index)));
@@ -465,7 +477,7 @@
         if (group.lastMessageAt) {
             const time = document.createElement('div');
             time.className = 'group-item-time';
-            time.textContent = formatTime(group.lastMessageAt);
+            time.textContent = formatListTime(group.lastMessageAt);
             btn.appendChild(time);
         }
 
