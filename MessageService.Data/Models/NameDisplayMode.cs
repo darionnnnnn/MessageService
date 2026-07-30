@@ -9,5 +9,8 @@ public enum NameDisplayMode
     MaskMiddle,
 
     /// <summary>依 UserAliases 對照表顯示自訂別名；未設定別名者 fallback 為 MaskMiddle。</summary>
-    CustomAlias
+    CustomAlias,
+
+    /// <summary>完全匿名：名稱與頭貼一律替換為該成員在該群組的動植物代號（永久指派，見 AnonymousIdentity）。</summary>
+    Anonymous
 }

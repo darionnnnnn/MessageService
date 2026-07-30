@@ -127,10 +127,13 @@ dotnet user-secrets set "Line:ChannelAccessToken" "<你的 access token>"
 `IMaskingService.LoadRulesAsync()` 每個請求只呼叫一次，把當下的名稱顯示模式、關鍵字規則、別名對照載成一份 `IMaskingRuleSet` 快照，套用到該次回應的每則訊息時全是同步運算，避免每則訊息各打一次 DB。
 
 - **關鍵字遮蔽**：不分大小寫的純字串比對（不用 regex），可設定全部群組或指定群組套用；預設遮蔽為與關鍵字等長的 `*`，也可設定自訂替換字串
-- **名稱顯示三模式**：
-  - `Original`：顯示原始快取的 LINE 顯示名稱，沒有快取則顯示 UserId
+- **名稱顯示四模式**：
+  - `Original`：顯示原始快取的 LINE 顯示名稱，沒有快取則顯示 UserId；唯一會回傳真實頭貼 URL 的模式
   - `MaskMiddle`：首尾字保留、中間 `*`（1 字全遮；2 字只留首字，如「小明」→「小*」；3 字以上首尾各留一字，如「王小明」→「王*明」）
   - `CustomAlias`：依 `UserAliases` 對照表顯示别名；沒設定別名的人 fallback 為 `MaskMiddle`
+  - `Anonymous`：名稱與頭貼一律替換為動植物代號（如「小熊」），由 `IAnonymousIdentityService` 依群組+使用者永久指派並存進 `AnonymousIdentities`，翻閱舊訊息時代號不會變、可分辨是否為同一人但認不出真實身分
+
+以上四種模式（`Original` 除外）回應中一律不含真實 `PictureUrl`，即使前端不渲染也不外流，因為 URL 本身就是身分線索。
 
 ### IP 白名單（沒有登入機制）
 
@@ -188,7 +191,7 @@ dotnet user-secrets set "Line:ChannelAccessToken" "<你的 access token>"
 
 **Groups** / **GroupMembers**：收錄端背景快取的群組名稱、成員顯示名稱與頭像 URL（7 天 TTL，來源是 LINE 的 group summary / member profile API），檢視端用來把 GroupId/UserId 轉成人看得懂的名稱。快取失敗時 fallback 顯示原始 ID。
 
-**ViewerSettings**（單列，Id 固定為 1）／**MaskKeywords** + **MaskKeywordGroups**／**UserAliases**：檢視端設定頁寫入的遮蔽設定，只有這幾張表是 Web 專案會寫入的。
+**ViewerSettings**（單列，Id 固定為 1）／**MaskKeywords** + **MaskKeywordGroups**／**UserAliases**／**AnonymousIdentities**：檢視端寫入的顯示設定，只有這幾張表是 Web 專案會寫入的。`AnonymousIdentities`（GroupId+UserId 複合主鍵）是 `NameDisplayMode.Anonymous` 的代號永久指派表，跟其他幾張不同的地方是使用者不直接編輯——由 `GET /api/groups/{groupId}/messages` 第一次遇到某成員時自動指派並寫入。
 
 這些表的欄位是兩個專案間（以及未來其他消費端）的共用契約，異動需評估相容性。
 
@@ -196,7 +199,7 @@ dotnet user-secrets set "Line:ChannelAccessToken" "<你的 access token>"
 
 Migrations 統一放在 `MessageService.Data`，用 `MessageService` 當 startup project：
 
-- **SQLite（開發）**：兩個專案啟動時都各自 `EnsureCreated()`，免手動（收錄端在 `Program.cs`；檢視端目前假設 schema 已由收錄端建立）。
+- **SQLite（開發）**：兩個專案啟動時都各自 `EnsureCreated()`，免手動（收錄端在 `Program.cs`；檢視端目前假設 schema 已由收錄端建立）。**注意**：`EnsureCreated()` 只在資料庫檔案完全不存在時依目前模型建表，對已存在的 SQLite 檔案不會補新表/新欄位——加了新表（例如 `AnonymousIdentities`）後，既有的本機 `messages.db` 要手動刪除讓它重建，或改走 migration。
 - **SQL Server（正式）**：
 
 ```bash

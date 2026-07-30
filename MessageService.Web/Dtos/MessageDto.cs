@@ -7,4 +7,6 @@ public record MessageDto(
     string? UserId,
     string DisplayName,
     DateTimeOffset EventTimestamp,
-    MessageContentDto? Content);
+    MessageContentDto? Content,
+    string? PictureUrl,
+    string? AvatarIcon);

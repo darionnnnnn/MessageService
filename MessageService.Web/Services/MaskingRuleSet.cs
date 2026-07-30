@@ -23,8 +23,13 @@ public class MaskingRuleSet(
         return text;
     }
 
-    public string ResolveDisplayName(string userId, string? rawDisplayName)
+    public string ResolveDisplayName(string userId, string? rawDisplayName, string? anonymousLabel = null)
     {
+        if (mode == NameDisplayMode.Anonymous)
+        {
+            return anonymousLabel ?? "(未知)";
+        }
+
         if (mode == NameDisplayMode.Original)
         {
             return rawDisplayName ?? userId;
@@ -38,6 +43,10 @@ public class MaskingRuleSet(
         // MaskMiddle，或 CustomAlias 沒設別名時的 fallback
         return MaskMiddle(rawDisplayName ?? userId);
     }
+
+    public bool RevealsOriginalProfile => mode == NameDisplayMode.Original;
+
+    public bool RequiresAnonymousIdentity => mode == NameDisplayMode.Anonymous;
 
     private static bool AppliesToGroup(MaskKeyword rule, string groupId) =>
         rule.ApplyToAllGroups || rule.Groups.Any(g => g.GroupId == groupId);

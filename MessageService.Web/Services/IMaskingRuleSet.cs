@@ -4,5 +4,13 @@ namespace MessageService.Web.Services;
 public interface IMaskingRuleSet
 {
     string MaskText(string groupId, string text);
-    string ResolveDisplayName(string userId, string? rawDisplayName);
+
+    /// <summary>Anonymous 模式下必須帶 anonymousLabel（呼叫端已用 IAnonymousIdentityService 批次查好）。</summary>
+    string ResolveDisplayName(string userId, string? rawDisplayName, string? anonymousLabel = null);
+
+    /// <summary>是否顯示真實頭貼（僅 Original 模式）；其他模式一律回代號圖示，不能讓 PictureUrl 外流。</summary>
+    bool RevealsOriginalProfile { get; }
+
+    /// <summary>是否為完全匿名模式；為 true 時呼叫端需先用 IAnonymousIdentityService 查好代號才能組訊息。</summary>
+    bool RequiresAnonymousIdentity { get; }
 }

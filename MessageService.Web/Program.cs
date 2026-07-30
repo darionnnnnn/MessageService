@@ -28,6 +28,7 @@ builder.Services.AddDbContext<MessageDbContext>(options =>
 
 builder.Services.AddScoped<ContentStreamService>();
 builder.Services.AddScoped<IMaskingService, MaskingService>();
+builder.Services.AddScoped<IAnonymousIdentityService, AnonymousIdentityService>();
 
 var app = builder.Build();
 

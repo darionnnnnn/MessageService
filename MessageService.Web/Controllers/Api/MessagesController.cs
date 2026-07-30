@@ -11,7 +11,8 @@ namespace MessageService.Web.Controllers.Api;
 public class MessagesController(
     MessageDbContext dbContext,
     ContentStreamService contentStreamService,
-    IMaskingService maskingService) : ControllerBase
+    IMaskingService maskingService,
+    IAnonymousIdentityService anonymousIdentityService) : ControllerBase
 {
     public const int MaxDays = 3650;
 
@@ -94,16 +95,48 @@ public class MessagesController(
         // 一個請求只載入一次遮蔽規則，套用到每則訊息時全是同步運算，不會每則訊息各打一次 DB
         var maskingRules = await maskingService.LoadRulesAsync(cancellationToken);
 
+        // 只有 Anonymous 模式才需要查/指派永久代號；其他模式完全不打這張表
+        IReadOnlyDictionary<string, AnonymousIdentityInfo> anonymousIdentities =
+            new Dictionary<string, AnonymousIdentityInfo>();
+        if (maskingRules.RequiresAnonymousIdentity)
+        {
+            anonymousIdentities = await anonymousIdentityService.GetOrAssignAsync(groupId, userIds, cancellationToken);
+        }
+
         var messages = rows.Select(r =>
         {
-            members.TryGetValue(r.UserId ?? "", out var member);
-            var displayName = r.UserId is null ? "(未知)" : maskingRules.ResolveDisplayName(r.UserId, member?.DisplayName);
             var text = r.Text is null ? null : maskingRules.MaskText(groupId, r.Text);
             var content = r.Content is null
                 ? null
                 : new MessageContentDto(r.Content.Id, r.Content.FileName, r.Content.ContentType, r.Content.DownloadStatus.ToString());
 
-            return new MessageDto(r.Id, r.MessageType, text, r.UserId, displayName, r.EventTimestamp, content);
+            if (r.UserId is null)
+            {
+                return new MessageDto(r.Id, r.MessageType, text, null, "(未知)", r.EventTimestamp, content, null, null);
+            }
+
+            members.TryGetValue(r.UserId, out var member);
+
+            string displayName;
+            string? pictureUrl;
+            string avatarIcon;
+            if (maskingRules.RequiresAnonymousIdentity)
+            {
+                var identity = anonymousIdentities[r.UserId];
+                displayName = maskingRules.ResolveDisplayName(r.UserId, member?.DisplayName, identity.Label);
+                pictureUrl = null;
+                avatarIcon = identity.IconKey;
+            }
+            else
+            {
+                displayName = maskingRules.ResolveDisplayName(r.UserId, member?.DisplayName);
+                // 非 Original 模式下真實頭貼一律不外流，即使前端不渲染，URL 本身就是身分線索
+                pictureUrl = maskingRules.RevealsOriginalProfile ? member?.PictureUrl : null;
+                // 一律附上決定性的 fallback 圖示 key，前端在 PictureUrl 缺失或載入失敗時可以直接換上
+                avatarIcon = AvatarIconCatalog.ForHash(r.UserId).IconKey;
+            }
+
+            return new MessageDto(r.Id, r.MessageType, text, r.UserId, displayName, r.EventTimestamp, content, pictureUrl, avatarIcon);
         }).ToList();
 
         // hasMore：初載/往前加載都要判斷是否還有更早的訊息；輪詢（afterId）不需要，省一次查詢
