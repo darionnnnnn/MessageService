@@ -8,6 +8,9 @@
     // 與 MessagesController.MaxDays 對齊；超過就別再放大視窗，免得按鈕變成按了沒反應
     const MAX_DAYS_WINDOW = 3650;
     const AVATAR_COLORS = ['#f28b82', '#fbbc04', '#34a853', '#4285f4', '#a142f4', '#ff6d01', '#00acc1', '#c2185b'];
+    const FONT_SIZE_STORAGE_KEY = 'chat-font-size';
+    const FONT_SIZES = ['small', 'medium', 'large'];
+    const DEFAULT_FONT_SIZE = 'medium';
 
     const state = {
         groupId: null,
@@ -223,12 +226,17 @@
         bubble.className = 'bubble' + (message.messageType === 'sticker' ? ' sticker' : '');
         bubble.appendChild(buildContentNode(message));
 
+        // LINE 的時間戳貼在泡泡外側，不是泡泡裡面
         const time = document.createElement('span');
         time.className = 'msg-time';
         time.textContent = formatTime(message.eventTimestamp);
-        bubble.appendChild(time);
 
-        group.appendChild(bubble);
+        const bubbleRow = document.createElement('div');
+        bubbleRow.className = 'bubble-row';
+        bubbleRow.appendChild(bubble);
+        bubbleRow.appendChild(time);
+
+        group.appendChild(bubbleRow);
         row.appendChild(group);
 
         if (message.content && message.content.downloadStatus === 'Pending') {
@@ -500,9 +508,43 @@
         }
     }
 
+    // === 字體大小（存 localStorage，每台裝置各自記，不進 DB） ===
+
+    function applyFontSize(size) {
+        for (const s of FONT_SIZES) {
+            els.chatApp.classList.toggle(`font-size-${s}`, s === size);
+        }
+        for (const btn of els.fontSizeButtons) {
+            btn.classList.toggle('active', btn.dataset.fontSize === size);
+        }
+    }
+
+    function initFontSizeToggle() {
+        let saved;
+        try {
+            saved = localStorage.getItem(FONT_SIZE_STORAGE_KEY);
+        } catch {
+            saved = null;
+        }
+        applyFontSize(FONT_SIZES.includes(saved) ? saved : DEFAULT_FONT_SIZE);
+
+        for (const btn of els.fontSizeButtons) {
+            btn.addEventListener('click', () => {
+                const size = btn.dataset.fontSize;
+                applyFontSize(size);
+                try {
+                    localStorage.setItem(FONT_SIZE_STORAGE_KEY, size);
+                } catch {
+                    // localStorage 不可用（例如無痕模式）就只套用當次畫面，不用另外提示
+                }
+            });
+        }
+    }
+
     // === 初始化 ===
 
     function init() {
+        els.chatApp = $('chat-app');
         els.groupSelect = $('group-select');
         els.connectionBanner = $('connection-banner');
         els.loadMoreBtn = $('load-more-btn');
@@ -511,6 +553,9 @@
         els.unreadBadge = $('unread-badge');
         els.imageModal = $('image-modal');
         els.imageModalImg = $('image-modal-img');
+        els.fontSizeButtons = Array.from(document.querySelectorAll('.font-size-toggle [data-font-size]'));
+
+        initFontSizeToggle();
 
         els.loadMoreBtn.addEventListener('click', loadOlder);
         els.groupSelect.addEventListener('change', (e) => {

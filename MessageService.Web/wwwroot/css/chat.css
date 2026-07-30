@@ -1,19 +1,75 @@
+/* chat-page（Index）拿掉一般頁面的 container 邊距與 footer，讓聊天區真正吃滿剩餘視窗高度，
+   不用 calc(100vh - 魔術數字) 去猜 header 高度——沒改到 chat-page 以外的頁面（例如設定頁）*/
+body.chat-page {
+    height: 100dvh;
+    margin-bottom: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+body.chat-page .navbar {
+    padding-top: .35rem;
+    padding-bottom: .35rem;
+    margin-bottom: 0 !important;
+}
+
+body.chat-page > .container {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    padding-top: .5rem;
+    padding-bottom: .5rem;
+}
+
+body.chat-page main {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+body.chat-page footer {
+    display: none;
+}
+
 .chat-app {
     display: flex;
     flex-direction: column;
-    height: calc(100vh - 170px);
+    flex: 1 1 auto;
     min-height: 320px;
     position: relative;
+    --chat-font-size: .95rem;
+}
+
+.chat-app.font-size-small {
+    --chat-font-size: .8rem;
+}
+
+.chat-app.font-size-large {
+    --chat-font-size: 1.15rem;
 }
 
 .chat-toolbar {
     display: flex;
+    align-items: center;
     gap: .5rem;
     padding-bottom: .5rem;
 }
 
 .chat-toolbar .form-select {
     max-width: 20rem;
+}
+
+.font-size-toggle {
+    margin-left: auto;
+}
+
+.font-size-toggle .btn.active {
+    background: #06c755;
+    border-color: #06c755;
+    color: #fff;
 }
 
 .connection-banner {
@@ -92,6 +148,12 @@
     margin-left: .2rem;
 }
 
+.bubble-row {
+    display: flex;
+    align-items: flex-end;
+    gap: .35rem;
+}
+
 .bubble {
     background: #fff;
     border-radius: .8rem;
@@ -99,22 +161,24 @@
     word-break: break-word;
     box-shadow: 0 1px 1px rgba(0, 0, 0, .1);
     max-width: 100%;
+    font-size: var(--chat-font-size, .95rem);
 }
 
 .bubble.sticker {
     background: transparent;
     box-shadow: none;
-    font-size: 1.1rem;
+    font-size: calc(var(--chat-font-size, .95rem) + .15rem);
     color: #fff;
     padding: 0;
 }
 
-.bubble .msg-time {
-    display: block;
+/* LINE 的時間戳是貼在泡泡外側，不是泡泡裡面 */
+.msg-time {
+    flex: none;
     font-size: .65rem;
-    color: #999;
-    margin-top: .2rem;
-    text-align: right;
+    color: #f1f1f1;
+    white-space: nowrap;
+    padding-bottom: .15rem;
 }
 
 .bubble img.msg-image {

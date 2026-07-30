@@ -1,5 +1,6 @@
 @{
     ViewData["Title"] = "對話";
+    ViewData["BodyClass"] = "chat-page";
 }
 
 <div id="chat-app" class="chat-app">
@@ -7,6 +8,12 @@
         <select id="group-select" class="form-select form-select-sm" aria-label="選擇群組">
             <option value="">載入群組中…</option>
         </select>
+
+        <div class="font-size-toggle btn-group btn-group-sm" role="group" aria-label="字體大小">
+            <button type="button" class="btn btn-outline-secondary" data-font-size="small">小</button>
+            <button type="button" class="btn btn-outline-secondary" data-font-size="medium">中</button>
+            <button type="button" class="btn btn-outline-secondary" data-font-size="large">大</button>
+        </div>
     </div>
 
     <div id="connection-banner" class="connection-banner d-none">連線中斷，正在嘗試重新連線…</div>
