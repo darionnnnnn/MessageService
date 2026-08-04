@@ -17,10 +17,10 @@
             <div class="group-list-empty">載入群組中…</div>
         </div>
         <div class="sidebar-footer">
-            <a href="/Home/Settings" class="sidebar-settings-link">
+            <button type="button" class="sidebar-settings-link" data-bs-toggle="modal" data-bs-target="#settings-modal">
                 <span aria-hidden="true">⚙️</span>
                 設定
-            </a>
+            </button>
         </div>
     </aside>
 
@@ -90,12 +90,16 @@
     <div class="modal-dialog modal-fullscreen">
         <div class="modal-content">
             <div id="image-modal-body" class="modal-body">
+                <button type="button" class="image-lightbox-close" data-bs-dismiss="modal" aria-label="關閉">✕</button>
                 <img id="image-modal-img" src="" alt="圖片預覽">
             </div>
         </div>
     </div>
 </div>
 
+@await Html.PartialAsync("_SettingsModal")
+
 @section Scripts {
     <script src="~/js/chat.js" asp-append-version="true"></script>
+    <script src="~/js/settings.js" asp-append-version="true"></script>
 }

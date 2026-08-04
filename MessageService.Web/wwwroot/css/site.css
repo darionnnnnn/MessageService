@@ -26,7 +26,7 @@ html {
   text-align: start;
 }
 
-/* === 非聊天頁（設定／錯誤頁）共用的簡化外殼 === */
+/* === 非聊天頁（目前只剩錯誤頁；設定改成聊天頁裡的 modal 了）共用的簡化外殼 === */
 
 .simple-header {
   display: flex;
@@ -59,21 +59,23 @@ html {
   padding: 1.5rem 1.25rem 3rem;
 }
 
-/* === 設定頁：卡片式分區 === */
+/* === 設定 modal：頁籤式分區 === */
 
-/* --font-base-px 跟聊天頁共用同一份 localStorage 值，settings.js 用 inline style 把它
-   設在 .settings-app 元素本身上；這裡刻意不直接宣告預設值（理由同 chat.css 的註解——
-   同元素宣告的優先權贏過繼承值，寫死在這裡會讓 inline style 蓋不掉），
+/* --font-base-px 現在由 chat.js／settings.js 統一設在 document.documentElement 上
+   （設定 modal 跟聊天畫面共用同一顆變數，在 modal 裡調字級，背後的聊天畫面會即時跟著變）；
+   這裡刻意不直接宣告預設值——同元素宣告的優先權贏過繼承值，寫死在這裡會讓 inline style 蓋不掉，
    沒自訂時交給 var(--font-base-px, 20px) 的第二參數 fallback。
    Bootstrap 元件（.form-control-sm/.btn-sm 等）自己設定了 font-size，選擇器
    加上 .settings-app 前綴讓 specificity 比它們高，改成 1em 才會吃到這裡的字級 */
 .settings-app {
   font-size: var(--font-base-px, 20px);
-  max-width: 720px;
-  margin: 0 auto;
   display: flex;
   flex-direction: column;
   gap: 1.25rem;
+}
+
+.settings-tab-content {
+  padding-top: 1.25rem;
 }
 
 .settings-app .form-label,

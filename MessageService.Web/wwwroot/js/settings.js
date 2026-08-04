@@ -3,6 +3,10 @@
 
     const els = {};
     let groupsCache = [];
+    // 設定 modal 關閉時，若這次開啟期間有成功寫入任何變更，就通知聊天畫面重新整理
+    // （改名稱顯示模式、加關鍵字規則等都會影響目前開著的對話內容）
+    let settingsDirty = false;
+    let dataLoaded = false;
 
     function $(id) {
         return document.getElementById(id);
@@ -83,6 +87,7 @@
     async function deleteKeyword(id) {
         try {
             await fetchJson(`/api/settings/keywords/${id}`, { method: 'DELETE' });
+            settingsDirty = true;
             showToast('已刪除規則');
             await loadKeywords();
         } catch {
@@ -132,6 +137,7 @@
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ keyword, replacement, applyToAllGroups, groupIds })
             });
+            settingsDirty = true;
             showToast('已新增規則');
             els.keywordForm.reset();
             els.replacementInput.disabled = true;
@@ -161,6 +167,7 @@
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ nameDisplayMode: mode })
             });
+            settingsDirty = true;
             showToast('顯示設定已更新');
         } catch {
             showToast('更新失敗', true);
@@ -231,6 +238,7 @@
                     throw new Error(`HTTP ${response.status}`);
                 }
             }
+            settingsDirty = true;
             showToast('別名已更新');
         } catch {
             showToast('更新失敗', true);
@@ -257,14 +265,15 @@
             : DEFAULT_FONT_BASE_PX;
     }
 
+    // 設在 document.documentElement 上，跟聊天畫面共用同一顆 CSS 變數——在這裡調字級，
+    // 背後的聊天畫面（跟這個 modal 是同一個頁面）會即時跟著變，不用等下次重新整理
     function applyFontBasePx(px) {
-        els.settingsApp.style.setProperty('--font-base-px', `${px}px`);
+        document.documentElement.style.setProperty('--font-base-px', `${px}px`);
     }
 
     function initFontBasePx() {
-        const px = loadFontBasePx();
-        els.fontBasePxInput.value = px;
-        applyFontBasePx(px);
+        // 頁面載入時 chat.js 已經套用過一次同一份設定，這裡只需要把輸入框的顯示值補上
+        els.fontBasePxInput.value = loadFontBasePx();
 
         els.fontBasePxInput.addEventListener('change', () => {
             let value = parseInt(els.fontBasePxInput.value, 10);
@@ -283,9 +292,11 @@
     }
 
     // === 初始化 ===
+    // 設定現在是聊天頁裡的 modal，不再是獨立頁面：元素綁定跟不需要資料的監聽器在頁面
+    // 載入時就做完，實際打 API 撈資料延後到第一次打開 modal 才做（shown.bs.modal），
+    // 避免聊天頁一開就多打一輪只有設定頁才用得到的請求。
 
-    async function init() {
-        els.settingsApp = $('settings-app');
+    function wireElements() {
         els.fontBasePxInput = $('font-base-px-input');
         els.toastContainer = $('toast-container');
         els.keywordTbody = $('keyword-tbody');
@@ -300,7 +311,11 @@
         els.aliasEditor = $('alias-editor');
         els.aliasGroupFilter = $('alias-group-filter');
         els.aliasTbody = $('alias-tbody');
+        els.settingsModal = $('settings-modal');
+        els.settingsModalBody = $('settings-modal-body');
+    }
 
+    function wireStaticListeners() {
         initFontBasePx();
 
         els.replacementCustom.addEventListener('change', () => { els.replacementInput.disabled = false; });
@@ -313,6 +328,30 @@
             radio => radio.addEventListener('change', handleDisplayModeChange));
         els.aliasGroupFilter.addEventListener('change', loadAliasEditor);
 
+        // 換分頁時把捲動位置歸零；不然上一個分頁捲很深時，切過去的新分頁會被卡在
+        // 同一個捲動位置，內容被卡在畫面外
+        for (const tabBtn of document.querySelectorAll('#settings-tabs [data-bs-toggle="tab"]')) {
+            tabBtn.addEventListener('shown.bs.tab', () => {
+                els.settingsModalBody.scrollTop = 0;
+            });
+        }
+
+        els.settingsModal.addEventListener('shown.bs.modal', () => {
+            if (!dataLoaded) {
+                dataLoaded = true;
+                loadInitialData().catch(() => showToast('載入設定失敗', true));
+            }
+        });
+
+        els.settingsModal.addEventListener('hidden.bs.modal', () => {
+            if (settingsDirty) {
+                document.dispatchEvent(new CustomEvent('messageservice:settings-changed'));
+                settingsDirty = false;
+            }
+        });
+    }
+
+    async function loadInitialData() {
         groupsCache = await fetchJson('/api/groups');
         renderScopeCheckboxes();
 
@@ -329,6 +368,11 @@
         }
 
         await Promise.all([loadKeywords(), loadDisplaySettings()]);
+    }
+
+    function init() {
+        wireElements();
+        wireStaticListeners();
     }
 
     document.addEventListener('DOMContentLoaded', init);

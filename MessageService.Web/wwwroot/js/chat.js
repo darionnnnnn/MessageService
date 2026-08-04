@@ -6,6 +6,7 @@
     // 沒必要用同一個頻率打
     const GROUP_POLL_INTERVAL_MS = 10000;
     const NEAR_BOTTOM_THRESHOLD_PX = 80;
+    const NEAR_TOP_THRESHOLD_PX = 8;
     const INITIAL_DAYS = 3;
     const LOAD_MORE_DAYS = 7;
     // 與 MessagesController.MaxDays 對齊；超過就別再放大視窗，免得按鈕變成按了沒反應
@@ -311,6 +312,31 @@
         return wrap;
     }
 
+    function buildStickerFallbackNode(message) {
+        const div = document.createElement('div');
+        div.textContent = message.text ?? '(貼圖)';
+        return div;
+    }
+
+    // 改版前收到的貼圖沒有 stickerId（LINE 不提供舊訊息回溯查詢），一律走文字 fallback；
+    // 有 ID 的話載入 LINE 公開貼圖 CDN，圖片本身失敗（例如該貼圖已下架）也 fallback 回文字
+    function buildStickerNode(message) {
+        if (!message.stickerId) {
+            return buildStickerFallbackNode(message);
+        }
+
+        const img = document.createElement('img');
+        img.className = 'msg-sticker';
+        img.loading = 'lazy';
+        img.alt = message.text ?? '(貼圖)';
+        img.referrerPolicy = 'no-referrer';
+        img.src = `https://stickershop.line-scdn.net/stickershop/v1/sticker/${encodeURIComponent(message.stickerId)}/android/sticker.png`;
+        img.addEventListener('error', () => {
+            img.replaceWith(buildStickerFallbackNode(message));
+        }, { once: true });
+        return img;
+    }
+
     function buildContentNode(message) {
         const type = message.messageType;
 
@@ -320,9 +346,7 @@
             return div;
         }
         if (type === 'sticker') {
-            const div = document.createElement('div');
-            div.textContent = message.text ?? '(貼圖)';
-            return div;
+            return buildStickerNode(message);
         }
 
         const content = message.content;
@@ -457,15 +481,23 @@
         els.imageModalBody.classList.remove('zoomed');
 
         // 圖片本身比視窗小的話「原尺寸」跟「符合版面」看起來一樣，沒有東西可以放大，
-        // 游標不該做出可點擊的暗示；naturalWidth/Height 要等圖片載入完才拿得到
-        img.onload = () => {
+        // 游標不該做出可點擊的暗示；函式本身是純粹重算，重複呼叫沒有副作用
+        const applyZoomGuard = () => {
             const fitsAlready = img.naturalWidth <= els.imageModalBody.clientWidth
                 && img.naturalHeight <= els.imageModalBody.clientHeight;
             img.classList.toggle('no-zoom', fitsAlready);
         };
 
+        img.onload = applyZoomGuard;
         img.src = url;
+        // 一定要先 show() 讓 modal 進入版面，modal-body 的 clientWidth/Height 才量得到正確值；
+        // 這裡量到的還是隱藏狀態的 0×0，fitsAlready 永遠算不出來
         bootstrap.Modal.getOrCreateInstance(els.imageModal).show();
+
+        // 連續開啟「同一張」圖片時 src 沒變，不同瀏覽器對這種情況下 onload/complete/decode()
+        // 該不該再觸發一次的語意實測並不一致，三種訊號一起掛，哪個先來就套用，比賭中某一個更穩
+        img.decode().then(applyZoomGuard).catch(() => {});
+        requestAnimationFrame(() => requestAnimationFrame(applyZoomGuard));
     }
 
     function toggleImageZoom() {
@@ -482,6 +514,10 @@
     function isNearBottom() {
         const list = els.messageList;
         return list.scrollHeight - list.scrollTop - list.clientHeight < NEAR_BOTTOM_THRESHOLD_PX;
+    }
+
+    function isNearTop() {
+        return els.messageList.scrollTop < NEAR_TOP_THRESHOLD_PX;
     }
 
     function scrollToBottom(smooth) {
@@ -848,13 +884,18 @@
         }
         state.newestId = page.latestId ?? state.newestId;
         state.hasMoreOlder = page.hasMore;
-        updateLoadMoreButton();
+        // 先捲到底再判斷膠囊要不要顯示，不然這裡量到的還是捲動前（頂部）的位置，
+        // 「沒有更早的訊息」會在捲到底之前閃一下才消失
         scrollToBottom(false);
+        updateLoadMoreButton();
     }
 
     function updateLoadMoreButton() {
         els.loadMoreBtn.disabled = !state.hasMoreOlder;
         els.loadMoreBtn.textContent = state.hasMoreOlder ? '載入更早 7 天' : '沒有更早的訊息';
+        // 「載入更早」是操作入口，常駐；「沒有更早的訊息」只是告知狀態，捲到畫面中間看到很突兀，
+        // 只在捲到最頂部附近時才顯示
+        els.loadMoreBtn.classList.toggle('d-none', !state.hasMoreOlder && !isNearTop());
     }
 
     async function loadOlder() {
@@ -962,8 +1003,10 @@
     const FONT_BASE_PX_MIN = 12;
     const FONT_BASE_PX_MAX = 28;
 
-    // 「中」檔的實際 px 大小，跟設定頁的「字體大小」數值輸入共用同一個 localStorage key；
-    // 這裡只讀不寫——調整數值的介面只在設定頁，聊天頁的 Aa 選單維持小/中/大三檔切換
+    // 「中」檔的實際 px 大小，跟設定 modal 的「字體大小」數值輸入共用同一個 localStorage key；
+    // 這裡只讀不寫——調整數值的介面在設定 modal，聊天頁的 Aa 選單維持小/中/大三檔切換。
+    // 設在 document.documentElement 上（不是 #chat-app）：設定 modal 跟聊天畫面在同一個頁面，
+    // 但 modal 在 DOM 裡不是 #chat-app 的子節點，掛在共同的根元素上兩邊才都吃得到
     function applyFontBasePx() {
         let saved;
         try {
@@ -974,7 +1017,7 @@
         const px = Number.isFinite(saved) && saved >= FONT_BASE_PX_MIN && saved <= FONT_BASE_PX_MAX
             ? saved
             : DEFAULT_FONT_BASE_PX;
-        els.chatApp.style.setProperty('--font-base-px', `${px}px`);
+        document.documentElement.style.setProperty('--font-base-px', `${px}px`);
     }
 
     function applyFontSize(size) {
@@ -1044,6 +1087,12 @@
         initFontSizeToggle();
 
         els.imageModalImg.addEventListener('click', toggleImageZoom);
+        // 點空白處（不是圖片本身、也不是關閉鈕）關閉燈箱，補回全螢幕 modal 少掉的「點背景關閉」直覺
+        els.imageModalBody.addEventListener('click', (e) => {
+            if (e.target === els.imageModalBody) {
+                bootstrap.Modal.getInstance(els.imageModal)?.hide();
+            }
+        });
         els.loadMoreBtn.addEventListener('click', loadOlder);
         els.groupSearch.addEventListener('input', () => renderGroupList(els.groupSearch.value));
         els.mobileBackBtn.addEventListener('click', () => els.chatApp.classList.remove('mobile-chat-open'));
@@ -1056,6 +1105,7 @@
             if (near !== state.following) {
                 setFollowing(near);
             }
+            updateLoadMoreButton();
         });
 
         els.searchToggleBtn.addEventListener('click', () => {
@@ -1087,6 +1137,15 @@
             });
         }
         els.historicalBackBtn.addEventListener('click', () => selectGroup(state.groupId));
+
+        // 設定 modal 關掉時，如果這次開啟期間真的改了東西（名稱顯示模式、關鍵字規則等），
+        // settings.js 會發這個事件——重新載入目前群組的訊息視窗＋側欄，不用使用者自己重新整理
+        document.addEventListener('messageservice:settings-changed', () => {
+            if (state.groupId) {
+                selectGroup(state.groupId);
+            }
+            pollGroups();
+        });
 
         loadGroups().catch(() => setConnectionOk(false));
         setInterval(pollNewer, POLL_INTERVAL_MS);

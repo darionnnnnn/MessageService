@@ -1,0 +1,139 @@
+<div class="modal fade" id="settings-modal" tabindex="-1" aria-hidden="true" aria-labelledby="settings-modal-title">
+    <div class="modal-dialog modal-xl modal-dialog-scrollable modal-fullscreen-md-down">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="settings-modal-title">設定</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="關閉"></button>
+            </div>
+            <div id="settings-modal-body" class="modal-body">
+                <div id="toast-container" class="toast-container position-fixed bottom-0 end-0 p-3"></div>
+
+                <div id="settings-app" class="settings-app">
+                    <ul class="nav nav-tabs" id="settings-tabs" role="tablist">
+                        <li class="nav-item" role="presentation">
+                            <button class="nav-link active" id="tab-interface-btn" data-bs-toggle="tab" data-bs-target="#tab-interface" type="button" role="tab" aria-controls="tab-interface" aria-selected="true">介面顯示</button>
+                        </li>
+                        <li class="nav-item" role="presentation">
+                            <button class="nav-link" id="tab-privacy-btn" data-bs-toggle="tab" data-bs-target="#tab-privacy" type="button" role="tab" aria-controls="tab-privacy" aria-selected="false">隱私與匿名</button>
+                        </li>
+                        <li class="nav-item" role="presentation">
+                            <button class="nav-link" id="tab-keywords-btn" data-bs-toggle="tab" data-bs-target="#tab-keywords" type="button" role="tab" aria-controls="tab-keywords" aria-selected="false">關鍵字遮蔽</button>
+                        </li>
+                    </ul>
+
+                    <div class="tab-content settings-tab-content">
+                        <div class="tab-pane fade show active" id="tab-interface" role="tabpanel" aria-labelledby="tab-interface-btn">
+                            <section class="settings-card">
+                                <div class="row g-3 align-items-end">
+                                    <div class="col-auto">
+                                        <label for="font-base-px-input" class="form-label">字體大小（px）</label>
+                                        <input type="number" class="form-control form-control-sm" id="font-base-px-input"
+                                               min="12" max="28" step="1" style="width:6rem">
+                                    </div>
+                                    <div class="col-auto">
+                                        <span id="font-base-px-preview">預覽：今天天氣真好</span>
+                                    </div>
+                                </div>
+                                <p class="form-text">這個數值＝對話頁「中」字級的實際大小，「小」「大」會依比例跟著調整；這個視窗本身的文字也會套用同一個大小，背後的聊天畫面也會即時跟著變。</p>
+                            </section>
+                        </div>
+
+                        <div class="tab-pane fade" id="tab-privacy" role="tabpanel" aria-labelledby="tab-privacy-btn">
+                            <section class="settings-card">
+                                <div class="mb-3">
+                                    <div class="form-check">
+                                        <input class="form-check-input" type="radio" name="display-mode" id="mode-original" value="Original">
+                                        <label class="form-check-label" for="mode-original">原名</label>
+                                    </div>
+                                    <div class="form-check">
+                                        <input class="form-check-input" type="radio" name="display-mode" id="mode-mask" value="MaskMiddle">
+                                        <label class="form-check-label" for="mode-mask">首尾保留、中間 *</label>
+                                    </div>
+                                    <div class="form-check">
+                                        <input class="form-check-input" type="radio" name="display-mode" id="mode-alias" value="CustomAlias">
+                                        <label class="form-check-label" for="mode-alias">自訂別名（沒設定別名的人 fallback 首尾遮蔽）</label>
+                                    </div>
+                                    <div class="form-check">
+                                        <input class="form-check-input" type="radio" name="display-mode" id="mode-anonymous" value="Anonymous">
+                                        <label class="form-check-label" for="mode-anonymous">完全匿名（動物／植物代號，如「小熊」）</label>
+                                    </div>
+                                </div>
+                                <p class="form-text">選擇遮蔽、自訂別名或完全匿名時，頭貼會同步換成預設圖示，不會因為照片而看得出真實身分。完全匿名模式下每人會固定拿到一個代號，同一人的代號永遠不變，方便辨認「是不是同一個人在說話」但不會透露是誰。</p>
+
+                                <div id="alias-editor" class="d-none">
+                                    <div class="mb-2">
+                                        <label for="alias-group-filter" class="form-label me-2">篩選群組</label>
+                                        <select id="alias-group-filter" class="form-select form-select-sm d-inline-block" style="width:auto"></select>
+                                    </div>
+                                    <table class="table table-sm">
+                                        <thead>
+                                            <tr>
+                                                <th>使用者</th>
+                                                <th>別名</th>
+                                                <th></th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="alias-tbody"></tbody>
+                                    </table>
+                                </div>
+                            </section>
+                        </div>
+
+                        <div class="tab-pane fade" id="tab-keywords" role="tabpanel" aria-labelledby="tab-keywords-btn">
+                            <section class="settings-card">
+                                <table class="table table-sm align-middle">
+                                    <thead>
+                                        <tr>
+                                            <th>關鍵字</th>
+                                            <th>替換方式</th>
+                                            <th>套用群組</th>
+                                            <th></th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="keyword-tbody"></tbody>
+                                </table>
+
+                                <form id="keyword-form" class="row g-3 align-items-start border-top pt-3">
+                                    <div class="col-auto">
+                                        <label for="keyword-input" class="form-label">關鍵字</label>
+                                        <input type="text" class="form-control form-control-sm" id="keyword-input" required>
+                                    </div>
+
+                                    <div class="col-auto">
+                                        <span class="form-label d-block">替換方式</span>
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="radio" name="replacement-mode" id="replacement-default" checked>
+                                            <label class="form-check-label" for="replacement-default">預設（等長 *）</label>
+                                        </div>
+                                        <div class="form-check d-flex align-items-center gap-2">
+                                            <input class="form-check-input" type="radio" name="replacement-mode" id="replacement-custom">
+                                            <label class="form-check-label" for="replacement-custom">自訂</label>
+                                            <input type="text" class="form-control form-control-sm" style="width:8rem" id="replacement-input" disabled>
+                                        </div>
+                                    </div>
+
+                                    <div class="col-auto">
+                                        <span class="form-label d-block">套用範圍</span>
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="radio" name="scope-mode" id="scope-all" checked>
+                                            <label class="form-check-label" for="scope-all">全部群組</label>
+                                        </div>
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="radio" name="scope-mode" id="scope-selected">
+                                            <label class="form-check-label" for="scope-selected">指定群組</label>
+                                        </div>
+                                        <div id="scope-group-checkboxes" class="ms-3 mt-1 d-none"></div>
+                                    </div>
+
+                                    <div class="col-auto align-self-end">
+                                        <button type="submit" class="btn btn-primary btn-sm">新增規則</button>
+                                    </div>
+                                </form>
+                            </section>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>

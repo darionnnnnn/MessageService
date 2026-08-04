@@ -9,4 +9,5 @@ public record MessageDto(
     DateTimeOffset EventTimestamp,
     MessageContentDto? Content,
     string? PictureUrl,
-    string? AvatarIcon);
+    string? AvatarIcon,
+    string? StickerId);

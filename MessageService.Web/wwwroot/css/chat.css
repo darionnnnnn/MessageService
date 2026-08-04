@@ -194,6 +194,7 @@ body.chat-page {
     padding: .5rem 0;
 }
 
+/* 現在是開設定 modal 的 <button>，不是連結——重置一下按鈕預設樣式 */
 .sidebar-settings-link {
     display: flex;
     box-sizing: border-box;
@@ -202,10 +203,15 @@ body.chat-page {
     align-items: center;
     gap: .5rem;
     padding: .5rem calc(var(--gutter) - .5rem);
+    border: none;
     border-radius: var(--radius-md);
+    background: transparent;
     color: #333;
     text-decoration: none;
+    text-align: left;
+    font-family: inherit;
     font-size: calc(var(--chat-base-current) * 1rem / 1.15rem);
+    cursor: pointer;
 }
 
 .sidebar-settings-link:hover {
@@ -657,6 +663,15 @@ body.chat-page {
     display: none;
 }
 
+/* 貼圖跟 LINE 一樣浮貼在背景上，不裝進白色泡泡；固定尺寸不跟字級縮放
+   （貼圖是圖形內容，比照頭貼/圖示的既有原則） */
+.msg-sticker {
+    display: block;
+    width: 7.5rem;
+    height: 7.5rem;
+    object-fit: contain;
+}
+
 /* LINE 的時間戳是貼在泡泡外側，不是泡泡裡面 */
 .msg-time {
     flex: none;
@@ -812,10 +827,17 @@ body.chat-page {
     justify-content: flex-start;
 }
 
+/* box-sizing: border-box 讓白框的寬度算進 max-width/max-height 的上限裡，
+   不會因為多了邊框而超出視窗一點點 */
 #image-modal-img {
+    box-sizing: border-box;
     display: block;
     max-width: 100vw;
     max-height: 100vh;
+    border: 6px solid #fff;
+    border-radius: .35rem;
+    background: #fff;
+    box-shadow: 0 6px 24px rgba(0, 0, 0, .5);
     cursor: zoom-in;
 }
 
@@ -828,6 +850,27 @@ body.chat-page {
 /* 圖片本來就比視窗小，縮放至符合版面＝原尺寸，沒有東西可以放大，游標不做出可點擊的暗示 */
 #image-modal-img.no-zoom {
     cursor: default;
+}
+
+/* 固定在視窗右上角（不是 modal-body），原尺寸捲動模式下也不會被捲走 */
+.image-lightbox-close {
+    position: fixed;
+    top: 1rem;
+    right: 1rem;
+    z-index: 10;
+    width: 2.5rem;
+    height: 2.5rem;
+    border: none;
+    border-radius: 50%;
+    background: rgba(0, 0, 0, .55);
+    color: #fff;
+    font-size: 1.2rem;
+    line-height: 1;
+    cursor: pointer;
+}
+
+.image-lightbox-close:hover {
+    background: rgba(0, 0, 0, .75);
 }
 
 /* === 手機版：群組列表與聊天面板全螢幕切換 === */

@@ -15,4 +15,10 @@ public class LineMessage
 
     [JsonPropertyName("fileName")]
     public string? FileName { get; set; }
+
+    [JsonPropertyName("stickerId")]
+    public string? StickerId { get; set; }
+
+    [JsonPropertyName("packageId")]
+    public string? PackageId { get; set; }
 }
