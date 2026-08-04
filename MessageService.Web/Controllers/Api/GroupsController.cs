@@ -10,8 +10,6 @@ namespace MessageService.Web.Controllers.Api;
 [Route("api/groups")]
 public class GroupsController(MessageDbContext dbContext, IMaskingService maskingService) : ControllerBase
 {
-    private const int PreviewMaxLength = 30;
-
     [HttpGet]
     public async Task<ActionResult<IReadOnlyList<GroupDto>>> GetGroups(CancellationToken cancellationToken)
     {
@@ -54,7 +52,7 @@ public class GroupsController(MessageDbContext dbContext, IMaskingService maskin
             {
                 groupCache.TryGetValue(id, out var cached);
                 var lastMessage = lastMessages[id];
-                var preview = BuildPreview(lastMessage.MessageType, lastMessage.Text, maskingRules, id);
+                var preview = MessagePreviewFormatter.Format(lastMessage.MessageType, lastMessage.Text, maskingRules, id);
 
                 return new GroupDto(
                     id,
@@ -70,21 +68,4 @@ public class GroupsController(MessageDbContext dbContext, IMaskingService maskin
         return Ok(result);
     }
 
-    private static string BuildPreview(string messageType, string? text, IMaskingRuleSet maskingRules, string groupId)
-    {
-        var label = messageType switch
-        {
-            "text" => Truncate(maskingRules.MaskText(groupId, text ?? string.Empty)),
-            "sticker" => "[貼圖]",
-            "image" => "[圖片]",
-            "video" => "[影片]",
-            "audio" => "[語音訊息]",
-            "file" => "[檔案]",
-            _ => "[訊息]"
-        };
-        return label;
-    }
-
-    private static string Truncate(string text) =>
-        text.Length <= PreviewMaxLength ? text : text[..PreviewMaxLength] + "…";
 }

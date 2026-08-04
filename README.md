@@ -98,27 +98,30 @@ dotnet user-secrets set "Line:ChannelAccessToken" "<你的 access token>"
 
 **對話頁（`/`）**：原生 JS 模擬 LINE 的雙欄版面（Bootstrap 只保留 modal/toast/表單控件），所有資料透過 API 取得（不走 MVC Model 傳遞）。
 
-- **左側欄**：群組列表（頭貼、名稱、最後訊息預覽、時間，依最後活動倒序），前端即時搜尋過濾，底部為設定頁入口。取代早期的下拉選單
-- **聊天面板**：與背景同色的透明標頭（群組頭貼＋名稱＋成員數＋「Aa」字級下拉）、訊息泡泡（首顆帶指向頭貼的小尾巴、時間戳貼泡泡外側）、底部仿 LINE 輸入列但唯讀化（圖示灰化不可點、中央膠囊顯示同步狀態）
+- **左側欄**：群組列表（頭貼、名稱、最後訊息預覽、時間，依最後活動倒序），前端即時搜尋過濾，底部為設定頁入口。取代早期的下拉選單；側欄與聊天面板的所有區塊共用同一份 `--gutter`/`--radius-*` token（chat.css），群組項目與設定入口是內縮圓角卡而非通版直角色塊
+- **聊天面板**：標頭有自己的底色（`--line-header-bg`，比訊息區深一階）＋陰影，跟訊息區明確分層（群組頭貼＋名稱＋成員數＋🔍搜尋＋「Aa」字級下拉）；訊息泡泡首顆帶指向頭貼的小尾巴（左上角、跟著字級用 em 縮放，避免大字級時圓角比尾巴大造成脫節）、時間戳貼泡泡外側；底部仿 LINE 輸入列但唯讀化（圖示灰化不可點、中央膠囊顯示同步狀態）
 - **頭貼**：`Original` 模式顯示真實 LINE 頭貼（`referrerpolicy="no-referrer"`，載入失敗 fallback 代號圖示）；其他模式一律顯示伺服器指派的動植物代號圖示（emoji 渲染，前端 `ICON_EMOJI` 對照表需與後端 `AvatarIconCatalog` 的 IconKey 同步維護）
+- **字級**：設定頁「字體大小」數值輸入（px）＝聊天頁「中」檔泡泡文字的實際大小，小／大依比例（.87×／1.13×）跟著調整；聊天頁全部 16 處文字（不含頭貼/圖示）與設定頁本身的文字都吃同一份 `--font-base-px`（localStorage key `chat-font-base-px`，透過 inline style 覆寫、不寫死在樣式表裡，才不會被 CSS cascade 蓋掉）
 - 預設載入 3 天內對話，「載入更早 7 天」膠囊以最舊訊息 Id 當游標往前翻頁，沒有更早歷史時自動 disable。兩個「按了會沒反應」的空窗情況都有處理：畫面上一則訊息都沒有（沒有游標可用）時改成放大天數視窗重繪；群組沉寂比一個視窗還久時由 API 把視窗錨定到下一則更早訊息，保證每次點擊都會前進
 - 「回到最新」浮動按鈕：使用者往上捲動時自動退出跟隨模式並顯示未讀數，點擊或捲回底部即恢復跟隨並自動捲到新訊息
-- 每 3 秒輪詢新訊息與 Pending 內容的下載狀態，每 10 秒輪詢側欄群組列表（新群組/預覽/排序）；分頁隱藏（`document.hidden`）時兩者皆暫停輪詢
+- **訊息搜尋**：標頭 🔍 展開搜尋列（本群組／全部群組切換），比對訊息內容與發言者名稱，結果以 `<mark>` 高亮；點結果用 `aroundId` 跳轉到該訊息的上下文並閃爍定位，同時把視窗內符合的文字也標出來。跳轉後進入「歷史檢視」，此時 4 秒訊息輪詢**只更新 Pending 內容狀態、不把新訊息接到視窗尾端**（避免時間軸斷層），畫面改顯示「回到最新」常駐按鈕，點擊會呼叫既有的群組選取流程整個重置回即時畫面
+- 每 3 秒輪詢新訊息與 Pending 內容的下載狀態，每 10 秒輪詢側欄群組列表（新群組/預覽/排序，歷史檢視期間依然照跑）；分頁隱藏（`document.hidden`）時皆暫停輪詢
 - 新訊息進場有淡入＋位移動效（`prefers-reduced-motion` 使用者會停用）
-- 圖片／影片／語音／檔案依 `DownloadStatus` 顯示 spinner／播放器／下載連結／失敗訊息
-- 文字訊息中的網址會轉成可點連結（`target="_blank"` + `rel="noopener noreferrer"`）；所有內容一律用 DOM 節點組裝（`textContent`／`createElement`），不用 `innerHTML`，避免訊息內容造成 XSS
+- 圖片／影片／語音／檔案依 `DownloadStatus` 顯示 spinner／播放器／下載連結／失敗訊息；圖片點擊開全螢幕燈箱，預設縮到剛好符合視窗（不放大本來就比較小的圖），再點一次切換原始尺寸並可捲動查看局部
+- 文字訊息中的網址會轉成可點連結（`target="_blank"` + `rel="noopener noreferrer"`）；所有內容（含搜尋高亮）一律用 DOM 節點組裝（`textContent`／`createElement`），不用 `innerHTML`，避免訊息內容造成 XSS
 - **手機版（<768px）**：群組列表與聊天面板全螢幕切換，標頭出現「‹」返回鈕，仿 LINE 手機版導覽
 
-**設定頁（`/Home/Settings`）**：卡片式版面。隱私與匿名（名稱顯示四模式，含完全匿名動植物代號；別名編輯器可依群組篩選成員）；關鍵字遮蔽規則（新增/刪除，預設等長 `*` 或自訂替換字串，全部群組或指定群組）。變更即存，PUT 後顯示 toast。
+**設定頁（`/Home/Settings`）**：卡片式版面。介面顯示（字體大小 px 數值設定，見上方「字級」）；隱私與匿名（名稱顯示四模式，含完全匿名動植物代號；別名編輯器可依群組篩選成員）；關鍵字遮蔽規則（新增/刪除，預設等長 `*` 或自訂替換字串，全部群組或指定群組）。變更即存（字體大小為 localStorage、不進 DB，其餘 PUT 後顯示 toast）。
 
 **API**（都在 `MessageService.Web/Controllers/Api/`）：
 
 | 端點 | 用途 |
 |---|---|
 | `GET /api/groups` | 群組清單（僅列出有訊息的群組，名稱取自快取，無快取則顯示 GroupId；含最後訊息預覽〔已套遮蔽〕、最後訊息時間、成員數，依最後活動倒序） |
-| `GET /api/groups/{groupId}/messages?days=` / `?beforeId=&days=` / `?afterId=` | 初載 / 往前加載 / 輪詢新訊息，回應已套用遮蔽 |
+| `GET /api/groups/{groupId}/messages?days=` / `?beforeId=&days=` / `?afterId=` / `?aroundId=&days=` | 初載 / 往前加載 / 輪詢新訊息 / 以指定訊息為錨點開前後視窗（搜尋結果跳轉用），回應已套用遮蔽 |
 | `GET /api/messages/{id}/content` | 內容串流，支援 HTTP Range（見下方實作說明） |
 | `GET /api/messages/statuses?ids=` | 查詢多筆內容目前的 `DownloadStatus` |
+| `GET /api/messages/search?q=&groupId=` | 訊息搜尋，比對文字訊息內容與解析後的發言者名稱，`groupId` 省略＝搜尋全部群組，上限 100 筆、新→舊排序（見下方「訊息搜尋」） |
 | `GET/PUT /api/settings/display` | 名稱顯示模式 |
 | `GET/POST/PUT/DELETE /api/settings/keywords[/{id}]` | 關鍵字遮蔽規則 CRUD |
 | `GET/PUT/DELETE /api/settings/aliases[/{userId}]` | 使用者別名對照 |
@@ -138,6 +141,15 @@ dotnet user-secrets set "Line:ChannelAccessToken" "<你的 access token>"
   - `Anonymous`：名稱與頭貼一律替換為動植物代號（如「小熊」），由 `IAnonymousIdentityService` 依群組+使用者永久指派並存進 `AnonymousIdentities`，翻閱舊訊息時代號不會變、可分辨是否為同一人但認不出真實身分
 
 以上四種模式（`Original` 除外）回應中一律不含真實 `PictureUrl`，即使前端不渲染也不外流，因為 URL 本身就是身分線索。
+
+### 訊息搜尋
+
+`GET /api/messages/search`（`MessagesController.Search`）比對文字訊息內容與解析後的發言者名稱，兩者符合其一即算命中；核心設計是不能讓搜尋變成遮蔽機制的後門：
+
+- **內容比對**：SQL 端先用原文 `LIKE`（`EF.Functions.Like` 帶 `ESCAPE`，`%`/`_`/`\` 會被跳脫成字面）撈候選，於記憶體用 `MaskingRuleSet.MaskText` 套用後的文字**重新驗證**仍含關鍵字才算命中——被關鍵字規則遮掉的詞（如「密碼」）搜不到，摘要也只顯示遮蔽後的文字，不會洩漏原文。
+- **名稱比對**：走當下顯示模式**解析後**的名稱（`Original` 比對原名、`MaskMiddle`/`CustomAlias` 比對遮蔽後名稱或別名、`Anonymous` 比對動植物代號），符合的成員底下所有訊息都算命中（不限訊息內容本身有沒有關鍵字）。`Anonymous` 模式下只讀 `AnonymousIdentities`、**不觸發指派**——沒被指派過代號的成員姓名比對就是找不到，指派只應該發生在使用者實際開啟訊息視窗時。
+- **範圍與限制**：`groupId` 省略即搜尋全部群組；只搜文字訊息的 `Text` 欄（媒體訊息無文字可搜，檔名未經遮蔽管線、不搜）；結果上限 100 筆、依 `EventTimestamp` 新到舊排序，不做分頁；`Text` 欄無索引，全掃在目前資料量級（單機、萬則內）可接受，量大再評估 FTS。
+- **跳轉上下文**：搜尋結果可用 `GET /api/groups/{groupId}/messages?aroundId={messageId}&days=` 取得以該訊息為錨點、前後各 `days` 天的視窗（含該訊息本身），供前端捲動並高亮；此模式回應不含 `latestId`（跳轉後屬歷史檢視，前端會暫停新訊息輪詢，不需要輪詢基準）。
 
 ### IP 白名單（沒有登入機制）
 

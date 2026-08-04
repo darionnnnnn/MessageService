@@ -45,7 +45,13 @@
         pendingContentIds: new Set(),
         lastAppendedDateKey: null,
         lastAppendedSenderId: null,
-        connectionOk: true
+        connectionOk: true,
+        // 從搜尋結果跳轉到歷史上下文時為 true：pollNewer 暫停把新訊息接到視窗尾端
+        // （避免時間軸斷層），使用者要點「回到最新」整個重置回即時畫面才會恢復
+        historicalView: false,
+        searchScope: 'group',
+        // 跟 requestToken 分開算——切群組不該讓正在飛的搜尋請求作廢，反之亦然
+        searchRequestToken: 0
     };
 
     const els = {};
@@ -172,6 +178,62 @@
         }
         if (lastIndex < text.length) {
             container.appendChild(document.createTextNode(text.slice(lastIndex)));
+        }
+    }
+
+    // 把 text 裡所有（不分大小寫）符合 query 的片段包成 <mark>，其餘仍是純文字節點；
+    // 搜尋結果列表跟訊息串裡的關鍵字高亮共用同一份邏輯
+    function buildHighlightedFragment(text, query) {
+        const fragment = document.createDocumentFragment();
+        if (!query) {
+            fragment.appendChild(document.createTextNode(text));
+            return fragment;
+        }
+
+        const lowerText = text.toLowerCase();
+        const lowerQuery = query.toLowerCase();
+        let cursor = 0;
+        let index = lowerText.indexOf(lowerQuery, cursor);
+        while (index !== -1) {
+            if (index > cursor) {
+                fragment.appendChild(document.createTextNode(text.slice(cursor, index)));
+            }
+            const mark = document.createElement('mark');
+            mark.className = 'search-highlight';
+            mark.textContent = text.slice(index, index + query.length);
+            fragment.appendChild(mark);
+            cursor = index + query.length;
+            index = lowerText.indexOf(lowerQuery, cursor);
+        }
+        if (cursor < text.length) {
+            fragment.appendChild(document.createTextNode(text.slice(cursor)));
+        }
+        return fragment;
+    }
+
+    // 跳轉到搜尋結果後，把目前渲染出來的訊息串裡符合關鍵字的文字節點換成上面那份高亮結果
+    // （只處理純文字節點、跳過 <a> 連結內部，避免弄壞連結）；每個文字節點只標第一個符合的地方，
+    // 對聊天訊息這種短文字已經夠用，不做進一步的多重比對
+    function highlightQueryInMessageList(query) {
+        if (!query) {
+            return;
+        }
+        const lowerQuery = query.toLowerCase();
+        for (const contentEl of els.messageList.querySelectorAll('.bubble > div')) {
+            const walker = document.createTreeWalker(contentEl, NodeFilter.SHOW_TEXT);
+            const textNodes = [];
+            let node = walker.nextNode();
+            while (node) {
+                textNodes.push(node);
+                node = walker.nextNode();
+            }
+            for (const textNode of textNodes) {
+                const text = textNode.textContent;
+                if (!text.toLowerCase().includes(lowerQuery)) {
+                    continue;
+                }
+                textNode.replaceWith(buildHighlightedFragment(text, query));
+            }
         }
     }
 
@@ -387,9 +449,32 @@
         pendingEl.replaceWith(replacement);
     }
 
+    // === 圖片燈箱：預設縮到符合版面，點擊在「符合版面／原尺寸」間切換 ===
+
     function openImageModal(url) {
-        els.imageModalImg.src = url;
+        const img = els.imageModalImg;
+        img.classList.remove('original-size', 'no-zoom');
+        els.imageModalBody.classList.remove('zoomed');
+
+        // 圖片本身比視窗小的話「原尺寸」跟「符合版面」看起來一樣，沒有東西可以放大，
+        // 游標不該做出可點擊的暗示；naturalWidth/Height 要等圖片載入完才拿得到
+        img.onload = () => {
+            const fitsAlready = img.naturalWidth <= els.imageModalBody.clientWidth
+                && img.naturalHeight <= els.imageModalBody.clientHeight;
+            img.classList.toggle('no-zoom', fitsAlready);
+        };
+
+        img.src = url;
         bootstrap.Modal.getOrCreateInstance(els.imageModal).show();
+    }
+
+    function toggleImageZoom() {
+        const img = els.imageModalImg;
+        if (img.classList.contains('no-zoom')) {
+            return;
+        }
+        const zoomed = img.classList.toggle('original-size');
+        els.imageModalBody.classList.toggle('zoomed', zoomed);
     }
 
     // === 置底跟隨 ===
@@ -404,9 +489,15 @@
     }
 
     function updateFollowUi() {
-        els.scrollBottomBtn.classList.toggle('d-none', state.following);
+        // 歷史檢視期間浮動鈕讓位給 historical-banner 的「回到最新」，兩個「回到最新」入口同時
+        // 出現會讓人搞不清楚差別
+        els.scrollBottomBtn.classList.toggle('d-none', state.following || state.historicalView);
         els.unreadBadge.classList.toggle('d-none', state.unreadCount === 0);
         els.unreadBadge.textContent = String(state.unreadCount);
+    }
+
+    function updateHistoricalBanner() {
+        els.historicalBanner.classList.toggle('d-none', !state.historicalView);
     }
 
     function setFollowing(following) {
@@ -511,6 +602,154 @@
         els.chatHeaderMembers.textContent = group && group.memberCount > 0 ? `(${group.memberCount})` : '';
     }
 
+    // === 訊息搜尋 ===
+
+    const SEARCH_DEBOUNCE_MS = 300;
+    let searchDebounceTimer = null;
+
+    function openSearchPanel() {
+        els.searchPanel.classList.remove('d-none');
+        els.searchInput.focus();
+    }
+
+    function closeSearchPanel() {
+        els.searchPanel.classList.add('d-none');
+        els.searchInput.value = '';
+        els.searchResults.innerHTML = '';
+        // 讓還在飛的搜尋回應回來時發現對不上而被丟棄，不會在關閉後突然補畫結果
+        state.searchRequestToken++;
+    }
+
+    function scheduleSearch() {
+        clearTimeout(searchDebounceTimer);
+        searchDebounceTimer = setTimeout(runSearch, SEARCH_DEBOUNCE_MS);
+    }
+
+    async function runSearch() {
+        const query = els.searchInput.value.trim();
+        if (!query) {
+            els.searchResults.innerHTML = '';
+            return;
+        }
+
+        const token = ++state.searchRequestToken;
+        let url = `/api/messages/search?q=${encodeURIComponent(query)}`;
+        if (state.searchScope === 'group' && state.groupId) {
+            url += `&groupId=${encodeURIComponent(state.groupId)}`;
+        }
+
+        let results;
+        try {
+            results = await fetchJson(url);
+        } catch {
+            return;
+        }
+        if (token !== state.searchRequestToken) {
+            return;
+        }
+        renderSearchResults(results, query);
+    }
+
+    function renderSearchResults(results, query) {
+        els.searchResults.innerHTML = '';
+
+        if (results.length === 0) {
+            const empty = document.createElement('div');
+            empty.className = 'search-result-empty';
+            empty.textContent = '找不到符合的訊息';
+            els.searchResults.appendChild(empty);
+            return;
+        }
+
+        for (const result of results) {
+            els.searchResults.appendChild(createSearchResultItem(result, query));
+        }
+    }
+
+    function createSearchResultItem(result, query) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'search-result-item';
+
+        const meta = document.createElement('div');
+        meta.className = 'search-result-meta';
+
+        const groupLabel = document.createElement('span');
+        groupLabel.textContent = result.groupDisplayName;
+        meta.appendChild(groupLabel);
+
+        const sep = document.createElement('span');
+        sep.textContent = '・';
+        meta.appendChild(sep);
+
+        const nameLabel = document.createElement('span');
+        nameLabel.className = 'search-result-name';
+        nameLabel.appendChild(buildHighlightedFragment(result.displayName, query));
+        meta.appendChild(nameLabel);
+
+        const time = document.createElement('span');
+        time.className = 'search-result-time';
+        time.textContent = formatListTime(result.eventTimestamp);
+        meta.appendChild(time);
+
+        btn.appendChild(meta);
+
+        const snippet = document.createElement('div');
+        snippet.className = 'search-result-snippet';
+        snippet.appendChild(buildHighlightedFragment(result.snippet, query));
+        btn.appendChild(snippet);
+
+        btn.addEventListener('click', () => jumpToSearchResult(result, query));
+        return btn;
+    }
+
+    async function jumpToSearchResult(result, query) {
+        const token = ++state.requestToken;
+
+        if (result.groupId !== state.groupId) {
+            state.groupId = result.groupId;
+            updateActiveGroupItem();
+            updateChatHeader(state.groups.find(g => g.groupId === result.groupId));
+            els.chatApp.classList.add('mobile-chat-open');
+        }
+
+        state.oldestId = null;
+        state.hasMoreOlder = false;
+        state.historicalView = true;
+        updateHistoricalBanner();
+        setFollowing(true);
+        clearMessageList();
+        updateLoadMoreButton();
+        closeSearchPanel();
+
+        try {
+            const page = await fetchJson(
+                `/api/groups/${encodeURIComponent(result.groupId)}/messages?aroundId=${result.messageId}&days=${INITIAL_DAYS}`);
+            if (token !== state.requestToken) {
+                return;
+            }
+            appendMessages(page.messages, false);
+            if (page.messages.length > 0) {
+                state.oldestId = page.messages[0].id;
+            }
+            state.hasMoreOlder = page.hasMore;
+            updateLoadMoreButton();
+            highlightQueryInMessageList(query);
+
+            const targetRow = els.messageList.querySelector(`[data-message-id="${result.messageId}"]`);
+            if (targetRow) {
+                targetRow.scrollIntoView({ block: 'center' });
+                targetRow.classList.add('message-highlight-flash');
+                setTimeout(() => targetRow.classList.remove('message-highlight-flash'), 1600);
+            }
+            setConnectionOk(true);
+        } catch {
+            if (token === state.requestToken) {
+                setConnectionOk(false);
+            }
+        }
+    }
+
     // === 資料載入 ===
 
     async function loadGroups() {
@@ -569,6 +808,8 @@
         state.newestId = null;
         state.daysWindow = INITIAL_DAYS;
         state.hasMoreOlder = false;
+        state.historicalView = false;
+        updateHistoricalBanner();
         setFollowing(true);
         clearMessageList();
 
@@ -668,7 +909,9 @@
         const token = state.requestToken;
         state.polling = true;
         try {
-            if (state.newestId != null) {
+            // 歷史檢視期間不把新訊息接到視窗尾端（視窗錨定在過去某個時間點，接了會出現時間斷層）；
+            // Pending 內容狀態輪詢照常，跟目前看的是不是即時畫面無關
+            if (state.newestId != null && !state.historicalView) {
                 const page = await fetchJson(
                     `/api/groups/${encodeURIComponent(state.groupId)}/messages?afterId=${state.newestId}`);
                 if (token !== state.requestToken) {
@@ -714,6 +957,26 @@
 
     // === 字體大小（存 localStorage，每台裝置各自記，不進 DB） ===
 
+    const FONT_BASE_PX_STORAGE_KEY = 'chat-font-base-px';
+    const DEFAULT_FONT_BASE_PX = 20;
+    const FONT_BASE_PX_MIN = 12;
+    const FONT_BASE_PX_MAX = 28;
+
+    // 「中」檔的實際 px 大小，跟設定頁的「字體大小」數值輸入共用同一個 localStorage key；
+    // 這裡只讀不寫——調整數值的介面只在設定頁，聊天頁的 Aa 選單維持小/中/大三檔切換
+    function applyFontBasePx() {
+        let saved;
+        try {
+            saved = parseInt(localStorage.getItem(FONT_BASE_PX_STORAGE_KEY), 10);
+        } catch {
+            saved = NaN;
+        }
+        const px = Number.isFinite(saved) && saved >= FONT_BASE_PX_MIN && saved <= FONT_BASE_PX_MAX
+            ? saved
+            : DEFAULT_FONT_BASE_PX;
+        els.chatApp.style.setProperty('--font-base-px', `${px}px`);
+    }
+
     function applyFontSize(size) {
         for (const s of FONT_SIZES) {
             els.chatApp.classList.toggle(`font-size-${s}`, s === size);
@@ -724,6 +987,8 @@
     }
 
     function initFontSizeToggle() {
+        applyFontBasePx();
+
         let saved;
         try {
             saved = localStorage.getItem(FONT_SIZE_STORAGE_KEY);
@@ -764,11 +1029,21 @@
         els.scrollBottomBtn = $('scroll-bottom-btn');
         els.unreadBadge = $('unread-badge');
         els.imageModal = $('image-modal');
+        els.imageModalBody = $('image-modal-body');
         els.imageModalImg = $('image-modal-img');
         els.fontSizeButtons = Array.from(document.querySelectorAll('.font-size-toggle [data-font-size]'));
+        els.searchToggleBtn = $('search-toggle-btn');
+        els.searchPanel = $('search-panel');
+        els.searchInput = $('search-input');
+        els.searchCloseBtn = $('search-close-btn');
+        els.searchResults = $('search-results');
+        els.searchScopeButtons = Array.from(document.querySelectorAll('.search-scope-toggle [data-scope]'));
+        els.historicalBanner = $('historical-banner');
+        els.historicalBackBtn = $('historical-back-btn');
 
         initFontSizeToggle();
 
+        els.imageModalImg.addEventListener('click', toggleImageZoom);
         els.loadMoreBtn.addEventListener('click', loadOlder);
         els.groupSearch.addEventListener('input', () => renderGroupList(els.groupSearch.value));
         els.mobileBackBtn.addEventListener('click', () => els.chatApp.classList.remove('mobile-chat-open'));
@@ -782,6 +1057,36 @@
                 setFollowing(near);
             }
         });
+
+        els.searchToggleBtn.addEventListener('click', () => {
+            if (els.searchPanel.classList.contains('d-none')) {
+                openSearchPanel();
+            } else {
+                closeSearchPanel();
+            }
+        });
+        els.searchCloseBtn.addEventListener('click', closeSearchPanel);
+        els.searchInput.addEventListener('input', scheduleSearch);
+        els.searchInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                closeSearchPanel();
+            }
+        });
+        for (const btn of els.searchScopeButtons) {
+            btn.addEventListener('click', () => {
+                if (btn.dataset.scope === state.searchScope) {
+                    return;
+                }
+                state.searchScope = btn.dataset.scope;
+                for (const other of els.searchScopeButtons) {
+                    other.classList.toggle('active', other === btn);
+                }
+                if (els.searchInput.value.trim()) {
+                    scheduleSearch();
+                }
+            });
+        }
+        els.historicalBackBtn.addEventListener('click', () => selectGroup(state.groupId));
 
         loadGroups().catch(() => setConnectionOk(false));
         setInterval(pollNewer, POLL_INTERVAL_MS);

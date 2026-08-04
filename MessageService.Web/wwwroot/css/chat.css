@@ -2,6 +2,7 @@
    只做亮色主題，本次刻意不做深色模式。 */
 :root {
     --line-chat-bg: #8CABDC;
+    --line-header-bg: #7B9BD2;
     --line-bubble-bg: #FFFFFF;
     --line-text: #111111;
     --line-sender-name: #3D4A5C;
@@ -14,6 +15,11 @@
     --sidebar-border: #E5E5E5;
     --sidebar-hover: #F5F6F8;
     --sidebar-active: #EAF3FF;
+    /* 側欄與聊天面板共用同一份左右留白／圓角，改版體檢時發現各區塊各自為政
+       （.75rem/.9rem/1rem/1.25rem 混用）才會有「沒對齊」的感覺 */
+    --gutter: 1rem;
+    --radius-sm: .5rem;
+    --radius-md: .75rem;
 }
 
 /* chat-page 拿掉一般頁面的邊距，讓雙欄版面吃滿整個視窗高度，不用 calc(100vh - 魔術數字) 猜 header 高度 */
@@ -23,23 +29,31 @@ body.chat-page {
     overflow: hidden;
 }
 
-/* 字級三檔＝縮放係數，不是各自獨立的絕對值：聊天頁所有文字（不含頭貼/圖示等圖形元素）
-   共用同一份 rem 基準，乘上這顆係數整頁一起放大縮小。「小」＝改版前的「大」，
-   整體基準往上調一級，回饋「字體太小」時不用使用者自己每次都切到最大檔 */
+/* 字級系統：--font-base-px 是「中」檔泡泡文字的實際 px 大小，設定頁可用數值輸入直接調整
+   （settings.js／chat.js 用 inline style 把它設在 #chat-app／.settings-app 元素本身上；
+   刻意不在這裡直接宣告 --font-base-px 的預設值——CSS custom property 只要在同一個元素上
+   有宣告，優先權就贏過從父層繼承來的值，先寫死在這個選擇器會讓 inline style 永遠蓋不掉，
+   預設值改用 var(--font-base-px, 20px) 的第二參數表示，繼承鏈上完全沒設定時才會生效）。
+   小/大檔是相對「中」的比例（.87／1.13，對應改版前 1／1.15／1.3 三檔的相對關係，
+   只是把錨點從「小」換成「中」），--chat-base-current 是兩者相乘後、當下實際套用的基準值。
+   聊天頁所有文字（不含頭貼/圖示等圖形元素）都用
+   calc(var(--chat-base-current) * <元素既有 rem 值> / 1.15rem) 換算，
+   1.15rem 是泡泡文字原本的基準，其他元素的既有 rem 值＝相對泡泡的既定比例，直接沿用不用重算 */
 .chat-app {
     display: flex;
     flex-direction: row;
     height: 100%;
     min-height: 320px;
-    --font-scale: 1;
+    --font-scale: .8696;
+    --chat-base-current: calc(var(--font-base-px, 20px) * var(--font-scale));
 }
 
 .chat-app.font-size-medium {
-    --font-scale: 1.15;
+    --font-scale: 1;
 }
 
 .chat-app.font-size-large {
-    --font-scale: 1.3;
+    --font-scale: 1.1304;
 }
 
 /* === 側欄（群組列表） === */
@@ -56,9 +70,9 @@ body.chat-page {
 
 .sidebar-header {
     flex: none;
-    padding: .9rem 1rem;
+    padding: .9rem var(--gutter);
     font-weight: 600;
-    font-size: calc(1.25rem * var(--font-scale, 1));
+    font-size: calc(var(--chat-base-current) * 1.25rem / 1.15rem);
     display: flex;
     align-items: center;
     gap: .5rem;
@@ -77,12 +91,12 @@ body.chat-page {
 .sidebar-search {
     flex: none;
     position: relative;
-    padding: .6rem .75rem;
+    padding: .6rem var(--gutter);
 }
 
 .sidebar-search-icon {
     position: absolute;
-    left: 1.35rem;
+    left: calc(var(--gutter) + .55rem);
     top: 50%;
     transform: translateY(-50%);
     opacity: .45;
@@ -90,8 +104,17 @@ body.chat-page {
     pointer-events: none;
 }
 
+/* 膠囊搜尋框，取代 Bootstrap 預設的直角小圓角輸入框 */
 .sidebar-search input {
-    padding-left: 1.9rem;
+    background: var(--line-composer-pill);
+    border: none;
+    border-radius: 999px;
+    padding: .45rem .9rem .45rem 2.15rem;
+}
+
+.sidebar-search input:focus {
+    background: #fff;
+    box-shadow: 0 0 0 .15rem var(--sidebar-active);
 }
 
 .group-list {
@@ -103,17 +126,22 @@ body.chat-page {
 .group-list-empty {
     padding: 1rem;
     color: #888;
-    font-size: calc(1rem * var(--font-scale, 1));
+    font-size: calc(var(--chat-base-current) * 1rem / 1.15rem);
     text-align: center;
 }
 
+/* 內縮圓角卡：margin 留出的 .5rem 跟自身 padding-left 加起來仍等於 --gutter，
+   讓文字內容跟標題／搜尋框的起始位置對齊，同時 hover/選取的色塊變成圓角卡而不是通版直角色塊 */
 .group-item {
     display: flex;
-    width: 100%;
+    box-sizing: border-box;
+    width: calc(100% - 1rem);
+    margin: .1rem .5rem;
     align-items: center;
     gap: .6rem;
-    padding: .55rem .9rem;
+    padding: .55rem calc(var(--gutter) - .5rem);
     border: none;
+    border-radius: var(--radius-md);
     background: transparent;
     text-align: left;
     cursor: pointer;
@@ -136,7 +164,7 @@ body.chat-page {
 }
 
 .group-item-name {
-    font-size: calc(1.1rem * var(--font-scale, 1));
+    font-size: calc(var(--chat-base-current) * 1.1rem / 1.15rem);
     font-weight: 600;
     color: #1b1b1b;
     white-space: nowrap;
@@ -145,7 +173,7 @@ body.chat-page {
 }
 
 .group-item-preview {
-    font-size: calc(.95rem * var(--font-scale, 1));
+    font-size: calc(var(--chat-base-current) * .95rem / 1.15rem);
     color: #767676;
     white-space: nowrap;
     overflow: hidden;
@@ -153,7 +181,7 @@ body.chat-page {
 }
 
 .group-item-time {
-    font-size: calc(.85rem * var(--font-scale, 1));
+    font-size: calc(var(--chat-base-current) * .85rem / 1.15rem);
     color: #9a9a9a;
     flex: none;
     align-self: flex-start;
@@ -163,18 +191,21 @@ body.chat-page {
 .sidebar-footer {
     flex: none;
     border-top: 1px solid #eee;
-    padding: .5rem;
+    padding: .5rem 0;
 }
 
 .sidebar-settings-link {
     display: flex;
+    box-sizing: border-box;
+    width: calc(100% - 1rem);
+    margin: 0 .5rem;
     align-items: center;
     gap: .5rem;
-    padding: .5rem .75rem;
-    border-radius: .5rem;
+    padding: .5rem calc(var(--gutter) - .5rem);
+    border-radius: var(--radius-md);
     color: #333;
     text-decoration: none;
-    font-size: calc(1rem * var(--font-scale, 1));
+    font-size: calc(var(--chat-base-current) * 1rem / 1.15rem);
 }
 
 .sidebar-settings-link:hover {
@@ -240,8 +271,11 @@ body.chat-page {
     display: flex;
     align-items: center;
     gap: .6rem;
-    padding: .55rem .9rem;
-    background: var(--line-chat-bg);
+    padding: .55rem var(--gutter);
+    background: var(--line-header-bg);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, .12);
+    position: relative;
+    z-index: 1;
 }
 
 .mobile-back-btn {
@@ -265,7 +299,7 @@ body.chat-page {
 
 .chat-header-name {
     font-weight: 600;
-    font-size: calc(1.2rem * var(--font-scale, 1));
+    font-size: calc(var(--chat-base-current) * 1.2rem / 1.15rem);
     color: #12314f;
     white-space: nowrap;
     overflow: hidden;
@@ -273,7 +307,7 @@ body.chat-page {
 }
 
 .chat-header-members {
-    font-size: calc(.95rem * var(--font-scale, 1));
+    font-size: calc(var(--chat-base-current) * .95rem / 1.15rem);
     color: #2c4a68;
     flex: none;
 }
@@ -295,13 +329,207 @@ body.chat-page {
     color: #fff;
 }
 
+/* 浮動圓角 pill，貼在標頭下緣，不再是通版直角橫條 */
 .connection-banner {
     flex: none;
+    align-self: center;
+    width: fit-content;
+    max-width: calc(100% - 2 * var(--gutter));
+    margin-top: .5rem;
     background: #fff3cd;
     color: #664d03;
-    padding: .35rem .75rem;
-    font-size: calc(.95rem * var(--font-scale, 1));
+    padding: .35rem 1rem;
+    border-radius: 999px;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, .12);
+    font-size: calc(var(--chat-base-current) * .95rem / 1.15rem);
     text-align: center;
+}
+
+/* 跳轉到搜尋結果的上下文時顯示，取代常駐的「回到最新」浮動鈕——歷史檢視期間
+   訊息輪詢會暫停（避免視窗尾端出現時間斷層），這顆是唯一回到即時畫面的出口 */
+.historical-banner {
+    flex: none;
+    align-self: center;
+    width: fit-content;
+    max-width: calc(100% - 2 * var(--gutter));
+    margin-top: .5rem;
+    background: #33475b;
+    color: #fff;
+    padding: .35rem .4rem .35rem 1rem;
+    border-radius: 999px;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, .12);
+    font-size: calc(var(--chat-base-current) * .95rem / 1.15rem);
+    display: flex;
+    align-items: center;
+    gap: .6rem;
+}
+
+.historical-banner button {
+    flex: none;
+    border: none;
+    background: var(--line-green);
+    color: #fff;
+    border-radius: 999px;
+    padding: .2rem .75rem;
+    font-size: 1em;
+    font-weight: 600;
+}
+
+/* === 訊息搜尋 === */
+
+.search-panel {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    z-index: 3;
+    background: #fff;
+    box-shadow: 0 4px 10px rgba(0, 0, 0, .18);
+    max-height: min(70vh, 32rem);
+    display: flex;
+    flex-direction: column;
+}
+
+.search-panel-bar {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: .5rem;
+    padding: .6rem var(--gutter);
+    border-bottom: 1px solid #eee;
+}
+
+.search-panel-input {
+    flex: 1 1 auto;
+    min-width: 0;
+    border: none;
+    background: var(--line-composer-pill);
+    border-radius: 999px;
+    padding: .45rem .9rem;
+    font-size: calc(var(--chat-base-current) * 1rem / 1.15rem);
+}
+
+.search-panel-input:focus {
+    outline: none;
+    box-shadow: 0 0 0 .15rem var(--sidebar-active);
+}
+
+.search-scope-toggle {
+    flex: none;
+    display: flex;
+    background: var(--line-composer-pill);
+    border-radius: 999px;
+    padding: .15rem;
+}
+
+.search-scope-toggle button {
+    border: none;
+    background: transparent;
+    border-radius: 999px;
+    padding: .3rem .75rem;
+    font-size: calc(var(--chat-base-current) * .85rem / 1.15rem);
+    color: #555;
+    white-space: nowrap;
+}
+
+.search-scope-toggle button.active {
+    background: var(--line-green);
+    color: #fff;
+}
+
+.search-close-btn {
+    flex: none;
+    border: none;
+    background: transparent;
+    color: #777;
+    font-size: 1.1rem;
+    line-height: 1;
+    padding: .2rem .4rem;
+}
+
+.search-results {
+    flex: 1 1 auto;
+    overflow-y: auto;
+}
+
+.search-result-empty {
+    padding: 1.5rem 1rem;
+    text-align: center;
+    color: #888;
+    font-size: calc(var(--chat-base-current) * .95rem / 1.15rem);
+}
+
+.search-result-item {
+    display: block;
+    width: 100%;
+    text-align: left;
+    border: none;
+    background: transparent;
+    padding: .6rem var(--gutter);
+    border-bottom: 1px solid #f2f2f2;
+    cursor: pointer;
+}
+
+.search-result-item:hover {
+    background: var(--sidebar-hover);
+}
+
+.search-result-meta {
+    display: flex;
+    align-items: baseline;
+    gap: .4rem;
+    font-size: calc(var(--chat-base-current) * .8rem / 1.15rem);
+    color: #767676;
+    margin-bottom: .2rem;
+}
+
+.search-result-name {
+    color: #333;
+    font-weight: 600;
+}
+
+.search-result-time {
+    margin-left: auto;
+    flex: none;
+}
+
+.search-result-snippet {
+    font-size: calc(var(--chat-base-current) * 1rem / 1.15rem);
+    color: #1b1b1b;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.search-result-snippet mark,
+.search-result-name mark {
+    background: #fff3a0;
+    color: inherit;
+    border-radius: .15em;
+    padding: 0 .05em;
+}
+
+/* 跳轉後在訊息串裡標出符合關鍵字的文字 */
+.bubble mark.search-highlight {
+    background: #fff3a0;
+    color: inherit;
+    border-radius: .15em;
+    padding: 0 .05em;
+}
+
+/* 跳轉到的目標訊息短暫閃爍，幫助使用者找到它在畫面中的位置 */
+@keyframes message-highlight-flash {
+    0%, 100% {
+        box-shadow: none;
+    }
+
+    30% {
+        box-shadow: 0 0 0 .2rem var(--line-green);
+    }
+}
+
+.message-row.message-highlight-flash .bubble {
+    animation: message-highlight-flash 1.6s ease-out;
 }
 
 /* === 訊息區 === */
@@ -323,7 +551,7 @@ body.chat-page {
     border: none;
     border-radius: 1rem;
     padding: .3rem .9rem;
-    font-size: calc(.9rem * var(--font-scale, 1));
+    font-size: calc(var(--chat-base-current) * .9rem / 1.15rem);
     color: #33475b;
     background: rgba(255, 255, 255, .85);
     box-shadow: 0 1px 3px rgba(0, 0, 0, .15);
@@ -337,7 +565,7 @@ body.chat-page {
     flex: 1 1 auto;
     overflow-y: auto;
     /* 頂端留白要跟著載入更早膠囊的字級一起長高，字級最大檔時膠囊才不會蓋到第一則訊息 */
-    padding: calc(1.8rem + 1rem * var(--font-scale, 1)) .75rem .75rem;
+    padding: calc(1.8rem + 1rem * var(--font-scale, 1)) var(--gutter) var(--gutter);
     display: flex;
     flex-direction: column;
 }
@@ -345,7 +573,7 @@ body.chat-page {
 .date-separator {
     text-align: center;
     color: #fff;
-    font-size: calc(.9rem * var(--font-scale, 1));
+    font-size: calc(var(--chat-base-current) * .9rem / 1.15rem);
     margin: .75rem 0;
 }
 
@@ -370,7 +598,7 @@ body.chat-page {
 }
 
 .message-sender-name {
-    font-size: calc(.9rem * var(--font-scale, 1));
+    font-size: calc(var(--chat-base-current) * .9rem / 1.15rem);
     color: var(--line-sender-name);
     margin-left: .3rem;
 }
@@ -390,7 +618,7 @@ body.chat-page {
     word-break: break-word;
     box-shadow: 0 1px 1px rgba(0, 0, 0, .1);
     max-width: 100%;
-    font-size: calc(1.15rem * var(--font-scale, 1));
+    font-size: calc(var(--chat-base-current) * 1.15rem / 1.15rem);
 }
 
 .bubble a {
@@ -399,22 +627,28 @@ body.chat-page {
     word-break: break-all;
 }
 
-/* 同一組第一顆泡泡指向頭貼的小尾巴，仿 LINE 樣式 */
+/* 同一組第一顆泡泡指向頭貼的小尾巴，仿 LINE 樣式。頭貼是頂端對齊，尾巴要在左上角
+   才指得到頭貼——尺寸用 em 跟著字級縮放，字級放大後圓角變大時尾巴才不會脫節；
+   左上圓角同步縮小，讓尾巴與泡泡邊緣自然銜接 */
+.bubble.has-tail {
+    border-top-left-radius: .3rem;
+}
+
 .bubble.has-tail::before {
     content: '';
     position: absolute;
-    left: -5px;
-    bottom: 0;
-    width: 11px;
-    height: 11px;
+    left: -.35em;
+    top: 0;
+    width: .6em;
+    height: .6em;
     background: var(--line-bubble-bg);
-    clip-path: polygon(100% 0, 100% 100%, 0% 100%);
+    clip-path: polygon(100% 0, 100% 100%, 0% 0%);
 }
 
 .bubble.sticker {
     background: transparent;
     box-shadow: none;
-    font-size: calc(1.3rem * var(--font-scale, 1));
+    font-size: calc(var(--chat-base-current) * 1.3rem / 1.15rem);
     color: #fff;
     padding: 0;
 }
@@ -426,7 +660,7 @@ body.chat-page {
 /* LINE 的時間戳是貼在泡泡外側，不是泡泡裡面 */
 .msg-time {
     flex: none;
-    font-size: calc(.8rem * var(--font-scale, 1));
+    font-size: calc(var(--chat-base-current) * .8rem / 1.15rem);
     color: var(--line-timestamp);
     white-space: nowrap;
     padding-bottom: .15rem;
@@ -458,7 +692,7 @@ body.chat-page {
     align-items: center;
     gap: .4rem;
     color: #666;
-    font-size: calc(1rem * var(--font-scale, 1));
+    font-size: calc(var(--chat-base-current) * 1rem / 1.15rem);
 }
 
 .bubble .msg-failed {
@@ -495,7 +729,7 @@ body.chat-page {
     display: flex;
     align-items: center;
     gap: .6rem;
-    padding: .5rem .75rem;
+    padding: .5rem var(--gutter);
     background: var(--line-composer-bg);
     border-top: 1px solid #e2e2e2;
 }
@@ -516,7 +750,7 @@ body.chat-page {
     background: var(--line-composer-pill);
     border-radius: 1.2rem;
     padding: .4rem .9rem;
-    font-size: calc(.95rem * var(--font-scale, 1));
+    font-size: calc(var(--chat-base-current) * .95rem / 1.15rem);
     color: #666;
 }
 
@@ -553,6 +787,47 @@ body.chat-page {
     .message-row.message-enter {
         animation: none;
     }
+}
+
+/* === 圖片燈箱：預設縮到剛好整個畫面，點擊在「縮放至符合版面／原尺寸」間切換 === */
+
+.image-lightbox .modal-content {
+    background: rgba(10, 10, 10, .94);
+    height: 100%;
+}
+
+.image-lightbox .modal-body {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    height: 100%;
+    overflow: hidden;
+}
+
+/* 原尺寸模式下圖片可能比視窗大，改成可捲動查看局部 */
+.image-lightbox .modal-body.zoomed {
+    overflow: auto;
+    align-items: flex-start;
+    justify-content: flex-start;
+}
+
+#image-modal-img {
+    display: block;
+    max-width: 100vw;
+    max-height: 100vh;
+    cursor: zoom-in;
+}
+
+#image-modal-img.original-size {
+    max-width: none;
+    max-height: none;
+    cursor: zoom-out;
+}
+
+/* 圖片本來就比視窗小，縮放至符合版面＝原尺寸，沒有東西可以放大，游標不做出可點擊的暗示 */
+#image-modal-img.no-zoom {
+    cursor: default;
 }
 
 /* === 手機版：群組列表與聊天面板全螢幕切換 === */
