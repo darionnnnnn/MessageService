@@ -1,9 +1,22 @@
 # Web UI 回饋修正規劃（第三輪）
 
-> 狀態：**已實作完成**（2026-08-04，分支 `feature/web-ui-feedback-3`）。152 測試綠（35+117）。
+> 狀態：**已實作完成**（2026-08-04，分支 `feature/web-ui-feedback-3`，已併入 dev）。152 測試綠（35+117）。
 > 體檢過程中修掉兩個真的會影響使用者的既有 bug（見 P4 commit）：燈箱縮放判斷量到隱藏 modal
 > 的 0×0 尺寸、連續開同一張圖片時單靠 onload 事件不可靠（已改用 onload+decode()+rAF 三重保險）。
 > 已用瀏覽器端到端驗證五項全部功能＋跟既有搜尋/匿名模式/遮蔽機制的交互作用。
+
+## 全案體檢附記（2026-08-04，merge 後複檢）
+
+- **揪出並修復一個 lazy-init bug**：設定 modal 首次載入失敗（瞬斷）時 `dataLoaded` 旗標
+  已被搶先設 true，重開 modal 永遠不會重試，設定內容永遠空白直到重新整理整頁——
+  改為失敗時放掉旗標讓下次重開重試，並用攔截 fetch 模擬瞬斷實測「失敗→重開→重試成功」全流程。
+- **堵住一個資料外洩地雷**：schema 升級前的 DB 備份檔 `messages.db.bak-*` 不符合
+  .gitignore 既有的 `*.db` 規則，未來 `git add -A` 會把含真實訊息的備份誤 commit 進公開
+  repo——已補 `*.db.bak-*` 規則並以 `git check-ignore` 驗證。
+- **文件補漏**：README 的 GroupMessages 欄位表補上 `StickerId`/`PackageId` 兩列；
+  LINE-BOT-SETUP.md 步驟四的貼圖驗收說明同步更新。
+- **小偏差記錄**：規劃寫「toast 容器移入聊天頁共用」，實作放在 modal 內部——toast 只在
+  modal 開啟期間觸發，兩者功能等價，維持現狀。
 > 影響範圍：①⑤純前端小改；③④合併為一個工作項（設定改寬版 modal＋頁籤，中型前端重構，退場一個頁面路由）；
 > ②**唯一動到收錄端與 DB schema 的項目**（webhook 模型、GroupMessages 加欄位、migration），本輪最大項。
 

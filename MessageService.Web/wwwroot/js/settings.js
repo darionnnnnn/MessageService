@@ -339,7 +339,12 @@
         els.settingsModal.addEventListener('shown.bs.modal', () => {
             if (!dataLoaded) {
                 dataLoaded = true;
-                loadInitialData().catch(() => showToast('載入設定失敗', true));
+                loadInitialData().catch(() => {
+                    // 失敗要把旗標放掉，下次重開 modal 才會重試；不然一次瞬斷就讓設定
+                    // 永遠載不進來，只能重新整理整頁
+                    dataLoaded = false;
+                    showToast('載入設定失敗，請關閉後重試', true);
+                });
             }
         });
 

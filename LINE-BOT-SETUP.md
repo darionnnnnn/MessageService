@@ -198,7 +198,7 @@ ngrok http 5072
 | 型別 | 預期結果 |
 |---|---|
 | 文字 | `GroupMessages.Text` 存原文 |
-| 貼圖 | `Text` 存 `(貼圖)`，不下載任何檔案 |
+| 貼圖 | `Text` 存 `(貼圖)`、`StickerId`/`PackageId` 存貼圖識別碼（檢視端據此顯示真實貼圖），不下載任何檔案 |
 | 圖片 | 建立 `MessageContents` 一列，狀態 Pending → 背景下載完轉 Completed |
 | 影片 | 同上，但會先等 LINE 轉檔完成才下載（可能數十秒） |
 | 語音 | 同影片流程 |

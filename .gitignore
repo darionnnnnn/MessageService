@@ -9,9 +9,10 @@ obj/
 ## Logs
 logs/
 
-## Local databases
+## Local databases（含 schema 升級前的手動備份檔，內含真實訊息資料，絕不可進版控）
 *.db
 *.db-shm
 *.db-wal
+*.db.bak-*
 
 ## User secrets are stored outside the repo by design; nothing to ignore here.

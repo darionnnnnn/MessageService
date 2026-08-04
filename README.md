@@ -191,6 +191,8 @@ dotnet user-secrets set "Line:ChannelAccessToken" "<你的 access token>"
 | UserId | nvarchar(max), null | 發言者（未加 bot 好友時可能為 null） |
 | MessageType | nvarchar(max) | text / sticker / image / video / audio / file |
 | Text | nvarchar(max), null | 文字內容或 `(貼圖)`（顯示時會套遮蔽規則） |
+| StickerId | nvarchar(max), null | 貼圖識別碼（僅 sticker 型別；此欄位加入前收到的貼圖為 null，檢視端 fallback 顯示文字） |
+| PackageId | nvarchar(max), null | 貼圖包識別碼（同上；渲染目前只用 StickerId，一併保存供未來使用） |
 | EventTimestamp | datetimeoffset | LINE 事件時間 |
 | ReceivedAt | datetimeoffset | 收錄端收到時間 |
 
