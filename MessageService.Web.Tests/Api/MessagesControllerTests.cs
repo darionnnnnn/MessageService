@@ -232,6 +232,48 @@ public class MessagesControllerTests : IDisposable
     }
 
     [Fact]
+    public async Task GetMessages_StickerMessage_IncludesStickerId()
+    {
+        var now = DateTimeOffset.UtcNow;
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            dbContext.GroupMessages.Add(new GroupMessage
+            {
+                WebhookEventId = "e1", LineMessageId = "m1", GroupId = GroupId, MessageType = "sticker",
+                Text = "(貼圖)", StickerId = "52002734", PackageId = "11537",
+                EventTimestamp = now, ReceivedAt = now
+            });
+            await Task.CompletedTask;
+        });
+
+        var page = await _fixture.Client.GetFromJsonAsync<MessagesPageDto>($"/api/groups/{GroupId}/messages?days=3");
+
+        var message = Assert.Single(page!.Messages);
+        Assert.Equal("52002734", message.StickerId);
+    }
+
+    [Fact]
+    public async Task GetMessages_HistoricalStickerWithoutId_StickerIdIsNull()
+    {
+        var now = DateTimeOffset.UtcNow;
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            dbContext.GroupMessages.Add(new GroupMessage
+            {
+                WebhookEventId = "e1", LineMessageId = "m1", GroupId = GroupId, MessageType = "sticker",
+                Text = "(貼圖)", EventTimestamp = now, ReceivedAt = now
+            });
+            await Task.CompletedTask;
+        });
+
+        var page = await _fixture.Client.GetFromJsonAsync<MessagesPageDto>($"/api/groups/{GroupId}/messages?days=3");
+
+        var message = Assert.Single(page!.Messages);
+        Assert.Null(message.StickerId);
+        Assert.Equal("(貼圖)", message.Text);
+    }
+
+    [Fact]
     public async Task GetStatuses_ReturnsCurrentStatusForRequestedIds()
     {
         long contentId = 0;

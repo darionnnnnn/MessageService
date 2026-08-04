@@ -311,6 +311,31 @@
         return wrap;
     }
 
+    function buildStickerFallbackNode(message) {
+        const div = document.createElement('div');
+        div.textContent = message.text ?? '(貼圖)';
+        return div;
+    }
+
+    // 改版前收到的貼圖沒有 stickerId（LINE 不提供舊訊息回溯查詢），一律走文字 fallback；
+    // 有 ID 的話載入 LINE 公開貼圖 CDN，圖片本身失敗（例如該貼圖已下架）也 fallback 回文字
+    function buildStickerNode(message) {
+        if (!message.stickerId) {
+            return buildStickerFallbackNode(message);
+        }
+
+        const img = document.createElement('img');
+        img.className = 'msg-sticker';
+        img.loading = 'lazy';
+        img.alt = message.text ?? '(貼圖)';
+        img.referrerPolicy = 'no-referrer';
+        img.src = `https://stickershop.line-scdn.net/stickershop/v1/sticker/${encodeURIComponent(message.stickerId)}/android/sticker.png`;
+        img.addEventListener('error', () => {
+            img.replaceWith(buildStickerFallbackNode(message));
+        }, { once: true });
+        return img;
+    }
+
     function buildContentNode(message) {
         const type = message.messageType;
 
@@ -320,9 +345,7 @@
             return div;
         }
         if (type === 'sticker') {
-            const div = document.createElement('div');
-            div.textContent = message.text ?? '(貼圖)';
-            return div;
+            return buildStickerNode(message);
         }
 
         const content = message.content;

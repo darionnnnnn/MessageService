@@ -99,6 +99,7 @@ public class MessagesController(
                 m.MessageType,
                 m.Text,
                 m.UserId,
+                m.StickerId,
                 m.EventTimestamp,
                 Content = m.Content == null
                     ? null
@@ -132,7 +133,7 @@ public class MessagesController(
 
             if (r.UserId is null)
             {
-                return new MessageDto(r.Id, r.MessageType, text, null, "(未知)", r.EventTimestamp, content, null, null);
+                return new MessageDto(r.Id, r.MessageType, text, null, "(未知)", r.EventTimestamp, content, null, null, r.StickerId);
             }
 
             members.TryGetValue(r.UserId, out var member);
@@ -156,7 +157,7 @@ public class MessagesController(
                 avatarIcon = AvatarIconCatalog.ForHash(r.UserId).IconKey;
             }
 
-            return new MessageDto(r.Id, r.MessageType, text, r.UserId, displayName, r.EventTimestamp, content, pictureUrl, avatarIcon);
+            return new MessageDto(r.Id, r.MessageType, text, r.UserId, displayName, r.EventTimestamp, content, pictureUrl, avatarIcon, r.StickerId);
         }).ToList();
 
         // hasMore：初載/往前加載都要判斷是否還有更早的訊息；輪詢（afterId）不需要，省一次查詢

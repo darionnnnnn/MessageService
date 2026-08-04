@@ -657,6 +657,15 @@ body.chat-page {
     display: none;
 }
 
+/* 貼圖跟 LINE 一樣浮貼在背景上，不裝進白色泡泡；固定尺寸不跟字級縮放
+   （貼圖是圖形內容，比照頭貼/圖示的既有原則） */
+.msg-sticker {
+    display: block;
+    width: 7.5rem;
+    height: 7.5rem;
+    object-fit: contain;
+}
+
 /* LINE 的時間戳是貼在泡泡外側，不是泡泡裡面 */
 .msg-time {
     flex: none;
