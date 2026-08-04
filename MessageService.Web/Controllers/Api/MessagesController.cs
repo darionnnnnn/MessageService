@@ -22,6 +22,7 @@ public class MessagesController(
         [FromQuery] int days = 3,
         [FromQuery] long? beforeId = null,
         [FromQuery] long? afterId = null,
+        [FromQuery] long? aroundId = null,
         CancellationToken cancellationToken = default)
     {
         // 上限刻意遠高於收錄端的保留年限（預設 3 年），這樣前端在沒有游標可用時
@@ -30,7 +31,26 @@ public class MessagesController(
 
         IQueryable<GroupMessage> query = dbContext.GroupMessages.Where(m => m.GroupId == groupId);
 
-        if (afterId is { } after)
+        if (aroundId is { } around)
+        {
+            // 訊息搜尋結果跳轉用：以目標訊息的時間為錨點，前後各開 days 天的視窗；
+            // 回應本身不含 latestId（跳轉後是歷史檢視，不需要輪詢基準），hasMore 仍照算，
+            // 讓使用者從跳轉點繼續按「載入更早」時走一般的 beforeId 分頁，不需要特殊處理
+            var anchor = await dbContext.GroupMessages
+                .Where(m => m.Id == around && m.GroupId == groupId)
+                .Select(m => new { m.EventTimestamp })
+                .FirstOrDefaultAsync(cancellationToken);
+
+            if (anchor is null)
+            {
+                return NotFound();
+            }
+
+            var lower = anchor.EventTimestamp.AddDays(-days);
+            var upper = anchor.EventTimestamp.AddDays(days);
+            query = query.Where(m => m.EventTimestamp >= lower && m.EventTimestamp <= upper);
+        }
+        else if (afterId is { } after)
         {
             query = query.Where(m => m.Id > after);
         }
@@ -147,7 +167,7 @@ public class MessagesController(
         // 初載時即使畫面上顯示的天數視窗內剛好沒有訊息，前端輪詢仍需要一個基準 id 才能偵測後續新訊息；
         // 往前加載/輪詢本身不需要，只有初載才算，省不必要的查詢
         long? latestId = null;
-        if (beforeId is null && afterId is null)
+        if (beforeId is null && afterId is null && aroundId is null)
         {
             latestId = await dbContext.GroupMessages
                 .Where(m => m.GroupId == groupId)
@@ -157,6 +177,174 @@ public class MessagesController(
 
         return Ok(new MessagesPageDto(messages, hasMore, latestId));
     }
+
+    public const int SearchResultLimit = 100;
+    private const int SearchCandidateLimit = 300;
+
+    [HttpGet("api/messages/search")]
+    public async Task<ActionResult<IReadOnlyList<MessageSearchResultDto>>> Search(
+        [FromQuery] string? q,
+        [FromQuery] string? groupId,
+        CancellationToken cancellationToken)
+    {
+        q = q?.Trim();
+        if (string.IsNullOrEmpty(q))
+        {
+            return Ok(Array.Empty<MessageSearchResultDto>());
+        }
+
+        var maskingRules = await maskingService.LoadRulesAsync(cancellationToken);
+
+        // === 名稱比對：解析後名稱含關鍵字的成員，他們的訊息全部算命中（不管訊息內容本身有沒有關鍵字）===
+        var memberQuery = dbContext.GroupMembers.AsNoTracking().AsQueryable();
+        if (groupId is not null)
+        {
+            memberQuery = memberQuery.Where(m => m.GroupId == groupId);
+        }
+        var members = await memberQuery.ToListAsync(cancellationToken);
+
+        // Anonymous 模式的代號只讀不指派——沒被指派過代號的人姓名比對略過是正確行為，
+        // 指派只應該發生在訊息視窗端點（使用者實際看到訊息時）
+        Dictionary<(string GroupId, string UserId), string> anonymousLabels = [];
+        if (maskingRules.RequiresAnonymousIdentity)
+        {
+            var identityQuery = dbContext.AnonymousIdentities.AsNoTracking().AsQueryable();
+            if (groupId is not null)
+            {
+                identityQuery = identityQuery.Where(a => a.GroupId == groupId);
+            }
+            anonymousLabels = await identityQuery
+                .ToDictionaryAsync(a => (a.GroupId, a.UserId), a => a.Label, cancellationToken);
+        }
+
+        var nameMatchedKeys = new List<(string GroupId, string UserId)>();
+        foreach (var member in members)
+        {
+            string displayName;
+            if (maskingRules.RequiresAnonymousIdentity)
+            {
+                if (!anonymousLabels.TryGetValue((member.GroupId, member.UserId), out var label))
+                {
+                    continue;
+                }
+                displayName = maskingRules.ResolveDisplayName(member.UserId, member.DisplayName, label);
+            }
+            else
+            {
+                displayName = maskingRules.ResolveDisplayName(member.UserId, member.DisplayName);
+            }
+
+            if (displayName.Contains(q, StringComparison.OrdinalIgnoreCase))
+            {
+                nameMatchedKeys.Add((member.GroupId, member.UserId));
+            }
+        }
+
+        // === 內容比對：SQL 端用原文 LIKE 撈候選，之後用遮蔽後文字複驗，避免搜尋變成遮蔽的後門 ===
+        IQueryable<GroupMessage> baseQuery = dbContext.GroupMessages.AsNoTracking();
+        if (groupId is not null)
+        {
+            baseQuery = baseQuery.Where(m => m.GroupId == groupId);
+        }
+
+        var likePattern = $"%{EscapeLikePattern(q)}%";
+        var textCandidates = await baseQuery
+            .Where(m => m.MessageType == "text" && m.Text != null && EF.Functions.Like(m.Text, likePattern, "\\"))
+            .OrderByDescending(m => m.Id)
+            .Take(SearchCandidateLimit)
+            .Select(m => new { m.Id, m.GroupId, m.UserId, m.MessageType, m.Text, m.EventTimestamp })
+            .ToListAsync(cancellationToken);
+
+        var merged = new Dictionary<long, (string GroupId, string? UserId, string MessageType, string? Text, DateTimeOffset EventTimestamp)>();
+
+        foreach (var row in textCandidates)
+        {
+            // 遮蔽後複驗：被關鍵字規則遮掉的詞（例如「密碼」）搜不到，摘要也只會顯示遮蔽後的文字
+            var maskedText = maskingRules.MaskText(row.GroupId, row.Text!);
+            if (maskedText.Contains(q, StringComparison.OrdinalIgnoreCase))
+            {
+                merged[row.Id] = (row.GroupId, row.UserId, row.MessageType, row.Text, row.EventTimestamp);
+            }
+        }
+
+        if (nameMatchedKeys.Count > 0)
+        {
+            foreach (var group in nameMatchedKeys.GroupBy(k => k.GroupId))
+            {
+                var userIds = group.Select(k => k.UserId).ToList();
+                var rows = await dbContext.GroupMessages
+                    .AsNoTracking()
+                    .Where(m => m.GroupId == group.Key && m.UserId != null && userIds.Contains(m.UserId))
+                    .OrderByDescending(m => m.Id)
+                    .Take(SearchCandidateLimit)
+                    .Select(m => new { m.Id, m.GroupId, m.UserId, m.MessageType, m.Text, m.EventTimestamp })
+                    .ToListAsync(cancellationToken);
+
+                foreach (var row in rows)
+                {
+                    merged.TryAdd(row.Id, (row.GroupId, row.UserId, row.MessageType, row.Text, row.EventTimestamp));
+                }
+            }
+        }
+
+        var top = merged
+            .OrderByDescending(kv => kv.Value.EventTimestamp)
+            .Take(SearchResultLimit)
+            .ToList();
+
+        if (top.Count == 0)
+        {
+            return Ok(Array.Empty<MessageSearchResultDto>());
+        }
+
+        var resultGroupIds = top.Select(kv => kv.Value.GroupId).Distinct().ToList();
+        var groupCache = await dbContext.Groups
+            .AsNoTracking()
+            .Where(g => resultGroupIds.Contains(g.GroupId))
+            .ToDictionaryAsync(g => g.GroupId, cancellationToken);
+
+        var resultMembers = await dbContext.GroupMembers
+            .AsNoTracking()
+            .Where(m => resultGroupIds.Contains(m.GroupId))
+            .ToDictionaryAsync(m => (m.GroupId, m.UserId), cancellationToken);
+
+        var results = top.Select(kv =>
+        {
+            var id = kv.Key;
+            var rowGroupId = kv.Value.GroupId;
+            var userId = kv.Value.UserId;
+            var messageType = kv.Value.MessageType;
+            var text = kv.Value.Text;
+            var eventTimestamp = kv.Value.EventTimestamp;
+
+            groupCache.TryGetValue(rowGroupId, out var group);
+            var groupDisplayName = group?.GroupName ?? rowGroupId;
+
+            string displayName;
+            if (userId is null)
+            {
+                displayName = "(未知)";
+            }
+            else
+            {
+                resultMembers.TryGetValue((rowGroupId, userId), out var member);
+                displayName = maskingRules.RequiresAnonymousIdentity
+                    ? maskingRules.ResolveDisplayName(
+                        userId, member?.DisplayName,
+                        anonymousLabels.TryGetValue((rowGroupId, userId), out var label) ? label : null)
+                    : maskingRules.ResolveDisplayName(userId, member?.DisplayName);
+            }
+
+            var snippet = MessagePreviewFormatter.Format(messageType, text, maskingRules, rowGroupId);
+
+            return new MessageSearchResultDto(id, rowGroupId, groupDisplayName, displayName, snippet, eventTimestamp);
+        }).OrderByDescending(r => r.EventTimestamp).ToList();
+
+        return Ok(results);
+    }
+
+    private static string EscapeLikePattern(string value) =>
+        value.Replace("\\", "\\\\").Replace("%", "\\%").Replace("_", "\\_");
 
     [HttpGet("api/messages/{id:long}/content")]
     public async Task<IActionResult> GetContent(long id, CancellationToken cancellationToken)

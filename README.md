@@ -116,9 +116,10 @@ dotnet user-secrets set "Line:ChannelAccessToken" "<你的 access token>"
 | 端點 | 用途 |
 |---|---|
 | `GET /api/groups` | 群組清單（僅列出有訊息的群組，名稱取自快取，無快取則顯示 GroupId；含最後訊息預覽〔已套遮蔽〕、最後訊息時間、成員數，依最後活動倒序） |
-| `GET /api/groups/{groupId}/messages?days=` / `?beforeId=&days=` / `?afterId=` | 初載 / 往前加載 / 輪詢新訊息，回應已套用遮蔽 |
+| `GET /api/groups/{groupId}/messages?days=` / `?beforeId=&days=` / `?afterId=` / `?aroundId=&days=` | 初載 / 往前加載 / 輪詢新訊息 / 以指定訊息為錨點開前後視窗（搜尋結果跳轉用），回應已套用遮蔽 |
 | `GET /api/messages/{id}/content` | 內容串流，支援 HTTP Range（見下方實作說明） |
 | `GET /api/messages/statuses?ids=` | 查詢多筆內容目前的 `DownloadStatus` |
+| `GET /api/messages/search?q=&groupId=` | 訊息搜尋，比對文字訊息內容與解析後的發言者名稱，`groupId` 省略＝搜尋全部群組，上限 100 筆、新→舊排序（見下方「訊息搜尋」） |
 | `GET/PUT /api/settings/display` | 名稱顯示模式 |
 | `GET/POST/PUT/DELETE /api/settings/keywords[/{id}]` | 關鍵字遮蔽規則 CRUD |
 | `GET/PUT/DELETE /api/settings/aliases[/{userId}]` | 使用者別名對照 |
@@ -138,6 +139,15 @@ dotnet user-secrets set "Line:ChannelAccessToken" "<你的 access token>"
   - `Anonymous`：名稱與頭貼一律替換為動植物代號（如「小熊」），由 `IAnonymousIdentityService` 依群組+使用者永久指派並存進 `AnonymousIdentities`，翻閱舊訊息時代號不會變、可分辨是否為同一人但認不出真實身分
 
 以上四種模式（`Original` 除外）回應中一律不含真實 `PictureUrl`，即使前端不渲染也不外流，因為 URL 本身就是身分線索。
+
+### 訊息搜尋
+
+`GET /api/messages/search`（`MessagesController.Search`）比對文字訊息內容與解析後的發言者名稱，兩者符合其一即算命中；核心設計是不能讓搜尋變成遮蔽機制的後門：
+
+- **內容比對**：SQL 端先用原文 `LIKE`（`EF.Functions.Like` 帶 `ESCAPE`，`%`/`_`/`\` 會被跳脫成字面）撈候選，於記憶體用 `MaskingRuleSet.MaskText` 套用後的文字**重新驗證**仍含關鍵字才算命中——被關鍵字規則遮掉的詞（如「密碼」）搜不到，摘要也只顯示遮蔽後的文字，不會洩漏原文。
+- **名稱比對**：走當下顯示模式**解析後**的名稱（`Original` 比對原名、`MaskMiddle`/`CustomAlias` 比對遮蔽後名稱或別名、`Anonymous` 比對動植物代號），符合的成員底下所有訊息都算命中（不限訊息內容本身有沒有關鍵字）。`Anonymous` 模式下只讀 `AnonymousIdentities`、**不觸發指派**——沒被指派過代號的成員姓名比對就是找不到，指派只應該發生在使用者實際開啟訊息視窗時。
+- **範圍與限制**：`groupId` 省略即搜尋全部群組；只搜文字訊息的 `Text` 欄（媒體訊息無文字可搜，檔名未經遮蔽管線、不搜）；結果上限 100 筆、依 `EventTimestamp` 新到舊排序，不做分頁；`Text` 欄無索引，全掃在目前資料量級（單機、萬則內）可接受，量大再評估 FTS。
+- **跳轉上下文**：搜尋結果可用 `GET /api/groups/{groupId}/messages?aroundId={messageId}&days=` 取得以該訊息為錨點、前後各 `days` 天的視窗（含該訊息本身），供前端捲動並高亮；此模式回應不含 `latestId`（跳轉後屬歷史檢視，前端會暫停新訊息輪詢，不需要輪詢基準）。
 
 ### IP 白名單（沒有登入機制）
 
