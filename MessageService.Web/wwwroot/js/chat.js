@@ -387,9 +387,32 @@
         pendingEl.replaceWith(replacement);
     }
 
+    // === 圖片燈箱：預設縮到符合版面，點擊在「符合版面／原尺寸」間切換 ===
+
     function openImageModal(url) {
-        els.imageModalImg.src = url;
+        const img = els.imageModalImg;
+        img.classList.remove('original-size', 'no-zoom');
+        els.imageModalBody.classList.remove('zoomed');
+
+        // 圖片本身比視窗小的話「原尺寸」跟「符合版面」看起來一樣，沒有東西可以放大，
+        // 游標不該做出可點擊的暗示；naturalWidth/Height 要等圖片載入完才拿得到
+        img.onload = () => {
+            const fitsAlready = img.naturalWidth <= els.imageModalBody.clientWidth
+                && img.naturalHeight <= els.imageModalBody.clientHeight;
+            img.classList.toggle('no-zoom', fitsAlready);
+        };
+
+        img.src = url;
         bootstrap.Modal.getOrCreateInstance(els.imageModal).show();
+    }
+
+    function toggleImageZoom() {
+        const img = els.imageModalImg;
+        if (img.classList.contains('no-zoom')) {
+            return;
+        }
+        const zoomed = img.classList.toggle('original-size');
+        els.imageModalBody.classList.toggle('zoomed', zoomed);
     }
 
     // === 置底跟隨 ===
@@ -714,6 +737,26 @@
 
     // === 字體大小（存 localStorage，每台裝置各自記，不進 DB） ===
 
+    const FONT_BASE_PX_STORAGE_KEY = 'chat-font-base-px';
+    const DEFAULT_FONT_BASE_PX = 20;
+    const FONT_BASE_PX_MIN = 12;
+    const FONT_BASE_PX_MAX = 28;
+
+    // 「中」檔的實際 px 大小，跟設定頁的「字體大小」數值輸入共用同一個 localStorage key；
+    // 這裡只讀不寫——調整數值的介面只在設定頁，聊天頁的 Aa 選單維持小/中/大三檔切換
+    function applyFontBasePx() {
+        let saved;
+        try {
+            saved = parseInt(localStorage.getItem(FONT_BASE_PX_STORAGE_KEY), 10);
+        } catch {
+            saved = NaN;
+        }
+        const px = Number.isFinite(saved) && saved >= FONT_BASE_PX_MIN && saved <= FONT_BASE_PX_MAX
+            ? saved
+            : DEFAULT_FONT_BASE_PX;
+        els.chatApp.style.setProperty('--font-base-px', `${px}px`);
+    }
+
     function applyFontSize(size) {
         for (const s of FONT_SIZES) {
             els.chatApp.classList.toggle(`font-size-${s}`, s === size);
@@ -724,6 +767,8 @@
     }
 
     function initFontSizeToggle() {
+        applyFontBasePx();
+
         let saved;
         try {
             saved = localStorage.getItem(FONT_SIZE_STORAGE_KEY);
@@ -764,11 +809,13 @@
         els.scrollBottomBtn = $('scroll-bottom-btn');
         els.unreadBadge = $('unread-badge');
         els.imageModal = $('image-modal');
+        els.imageModalBody = $('image-modal-body');
         els.imageModalImg = $('image-modal-img');
         els.fontSizeButtons = Array.from(document.querySelectorAll('.font-size-toggle [data-font-size]'));
 
         initFontSizeToggle();
 
+        els.imageModalImg.addEventListener('click', toggleImageZoom);
         els.loadMoreBtn.addEventListener('click', loadOlder);
         els.groupSearch.addEventListener('input', () => renderGroupList(els.groupSearch.value));
         els.mobileBackBtn.addEventListener('click', () => els.chatApp.classList.remove('mobile-chat-open'));

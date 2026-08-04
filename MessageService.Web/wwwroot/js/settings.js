@@ -237,9 +237,56 @@
         }
     }
 
+    // === 字體大小（跟對話頁共用同一份 localStorage key，這裡改了對話頁下次開啟也會吃到；
+    //     對話頁的「中」檔＝這裡設定的數值，「小」「大」依既有比例跟著調整） ===
+
+    const FONT_BASE_PX_STORAGE_KEY = 'chat-font-base-px';
+    const DEFAULT_FONT_BASE_PX = 20;
+    const FONT_BASE_PX_MIN = 12;
+    const FONT_BASE_PX_MAX = 28;
+
+    function loadFontBasePx() {
+        let saved;
+        try {
+            saved = parseInt(localStorage.getItem(FONT_BASE_PX_STORAGE_KEY), 10);
+        } catch {
+            saved = NaN;
+        }
+        return Number.isFinite(saved) && saved >= FONT_BASE_PX_MIN && saved <= FONT_BASE_PX_MAX
+            ? saved
+            : DEFAULT_FONT_BASE_PX;
+    }
+
+    function applyFontBasePx(px) {
+        els.settingsApp.style.setProperty('--font-base-px', `${px}px`);
+    }
+
+    function initFontBasePx() {
+        const px = loadFontBasePx();
+        els.fontBasePxInput.value = px;
+        applyFontBasePx(px);
+
+        els.fontBasePxInput.addEventListener('change', () => {
+            let value = parseInt(els.fontBasePxInput.value, 10);
+            if (!Number.isFinite(value)) {
+                value = DEFAULT_FONT_BASE_PX;
+            }
+            value = Math.min(FONT_BASE_PX_MAX, Math.max(FONT_BASE_PX_MIN, value));
+            els.fontBasePxInput.value = value;
+            applyFontBasePx(value);
+            try {
+                localStorage.setItem(FONT_BASE_PX_STORAGE_KEY, String(value));
+            } catch {
+                // localStorage 不可用（例如無痕模式）就只套用當次畫面，不用另外提示
+            }
+        });
+    }
+
     // === 初始化 ===
 
     async function init() {
+        els.settingsApp = $('settings-app');
+        els.fontBasePxInput = $('font-base-px-input');
         els.toastContainer = $('toast-container');
         els.keywordTbody = $('keyword-tbody');
         els.keywordForm = $('keyword-form');
@@ -253,6 +300,8 @@
         els.aliasEditor = $('alias-editor');
         els.aliasGroupFilter = $('alias-group-filter');
         els.aliasTbody = $('alias-tbody');
+
+        initFontBasePx();
 
         els.replacementCustom.addEventListener('change', () => { els.replacementInput.disabled = false; });
         els.replacementDefault.addEventListener('change', () => { els.replacementInput.disabled = true; });

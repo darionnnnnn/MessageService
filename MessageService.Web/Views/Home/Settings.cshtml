@@ -6,6 +6,21 @@
     <div id="toast-container" class="toast-container position-fixed bottom-0 end-0 p-3"></div>
 
     <section class="settings-card">
+        <h2 class="settings-card-title">介面顯示</h2>
+        <div class="row g-3 align-items-end">
+            <div class="col-auto">
+                <label for="font-base-px-input" class="form-label">字體大小（px）</label>
+                <input type="number" class="form-control form-control-sm" id="font-base-px-input"
+                       min="12" max="28" step="1" style="width:6rem">
+            </div>
+            <div class="col-auto">
+                <span id="font-base-px-preview">預覽：今天天氣真好</span>
+            </div>
+        </div>
+        <p class="form-text">這個數值＝對話頁「中」字級的實際大小，「小」「大」會依比例跟著調整；這個頁面本身的文字也會套用同一個大小。</p>
+    </section>
+
+    <section class="settings-card">
         <h2 class="settings-card-title">隱私與匿名</h2>
         <div class="mb-3">
             <div class="form-check">
