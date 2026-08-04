@@ -58,6 +58,9 @@ public class WebhookEventHandler(
             UserId = webhookEvent.Source.UserId,
             MessageType = messageType,
             Text = text,
+            // Text 維持 "(貼圖)" 當 fallback 顯示用（前端載圖失敗或舊訊息沒有這兩個欄位時）
+            StickerId = messageType == "sticker" ? webhookEvent.Message.StickerId : null,
+            PackageId = messageType == "sticker" ? webhookEvent.Message.PackageId : null,
             EventTimestamp = DateTimeOffset.FromUnixTimeMilliseconds(webhookEvent.Timestamp),
             ReceivedAt = DateTimeOffset.UtcNow
         };

@@ -93,6 +93,31 @@ public class WebhookEventHandlerTests : IDisposable
         Assert.Empty(_dbContext.MessageContents);
     }
 
+    [Fact]
+    public async Task StickerMessage_SavesStickerIdAndPackageId()
+    {
+        var evt = GroupMessageEvent("evt-1", new LineMessage { Id = "m1", Type = "sticker", StickerId = "52002734", PackageId = "11537" });
+
+        await _handler.HandleAsync(new WebhookRequest { Events = [evt] }, CancellationToken.None);
+
+        var saved = Assert.Single(_dbContext.GroupMessages);
+        Assert.Equal("52002734", saved.StickerId);
+        Assert.Equal("11537", saved.PackageId);
+    }
+
+    [Fact]
+    public async Task NonStickerMessage_LeavesStickerIdAndPackageIdNull()
+    {
+        // LineMessage 理論上不該混著貼圖欄位，但防禦性驗證：非貼圖訊息一律不寫入這兩個欄位
+        var evt = GroupMessageEvent("evt-1", new LineMessage { Id = "m1", Type = "text", Text = "hi", StickerId = "should-be-ignored" });
+
+        await _handler.HandleAsync(new WebhookRequest { Events = [evt] }, CancellationToken.None);
+
+        var saved = Assert.Single(_dbContext.GroupMessages);
+        Assert.Null(saved.StickerId);
+        Assert.Null(saved.PackageId);
+    }
+
     [Theory]
     [InlineData("image")]
     [InlineData("video")]
