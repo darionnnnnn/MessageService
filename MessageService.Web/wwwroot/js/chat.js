@@ -2,6 +2,9 @@
     'use strict';
 
     const POLL_INTERVAL_MS = 4000;
+    // 側欄（新群組/預覽/排序）不需要跟訊息輪詢一樣即時，且 /api/groups 一次要跑好幾個查詢，
+    // 沒必要用同一個頻率打
+    const GROUP_POLL_INTERVAL_MS = 15000;
     const NEAR_BOTTOM_THRESHOLD_PX = 80;
     const INITIAL_DAYS = 3;
     const LOAD_MORE_DAYS = 7;
@@ -34,6 +37,7 @@
         hasMoreOlder: false,
         loadingOlder: false,
         polling: false,
+        groupsPolling: false,
         // 每次切換群組就 +1；非同步請求回來時若對不上，代表是前一個群組的過期回應，必須丟棄
         requestToken: 0,
         following: true,
@@ -521,6 +525,42 @@
         await selectGroup(groups[0].groupId);
     }
 
+    // loadGroups() 只在頁面載入時跑一次；之後靠這支輪詢讓側欄（新群組/預覽/排序）
+    // 定期跟資料庫同步，不然使用者在別的群組發言，側欄要重新整理才會出現
+    async function pollGroups() {
+        if (document.hidden || state.groupsPolling) {
+            return;
+        }
+        state.groupsPolling = true;
+        try {
+            const groups = await fetchJson('/api/groups');
+            state.groups = groups;
+
+            const previousScrollTop = els.groupList.scrollTop;
+            renderGroupList(els.groupSearch.value);
+            els.groupList.scrollTop = previousScrollTop;
+
+            if (state.groupId === null && groups.length > 0) {
+                // 啟動時資料庫還沒有任何群組，之後第一筆訊息進來就自動帶使用者進去，
+                // 不必自己重新整理頁面才看得到
+                await selectGroup(groups[0].groupId);
+            }
+
+            // 有選取群組時，連線狀態由 pollNewer 負責回報；兩條輪詢各自回報
+            // 會在「一好一壞」的交錯下讓連線橫幅閃爍。只有還沒選到任何群組
+            // （例如空資料庫剛啟動）時，這支輪詢才是唯一對外的請求，需要它來回報
+            if (state.groupId === null) {
+                setConnectionOk(true);
+            }
+        } catch {
+            if (state.groupId === null) {
+                setConnectionOk(false);
+            }
+        } finally {
+            state.groupsPolling = false;
+        }
+    }
+
     async function selectGroup(groupId) {
         const token = ++state.requestToken;
 
@@ -745,6 +785,7 @@
 
         loadGroups().catch(() => setConnectionOk(false));
         setInterval(pollNewer, POLL_INTERVAL_MS);
+        setInterval(pollGroups, GROUP_POLL_INTERVAL_MS);
     }
 
     document.addEventListener('DOMContentLoaded', init);
