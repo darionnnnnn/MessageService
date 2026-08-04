@@ -1,10 +1,10 @@
 (() => {
     'use strict';
 
-    const POLL_INTERVAL_MS = 4000;
+    const POLL_INTERVAL_MS = 3000;
     // 側欄（新群組/預覽/排序）不需要跟訊息輪詢一樣即時，且 /api/groups 一次要跑好幾個查詢，
     // 沒必要用同一個頻率打
-    const GROUP_POLL_INTERVAL_MS = 15000;
+    const GROUP_POLL_INTERVAL_MS = 10000;
     const NEAR_BOTTOM_THRESHOLD_PX = 80;
     const INITIAL_DAYS = 3;
     const LOAD_MORE_DAYS = 7;
