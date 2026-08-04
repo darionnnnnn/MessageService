@@ -985,8 +985,10 @@
     const FONT_BASE_PX_MIN = 12;
     const FONT_BASE_PX_MAX = 28;
 
-    // 「中」檔的實際 px 大小，跟設定頁的「字體大小」數值輸入共用同一個 localStorage key；
-    // 這裡只讀不寫——調整數值的介面只在設定頁，聊天頁的 Aa 選單維持小/中/大三檔切換
+    // 「中」檔的實際 px 大小，跟設定 modal 的「字體大小」數值輸入共用同一個 localStorage key；
+    // 這裡只讀不寫——調整數值的介面在設定 modal，聊天頁的 Aa 選單維持小/中/大三檔切換。
+    // 設在 document.documentElement 上（不是 #chat-app）：設定 modal 跟聊天畫面在同一個頁面，
+    // 但 modal 在 DOM 裡不是 #chat-app 的子節點，掛在共同的根元素上兩邊才都吃得到
     function applyFontBasePx() {
         let saved;
         try {
@@ -997,7 +999,7 @@
         const px = Number.isFinite(saved) && saved >= FONT_BASE_PX_MIN && saved <= FONT_BASE_PX_MAX
             ? saved
             : DEFAULT_FONT_BASE_PX;
-        els.chatApp.style.setProperty('--font-base-px', `${px}px`);
+        document.documentElement.style.setProperty('--font-base-px', `${px}px`);
     }
 
     function applyFontSize(size) {
@@ -1110,6 +1112,15 @@
             });
         }
         els.historicalBackBtn.addEventListener('click', () => selectGroup(state.groupId));
+
+        // 設定 modal 關掉時，如果這次開啟期間真的改了東西（名稱顯示模式、關鍵字規則等），
+        // settings.js 會發這個事件——重新載入目前群組的訊息視窗＋側欄，不用使用者自己重新整理
+        document.addEventListener('messageservice:settings-changed', () => {
+            if (state.groupId) {
+                selectGroup(state.groupId);
+            }
+            pollGroups();
+        });
 
         loadGroups().catch(() => setConnectionOk(false));
         setInterval(pollNewer, POLL_INTERVAL_MS);

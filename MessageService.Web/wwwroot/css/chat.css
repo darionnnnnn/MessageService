@@ -194,6 +194,7 @@ body.chat-page {
     padding: .5rem 0;
 }
 
+/* 現在是開設定 modal 的 <button>，不是連結——重置一下按鈕預設樣式 */
 .sidebar-settings-link {
     display: flex;
     box-sizing: border-box;
@@ -202,10 +203,15 @@ body.chat-page {
     align-items: center;
     gap: .5rem;
     padding: .5rem calc(var(--gutter) - .5rem);
+    border: none;
     border-radius: var(--radius-md);
+    background: transparent;
     color: #333;
     text-decoration: none;
+    text-align: left;
+    font-family: inherit;
     font-size: calc(var(--chat-base-current) * 1rem / 1.15rem);
+    cursor: pointer;
 }
 
 .sidebar-settings-link:hover {

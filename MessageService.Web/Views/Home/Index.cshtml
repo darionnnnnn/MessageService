@@ -17,10 +17,10 @@
             <div class="group-list-empty">載入群組中…</div>
         </div>
         <div class="sidebar-footer">
-            <a href="/Home/Settings" class="sidebar-settings-link">
+            <button type="button" class="sidebar-settings-link" data-bs-toggle="modal" data-bs-target="#settings-modal">
                 <span aria-hidden="true">⚙️</span>
                 設定
-            </a>
+            </button>
         </div>
     </aside>
 
@@ -96,6 +96,9 @@
     </div>
 </div>
 
+@await Html.PartialAsync("_SettingsModal")
+
 @section Scripts {
     <script src="~/js/chat.js" asp-append-version="true"></script>
+    <script src="~/js/settings.js" asp-append-version="true"></script>
 }

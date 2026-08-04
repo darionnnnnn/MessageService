@@ -47,7 +47,7 @@ RetentionCleanupService（每日固定時間刪除超過保留年限的訊息，
 | 型別 | Text 欄位 | 內容下載 |
 |---|---|---|
 | 文字 | 訊息內文 | — |
-| 貼圖 | `(貼圖)` | — |
+| 貼圖 | `(貼圖)`（fallback 顯示用） | —（不下載檔案；`StickerId`/`PackageId` 另存兩個欄位，檢視端據此顯示真實貼圖圖片） |
 | 圖片 | null | 原圖（非縮圖），背景下載 |
 | 影片 | null | 原檔，先輪詢 LINE transcoding 完成才下載 |
 | 語音 | null | 原檔，同影片先等 transcoding 完成才下載 |
@@ -92,26 +92,27 @@ dotnet user-secrets set "Line:ChannelAccessToken" "<你的 access token>"
 
 ## MessageService.Web（檢視端）
 
-唯讀網頁，值班/維運人員用來瀏覽 LINE 群組對話。除了讀取訊息，**設定頁會寫入自己的設定資料**（遮蔽規則、名稱顯示模式、別名），這是本專案唯一會寫資料庫的地方。
+唯讀網頁，值班/維運人員用來瀏覽 LINE 群組對話。除了讀取訊息，**設定會寫入自己的設定資料**（遮蔽規則、名稱顯示模式、別名），這是本專案唯一會寫資料庫的地方。
 
 ### 頁面與 API
 
 **對話頁（`/`）**：原生 JS 模擬 LINE 的雙欄版面（Bootstrap 只保留 modal/toast/表單控件），所有資料透過 API 取得（不走 MVC Model 傳遞）。
 
-- **左側欄**：群組列表（頭貼、名稱、最後訊息預覽、時間，依最後活動倒序），前端即時搜尋過濾，底部為設定頁入口。取代早期的下拉選單；側欄與聊天面板的所有區塊共用同一份 `--gutter`/`--radius-*` token（chat.css），群組項目與設定入口是內縮圓角卡而非通版直角色塊
+- **左側欄**：群組列表（頭貼、名稱、最後訊息預覽、時間，依最後活動倒序），前端即時搜尋過濾，底部為設定入口（開啟設定 modal）。取代早期的下拉選單；側欄與聊天面板的所有區塊共用同一份 `--gutter`/`--radius-*` token（chat.css），群組項目與設定入口是內縮圓角卡而非通版直角色塊
 - **聊天面板**：標頭有自己的底色（`--line-header-bg`，比訊息區深一階）＋陰影，跟訊息區明確分層（群組頭貼＋名稱＋成員數＋🔍搜尋＋「Aa」字級下拉）；訊息泡泡首顆帶指向頭貼的小尾巴（左上角、跟著字級用 em 縮放，避免大字級時圓角比尾巴大造成脫節）、時間戳貼泡泡外側；底部仿 LINE 輸入列但唯讀化（圖示灰化不可點、中央膠囊顯示同步狀態）
 - **頭貼**：`Original` 模式顯示真實 LINE 頭貼（`referrerpolicy="no-referrer"`，載入失敗 fallback 代號圖示）；其他模式一律顯示伺服器指派的動植物代號圖示（emoji 渲染，前端 `ICON_EMOJI` 對照表需與後端 `AvatarIconCatalog` 的 IconKey 同步維護）
-- **字級**：設定頁「字體大小」數值輸入（px）＝聊天頁「中」檔泡泡文字的實際大小，小／大依比例（.87×／1.13×）跟著調整；聊天頁全部 16 處文字（不含頭貼/圖示）與設定頁本身的文字都吃同一份 `--font-base-px`（localStorage key `chat-font-base-px`，透過 inline style 覆寫、不寫死在樣式表裡，才不會被 CSS cascade 蓋掉）
+- **字級**：設定「字體大小」數值輸入（px）＝聊天頁「中」檔泡泡文字的實際大小，小／大依比例（.87×／1.13×）跟著調整；聊天頁全部文字（不含頭貼/圖示）與設定 modal 本身的文字都吃同一份 `--font-base-px`（localStorage key `chat-font-base-px`，設在 `document.documentElement` 上、透過 inline style 覆寫、不寫死在樣式表裡，才不會被 CSS cascade 蓋掉）。設定 modal 跟聊天頁是同一個頁面，調字級時背後的聊天畫面會即時跟著變
 - 預設載入 3 天內對話，「載入更早 7 天」膠囊以最舊訊息 Id 當游標往前翻頁，沒有更早歷史時自動 disable。兩個「按了會沒反應」的空窗情況都有處理：畫面上一則訊息都沒有（沒有游標可用）時改成放大天數視窗重繪；群組沉寂比一個視窗還久時由 API 把視窗錨定到下一則更早訊息，保證每次點擊都會前進
 - 「回到最新」浮動按鈕：使用者往上捲動時自動退出跟隨模式並顯示未讀數，點擊或捲回底部即恢復跟隨並自動捲到新訊息
 - **訊息搜尋**：標頭 🔍 展開搜尋列（本群組／全部群組切換），比對訊息內容與發言者名稱，結果以 `<mark>` 高亮；點結果用 `aroundId` 跳轉到該訊息的上下文並閃爍定位，同時把視窗內符合的文字也標出來。跳轉後進入「歷史檢視」，此時 4 秒訊息輪詢**只更新 Pending 內容狀態、不把新訊息接到視窗尾端**（避免時間軸斷層），畫面改顯示「回到最新」常駐按鈕，點擊會呼叫既有的群組選取流程整個重置回即時畫面
 - 每 3 秒輪詢新訊息與 Pending 內容的下載狀態，每 10 秒輪詢側欄群組列表（新群組/預覽/排序，歷史檢視期間依然照跑）；分頁隱藏（`document.hidden`）時皆暫停輪詢
 - 新訊息進場有淡入＋位移動效（`prefers-reduced-motion` 使用者會停用）
-- 圖片／影片／語音／檔案依 `DownloadStatus` 顯示 spinner／播放器／下載連結／失敗訊息；圖片點擊開全螢幕燈箱，預設縮到剛好符合視窗（不放大本來就比較小的圖），再點一次切換原始尺寸並可捲動查看局部
+- 圖片／影片／語音／檔案依 `DownloadStatus` 顯示 spinner／播放器／下載連結／失敗訊息；圖片點擊開全螢幕燈箱（白框＋右上角 ✕，點空白處或 Esc 皆可關閉），預設縮到剛好符合視窗（不放大本來就比較小的圖），再點一次切換原始尺寸並可捲動查看局部
+- 貼圖顯示真實圖片（LINE 公開貼圖 CDN），浮貼在背景上不裝進白色泡泡；載入失敗或訊息本身沒有 `StickerId`（改版前收到的貼圖沒有這個欄位，LINE 不提供舊訊息回溯查詢）一律 fallback 回「(貼圖)」文字
 - 文字訊息中的網址會轉成可點連結（`target="_blank"` + `rel="noopener noreferrer"`）；所有內容（含搜尋高亮）一律用 DOM 節點組裝（`textContent`／`createElement`），不用 `innerHTML`，避免訊息內容造成 XSS
 - **手機版（<768px）**：群組列表與聊天面板全螢幕切換，標頭出現「‹」返回鈕，仿 LINE 手機版導覽
 
-**設定頁（`/Home/Settings`）**：卡片式版面。介面顯示（字體大小 px 數值設定，見上方「字級」）；隱私與匿名（名稱顯示四模式，含完全匿名動植物代號；別名編輯器可依群組篩選成員）；關鍵字遮蔽規則（新增/刪除，預設等長 `*` 或自訂替換字串，全部群組或指定群組）。變更即存（字體大小為 localStorage、不進 DB，其餘 PUT 後顯示 toast）。
+**設定**：聊天頁裡的寬版 modal（`modal-xl`，手機自動轉全螢幕），不再是獨立頁面——`/Home/Settings` 路由已移除。上方三個頁籤：介面顯示（字體大小 px 數值設定，見上方「字級」）、隱私與匿名（名稱顯示四模式，含完全匿名動植物代號；別名編輯器可依群組篩選成員）、關鍵字遮蔽規則（新增/刪除，預設等長 `*` 或自訂替換字串，全部群組或指定群組）。變更即存（字體大小為 localStorage、不進 DB，其餘 PUT 後顯示 toast）；資料只在**第一次**打開 modal 時才載入（`shown.bs.modal` 才打 API，不會讓聊天頁一開就多打一輪設定用的請求），成功寫入任何變更後關閉 modal 會自動重新整理目前的訊息視窗與側欄，不用手動重新整理頁面。
 
 **API**（都在 `MessageService.Web/Controllers/Api/`）：
 
@@ -165,7 +166,7 @@ dotnet user-secrets set "Line:ChannelAccessToken" "<你的 access token>"
 
 ### 資料庫存取
 
-`MessageDbContext` 不設全域 `NoTracking`：查詢型端點（對話、群組、遮蔽規則載入）各自在查詢上加 `.AsNoTracking()`，設定頁的「讀取實體→改屬性→存檔」寫入流程才能正常被 change tracker 偵測到。這是實測踩到的坑——曾經設過全域 `NoTracking` 以為整個 Web 專案只讀，結果讓 `UpdateKeyword`/`UpsertAlias` 的更新靜默失敗（改了值但沒真的寫進 DB，因為沒有東西被追蹤）。
+`MessageDbContext` 不設全域 `NoTracking`：查詢型端點（對話、群組、遮蔽規則載入）各自在查詢上加 `.AsNoTracking()`，設定的「讀取實體→改屬性→存檔」寫入流程才能正常被 change tracker 偵測到。這是實測踩到的坑——曾經設過全域 `NoTracking` 以為整個 Web 專案只讀，結果讓 `UpdateKeyword`/`UpsertAlias` 的更新靜默失敗（改了值但沒真的寫進 DB，因為沒有東西被追蹤）。
 
 ### 設定
 
@@ -233,7 +234,7 @@ ASPNETCORE_ENVIRONMENT=Production dotnet ef database update --project MessageSer
 - **SQLite 的 DateTimeOffset 限制**：SQLite 只支援相等比較，`<`/`>` 無法轉譯。`MessageDbContext` 在 SQLite 環境對需要範圍比較的 `DateTimeOffset` 欄位（`EventTimestamp`、`Groups`/`GroupMembers` 的 `UpdatedAt`）套 `DateTimeOffsetToBinaryConverter`；SQL Server 維持原生 `datetimeoffset`（保持型別對其他工具可讀）
 - **BackgroundService 例外一律就地捕捉**：.NET 6+ 預設未捕捉例外會停掉整個 host，清除或下載失敗只能記 log 等下輪，不能讓服務跟著死
 - **檢視端沒有登入機制**：IP 白名單是最低防護，空白名單視為全拒
-- **檢視端 DbContext 不設全域 NoTracking**：設定頁需要寫入，只在真正唯讀的查詢路徑個別加 `.AsNoTracking()`（見上方「資料庫存取」）
+- **檢視端 DbContext 不設全域 NoTracking**：設定需要寫入，只在真正唯讀的查詢路徑個別加 `.AsNoTracking()`（見上方「資料庫存取」）
 - **`ViewerSettings.Id` 是固定值而非資料庫產生**（`ValueGeneratedNever`）：這是單列設定，Id 恆為 1。留成 SQL Server identity 的話，程式碼補建這列時帶著 Id=1 會撞上 `IDENTITY_INSERT` 關閉而失敗
 - **往前翻頁一定要能前進**：純粹「以游標時間往前 N 天」開窗，遇到比視窗還長的沉寂期會永遠回空、游標不動，按鈕看起來可按卻沒反應。API 因此會在視窗落空時把視窗錨定到下一則更早訊息
 
