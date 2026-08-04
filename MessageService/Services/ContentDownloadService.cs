@@ -47,19 +47,33 @@ public class ContentDownloadService(
         using var scope = scopeFactory.CreateScope();
         var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
 
-        var pendingIds = await dbContext.MessageContents
-            .Where(c => c.DownloadStatus == DownloadStatus.Pending)
-            .Select(c => c.Id)
+        // Failed 也一併重排：常見成因是設定錯誤（例如 access token 打錯）而非內容本身有問題，
+        // 修好設定重啟服務後應該自動補跑，不需要手動改 DB
+        var contents = await dbContext.MessageContents
+            .Where(c => c.DownloadStatus == DownloadStatus.Pending || c.DownloadStatus == DownloadStatus.Failed)
             .ToListAsync(cancellationToken);
 
-        foreach (var id in pendingIds)
+        var failedCount = 0;
+        foreach (var content in contents)
         {
-            queue.Enqueue(id);
+            if (content.DownloadStatus == DownloadStatus.Failed)
+            {
+                content.DownloadStatus = DownloadStatus.Pending;
+                failedCount++;
+            }
+            queue.Enqueue(content.Id);
         }
 
-        if (pendingIds.Count > 0)
+        if (failedCount > 0)
         {
-            logger.LogInformation("Requeued {Count} pending content downloads from previous run", pendingIds.Count);
+            await dbContext.SaveChangesAsync(cancellationToken);
+        }
+
+        if (contents.Count > 0)
+        {
+            logger.LogInformation(
+                "Requeued {Count} content downloads from previous run ({FailedCount} previously failed)",
+                contents.Count, failedCount);
         }
     }
 

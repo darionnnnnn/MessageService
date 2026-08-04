@@ -28,6 +28,7 @@ builder.Services.AddDbContext<MessageDbContext>(options =>
 
 builder.Services.AddScoped<ContentStreamService>();
 builder.Services.AddScoped<IMaskingService, MaskingService>();
+builder.Services.AddScoped<IAnonymousIdentityService, AnonymousIdentityService>();
 
 var app = builder.Build();
 
@@ -42,6 +43,9 @@ if (builder.Configuration.GetValue<bool>("UseForwardedHeaders"))
 
 // 全站沒有登入機制，IP 白名單是最低防護，必須放在管線最前面擋下所有請求
 app.UseMiddleware<IpAllowlistMiddleware>();
+
+// 要包住後面所有中介層與 controller，才能攔到它們拋出的請求取消例外
+app.UseMiddleware<CancelledRequestMiddleware>();
 
 // Configure the HTTP request pipeline.
 if (!app.Environment.IsDevelopment())

@@ -96,22 +96,26 @@ dotnet user-secrets set "Line:ChannelAccessToken" "<你的 access token>"
 
 ### 頁面與 API
 
-**對話頁（`/`）**：Bootstrap + 原生 JS 模擬 LINE 對話視窗，所有資料透過 API 取得（不走 MVC Model 傳遞）。
+**對話頁（`/`）**：原生 JS 模擬 LINE 的雙欄版面（Bootstrap 只保留 modal/toast/表單控件），所有資料透過 API 取得（不走 MVC Model 傳遞）。
 
-- 預設載入 3 天內對話，「載入更早 7 天」按鈕以最舊訊息 Id 當游標往前翻頁，沒有更早歷史時自動 disable。兩個「按了會沒反應」的空窗情況都有處理：畫面上一則訊息都沒有（沒有游標可用）時改成放大天數視窗重繪；群組沉寂比一個視窗還久時由 API 把視窗錨定到下一則更早訊息，保證每次點擊都會前進
-- 「回到最新」置底按鈕：使用者往上捲動時自動退出跟隨模式並顯示未讀數，點擊或捲回底部即恢復跟隨並自動捲到新訊息
+- **左側欄**：群組列表（頭貼、名稱、最後訊息預覽、時間，依最後活動倒序），前端即時搜尋過濾，底部為設定頁入口。取代早期的下拉選單
+- **聊天面板**：與背景同色的透明標頭（群組頭貼＋名稱＋成員數＋「Aa」字級下拉）、訊息泡泡（首顆帶指向頭貼的小尾巴、時間戳貼泡泡外側）、底部仿 LINE 輸入列但唯讀化（圖示灰化不可點、中央膠囊顯示同步狀態）
+- **頭貼**：`Original` 模式顯示真實 LINE 頭貼（`referrerpolicy="no-referrer"`，載入失敗 fallback 代號圖示）；其他模式一律顯示伺服器指派的動植物代號圖示（emoji 渲染，前端 `ICON_EMOJI` 對照表需與後端 `AvatarIconCatalog` 的 IconKey 同步維護）
+- 預設載入 3 天內對話，「載入更早 7 天」膠囊以最舊訊息 Id 當游標往前翻頁，沒有更早歷史時自動 disable。兩個「按了會沒反應」的空窗情況都有處理：畫面上一則訊息都沒有（沒有游標可用）時改成放大天數視窗重繪；群組沉寂比一個視窗還久時由 API 把視窗錨定到下一則更早訊息，保證每次點擊都會前進
+- 「回到最新」浮動按鈕：使用者往上捲動時自動退出跟隨模式並顯示未讀數，點擊或捲回底部即恢復跟隨並自動捲到新訊息
 - 每 4 秒輪詢新訊息與 Pending 內容的下載狀態；分頁隱藏（`document.hidden`）時暫停輪詢
 - 新訊息進場有淡入＋位移動效（`prefers-reduced-motion` 使用者會停用）
 - 圖片／影片／語音／檔案依 `DownloadStatus` 顯示 spinner／播放器／下載連結／失敗訊息
-- 所有文字一律用 `textContent` 塞入 DOM，不用 `innerHTML`，避免訊息內容造成 XSS
+- 文字訊息中的網址會轉成可點連結（`target="_blank"` + `rel="noopener noreferrer"`）；所有內容一律用 DOM 節點組裝（`textContent`／`createElement`），不用 `innerHTML`，避免訊息內容造成 XSS
+- **手機版（<768px）**：群組列表與聊天面板全螢幕切換，標頭出現「‹」返回鈕，仿 LINE 手機版導覽
 
-**設定頁（`/Home/Settings`）**：關鍵字遮蔽規則（新增/刪除，預設等長 `*` 或自訂替換字串，全部群組或指定群組）；名稱顯示模式（原名／首尾保留中間遮蔽／自訂別名，別名編輯器可依群組篩選成員）。變更即存，PUT 後顯示 toast。
+**設定頁（`/Home/Settings`）**：卡片式版面。隱私與匿名（名稱顯示四模式，含完全匿名動植物代號；別名編輯器可依群組篩選成員）；關鍵字遮蔽規則（新增/刪除，預設等長 `*` 或自訂替換字串，全部群組或指定群組）。變更即存，PUT 後顯示 toast。
 
 **API**（都在 `MessageService.Web/Controllers/Api/`）：
 
 | 端點 | 用途 |
 |---|---|
-| `GET /api/groups` | 群組清單（僅列出有訊息的群組，名稱取自快取，無快取則顯示 GroupId） |
+| `GET /api/groups` | 群組清單（僅列出有訊息的群組，名稱取自快取，無快取則顯示 GroupId；含最後訊息預覽〔已套遮蔽〕、最後訊息時間、成員數，依最後活動倒序） |
 | `GET /api/groups/{groupId}/messages?days=` / `?beforeId=&days=` / `?afterId=` | 初載 / 往前加載 / 輪詢新訊息，回應已套用遮蔽 |
 | `GET /api/messages/{id}/content` | 內容串流，支援 HTTP Range（見下方實作說明） |
 | `GET /api/messages/statuses?ids=` | 查詢多筆內容目前的 `DownloadStatus` |
@@ -127,10 +131,13 @@ dotnet user-secrets set "Line:ChannelAccessToken" "<你的 access token>"
 `IMaskingService.LoadRulesAsync()` 每個請求只呼叫一次，把當下的名稱顯示模式、關鍵字規則、別名對照載成一份 `IMaskingRuleSet` 快照，套用到該次回應的每則訊息時全是同步運算，避免每則訊息各打一次 DB。
 
 - **關鍵字遮蔽**：不分大小寫的純字串比對（不用 regex），可設定全部群組或指定群組套用；預設遮蔽為與關鍵字等長的 `*`，也可設定自訂替換字串
-- **名稱顯示三模式**：
-  - `Original`：顯示原始快取的 LINE 顯示名稱，沒有快取則顯示 UserId
+- **名稱顯示四模式**：
+  - `Original`：顯示原始快取的 LINE 顯示名稱，沒有快取則顯示 UserId；唯一會回傳真實頭貼 URL 的模式
   - `MaskMiddle`：首尾字保留、中間 `*`（1 字全遮；2 字只留首字，如「小明」→「小*」；3 字以上首尾各留一字，如「王小明」→「王*明」）
   - `CustomAlias`：依 `UserAliases` 對照表顯示别名；沒設定別名的人 fallback 為 `MaskMiddle`
+  - `Anonymous`：名稱與頭貼一律替換為動植物代號（如「小熊」），由 `IAnonymousIdentityService` 依群組+使用者永久指派並存進 `AnonymousIdentities`，翻閱舊訊息時代號不會變、可分辨是否為同一人但認不出真實身分
+
+以上四種模式（`Original` 除外）回應中一律不含真實 `PictureUrl`，即使前端不渲染也不外流，因為 URL 本身就是身分線索。
 
 ### IP 白名單（沒有登入機制）
 
@@ -188,7 +195,7 @@ dotnet user-secrets set "Line:ChannelAccessToken" "<你的 access token>"
 
 **Groups** / **GroupMembers**：收錄端背景快取的群組名稱、成員顯示名稱與頭像 URL（7 天 TTL，來源是 LINE 的 group summary / member profile API），檢視端用來把 GroupId/UserId 轉成人看得懂的名稱。快取失敗時 fallback 顯示原始 ID。
 
-**ViewerSettings**（單列，Id 固定為 1）／**MaskKeywords** + **MaskKeywordGroups**／**UserAliases**：檢視端設定頁寫入的遮蔽設定，只有這幾張表是 Web 專案會寫入的。
+**ViewerSettings**（單列，Id 固定為 1）／**MaskKeywords** + **MaskKeywordGroups**／**UserAliases**／**AnonymousIdentities**：檢視端寫入的顯示設定，只有這幾張表是 Web 專案會寫入的。`AnonymousIdentities`（GroupId+UserId 複合主鍵）是 `NameDisplayMode.Anonymous` 的代號永久指派表，跟其他幾張不同的地方是使用者不直接編輯——由 `GET /api/groups/{groupId}/messages` 第一次遇到某成員時自動指派並寫入。
 
 這些表的欄位是兩個專案間（以及未來其他消費端）的共用契約，異動需評估相容性。
 
@@ -196,7 +203,7 @@ dotnet user-secrets set "Line:ChannelAccessToken" "<你的 access token>"
 
 Migrations 統一放在 `MessageService.Data`，用 `MessageService` 當 startup project：
 
-- **SQLite（開發）**：兩個專案啟動時都各自 `EnsureCreated()`，免手動（收錄端在 `Program.cs`；檢視端目前假設 schema 已由收錄端建立）。
+- **SQLite（開發）**：兩個專案啟動時都各自 `EnsureCreated()`，免手動（收錄端在 `Program.cs`；檢視端目前假設 schema 已由收錄端建立）。**注意**：`EnsureCreated()` 只在資料庫檔案完全不存在時依目前模型建表，對已存在的 SQLite 檔案不會補新表/新欄位——加了新表（例如 `AnonymousIdentities`）後，既有的本機 `messages.db` 要手動刪除讓它重建，或改走 migration。
 - **SQL Server（正式）**：
 
 ```bash

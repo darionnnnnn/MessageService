@@ -14,6 +14,7 @@ public class MessageDbContext(DbContextOptions<MessageDbContext> options) : DbCo
     public DbSet<MaskKeyword> MaskKeywords => Set<MaskKeyword>();
     public DbSet<MaskKeywordGroup> MaskKeywordGroups => Set<MaskKeywordGroup>();
     public DbSet<UserAlias> UserAliases => Set<UserAlias>();
+    public DbSet<AnonymousIdentity> AnonymousIdentities => Set<AnonymousIdentity>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -53,6 +54,8 @@ public class MessageDbContext(DbContextOptions<MessageDbContext> options) : DbCo
             .HasKey(g => new { g.MaskKeywordId, g.GroupId });
 
         modelBuilder.Entity<UserAlias>().HasKey(a => a.UserId);
+
+        modelBuilder.Entity<AnonymousIdentity>().HasKey(a => new { a.GroupId, a.UserId });
 
         // SQLite only supports equality on DateTimeOffset, not <, > comparisons — needed for
         // retention cleanup's and profile cache staleness date-range queries. SQL Server keeps the

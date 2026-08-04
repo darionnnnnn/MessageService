@@ -157,4 +157,26 @@ public class ContentDownloadServiceTests : IDisposable
 
         Assert.Equal(contentId, Assert.Single(queue.Enqueued));
     }
+
+    [Fact]
+    public async Task RequeuePendingAsync_ResetsFailedContentToPendingAndEnqueues()
+    {
+        var contentId = await SeedPendingContentAsync("image");
+        _contentClient.OnGetContent = _ => throw new HttpRequestException("bad token");
+        var failingService = CreateService(new ContentDownloadOptions { MaxRetries = 1, RetryDelayMilliseconds = 0 });
+        await failingService.ProcessAsync(contentId, CancellationToken.None);
+        Assert.Equal(DownloadStatus.Failed, (await ReloadContentAsync(contentId)).DownloadStatus);
+
+        var queue = new FakeContentDownloadQueue();
+        var service = new ContentDownloadService(
+            queue,
+            _provider.GetRequiredService<IServiceScopeFactory>(),
+            OptionsFactory.Create(new ContentDownloadOptions()),
+            NullLogger<ContentDownloadService>.Instance);
+
+        await service.RequeuePendingAsync(CancellationToken.None);
+
+        Assert.Equal(contentId, Assert.Single(queue.Enqueued));
+        Assert.Equal(DownloadStatus.Pending, (await ReloadContentAsync(contentId)).DownloadStatus);
+    }
 }

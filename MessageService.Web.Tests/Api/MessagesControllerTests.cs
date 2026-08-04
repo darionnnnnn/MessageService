@@ -2,6 +2,7 @@ using System.Net.Http.Json;
 using MessageService.Models;
 using MessageService.Web.Dtos;
 using MessageService.Web.Tests.TestSupport;
+using Microsoft.EntityFrameworkCore;
 
 namespace MessageService.Web.Tests.Api;
 
@@ -261,5 +262,98 @@ public class MessagesControllerTests : IDisposable
 
         Assert.NotNull(statuses);
         Assert.Empty(statuses!);
+    }
+
+    [Fact]
+    public async Task GetMessages_OriginalMode_RevealsRealPictureUrlAndFallbackIcon()
+    {
+        var now = DateTimeOffset.UtcNow;
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            (await dbContext.ViewerSettings.SingleAsync()).NameDisplayMode = NameDisplayMode.Original;
+            dbContext.GroupMembers.Add(new GroupMember
+            {
+                GroupId = GroupId, UserId = "U1", DisplayName = "小明", PictureUrl = "https://example.com/u1.jpg", UpdatedAt = now
+            });
+            dbContext.GroupMessages.Add(TextMessage("e1", "U1", now, "hi"));
+        });
+
+        var page = await _fixture.Client.GetFromJsonAsync<MessagesPageDto>($"/api/groups/{GroupId}/messages?days=3");
+
+        var message = Assert.Single(page!.Messages);
+        Assert.Equal("小明", message.DisplayName);
+        Assert.Equal("https://example.com/u1.jpg", message.PictureUrl);
+        Assert.False(string.IsNullOrEmpty(message.AvatarIcon)); // fallback key for onerror
+    }
+
+    [Theory]
+    [InlineData("MaskMiddle")]
+    [InlineData("CustomAlias")]
+    public async Task GetMessages_NonOriginalMaskingModes_NeverExposeRealPictureUrl(string mode)
+    {
+        var now = DateTimeOffset.UtcNow;
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            (await dbContext.ViewerSettings.SingleAsync()).NameDisplayMode = Enum.Parse<NameDisplayMode>(mode);
+            dbContext.GroupMembers.Add(new GroupMember
+            {
+                GroupId = GroupId, UserId = "U1", DisplayName = "小明", PictureUrl = "https://example.com/u1.jpg", UpdatedAt = now
+            });
+            dbContext.GroupMessages.Add(TextMessage("e1", "U1", now, "hi"));
+        });
+
+        var page = await _fixture.Client.GetFromJsonAsync<MessagesPageDto>($"/api/groups/{GroupId}/messages?days=3");
+
+        var message = Assert.Single(page!.Messages);
+        Assert.Null(message.PictureUrl);
+        Assert.False(string.IsNullOrEmpty(message.AvatarIcon));
+    }
+
+    [Fact]
+    public async Task GetMessages_AnonymousMode_DisplayNameIsAnimalLabel_AndPictureUrlIsNull()
+    {
+        var now = DateTimeOffset.UtcNow;
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            (await dbContext.ViewerSettings.SingleAsync()).NameDisplayMode = NameDisplayMode.Anonymous;
+            dbContext.GroupMembers.Add(new GroupMember
+            {
+                GroupId = GroupId, UserId = "U1", DisplayName = "小明", PictureUrl = "https://example.com/u1.jpg", UpdatedAt = now
+            });
+            dbContext.GroupMessages.Add(TextMessage("e1", "U1", now, "hi"));
+        });
+
+        var page = await _fixture.Client.GetFromJsonAsync<MessagesPageDto>($"/api/groups/{GroupId}/messages?days=3");
+
+        var message = Assert.Single(page!.Messages);
+        Assert.NotEqual("小明", message.DisplayName);
+        Assert.DoesNotContain("U1", message.DisplayName);
+        Assert.Null(message.PictureUrl);
+        Assert.False(string.IsNullOrEmpty(message.AvatarIcon));
+    }
+
+    [Fact]
+    public async Task GetMessages_AnonymousMode_SameUserAcrossTwoRequests_KeepsSameLabelAndIcon()
+    {
+        var now = DateTimeOffset.UtcNow;
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            (await dbContext.ViewerSettings.SingleAsync()).NameDisplayMode = NameDisplayMode.Anonymous;
+            dbContext.GroupMessages.Add(TextMessage("e1", "U1", now, "first"));
+        });
+
+        var firstPage = await _fixture.Client.GetFromJsonAsync<MessagesPageDto>($"/api/groups/{GroupId}/messages?days=3");
+        var firstMessage = firstPage!.Messages.Single();
+
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            dbContext.GroupMessages.Add(TextMessage("e2", "U1", now.AddMinutes(1), "second"));
+        });
+
+        var secondPage = await _fixture.Client.GetFromJsonAsync<MessagesPageDto>($"/api/groups/{GroupId}/messages?days=3");
+        var secondMessage = secondPage!.Messages.Single(m => m.Text == "second");
+
+        Assert.Equal(firstMessage.DisplayName, secondMessage.DisplayName);
+        Assert.Equal(firstMessage.AvatarIcon, secondMessage.AvatarIcon);
     }
 }

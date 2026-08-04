@@ -105,4 +105,44 @@ public class MaskingRuleSetTests
 
         Assert.Equal("小*", rules.ResolveDisplayName("U123", "小明"));
     }
+
+    [Fact]
+    public void ResolveDisplayName_AnonymousMode_ReturnsSuppliedLabel_IgnoringRawName()
+    {
+        var rules = CreateRuleSet(mode: NameDisplayMode.Anonymous);
+
+        Assert.Equal("小熊", rules.ResolveDisplayName("U123", "小明", "小熊"));
+    }
+
+    [Fact]
+    public void ResolveDisplayName_AnonymousMode_NoLabelSupplied_FallsBackToUnknownPlaceholder()
+    {
+        var rules = CreateRuleSet(mode: NameDisplayMode.Anonymous);
+
+        Assert.Equal("(未知)", rules.ResolveDisplayName("U123", "小明"));
+    }
+
+    [Theory]
+    [InlineData(NameDisplayMode.Original, true)]
+    [InlineData(NameDisplayMode.MaskMiddle, false)]
+    [InlineData(NameDisplayMode.CustomAlias, false)]
+    [InlineData(NameDisplayMode.Anonymous, false)]
+    public void RevealsOriginalProfile_OnlyTrueForOriginalMode(NameDisplayMode mode, bool expected)
+    {
+        var rules = CreateRuleSet(mode: mode);
+
+        Assert.Equal(expected, rules.RevealsOriginalProfile);
+    }
+
+    [Theory]
+    [InlineData(NameDisplayMode.Anonymous, true)]
+    [InlineData(NameDisplayMode.Original, false)]
+    [InlineData(NameDisplayMode.MaskMiddle, false)]
+    [InlineData(NameDisplayMode.CustomAlias, false)]
+    public void RequiresAnonymousIdentity_OnlyTrueForAnonymousMode(NameDisplayMode mode, bool expected)
+    {
+        var rules = CreateRuleSet(mode: mode);
+
+        Assert.Equal(expected, rules.RequiresAnonymousIdentity);
+    }
 }
