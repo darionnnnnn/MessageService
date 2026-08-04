@@ -345,6 +345,193 @@ body.chat-page {
     text-align: center;
 }
 
+/* 跳轉到搜尋結果的上下文時顯示，取代常駐的「回到最新」浮動鈕——歷史檢視期間
+   訊息輪詢會暫停（避免視窗尾端出現時間斷層），這顆是唯一回到即時畫面的出口 */
+.historical-banner {
+    flex: none;
+    align-self: center;
+    width: fit-content;
+    max-width: calc(100% - 2 * var(--gutter));
+    margin-top: .5rem;
+    background: #33475b;
+    color: #fff;
+    padding: .35rem .4rem .35rem 1rem;
+    border-radius: 999px;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, .12);
+    font-size: calc(var(--chat-base-current) * .95rem / 1.15rem);
+    display: flex;
+    align-items: center;
+    gap: .6rem;
+}
+
+.historical-banner button {
+    flex: none;
+    border: none;
+    background: var(--line-green);
+    color: #fff;
+    border-radius: 999px;
+    padding: .2rem .75rem;
+    font-size: 1em;
+    font-weight: 600;
+}
+
+/* === 訊息搜尋 === */
+
+.search-panel {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    z-index: 3;
+    background: #fff;
+    box-shadow: 0 4px 10px rgba(0, 0, 0, .18);
+    max-height: min(70vh, 32rem);
+    display: flex;
+    flex-direction: column;
+}
+
+.search-panel-bar {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: .5rem;
+    padding: .6rem var(--gutter);
+    border-bottom: 1px solid #eee;
+}
+
+.search-panel-input {
+    flex: 1 1 auto;
+    min-width: 0;
+    border: none;
+    background: var(--line-composer-pill);
+    border-radius: 999px;
+    padding: .45rem .9rem;
+    font-size: calc(var(--chat-base-current) * 1rem / 1.15rem);
+}
+
+.search-panel-input:focus {
+    outline: none;
+    box-shadow: 0 0 0 .15rem var(--sidebar-active);
+}
+
+.search-scope-toggle {
+    flex: none;
+    display: flex;
+    background: var(--line-composer-pill);
+    border-radius: 999px;
+    padding: .15rem;
+}
+
+.search-scope-toggle button {
+    border: none;
+    background: transparent;
+    border-radius: 999px;
+    padding: .3rem .75rem;
+    font-size: calc(var(--chat-base-current) * .85rem / 1.15rem);
+    color: #555;
+    white-space: nowrap;
+}
+
+.search-scope-toggle button.active {
+    background: var(--line-green);
+    color: #fff;
+}
+
+.search-close-btn {
+    flex: none;
+    border: none;
+    background: transparent;
+    color: #777;
+    font-size: 1.1rem;
+    line-height: 1;
+    padding: .2rem .4rem;
+}
+
+.search-results {
+    flex: 1 1 auto;
+    overflow-y: auto;
+}
+
+.search-result-empty {
+    padding: 1.5rem 1rem;
+    text-align: center;
+    color: #888;
+    font-size: calc(var(--chat-base-current) * .95rem / 1.15rem);
+}
+
+.search-result-item {
+    display: block;
+    width: 100%;
+    text-align: left;
+    border: none;
+    background: transparent;
+    padding: .6rem var(--gutter);
+    border-bottom: 1px solid #f2f2f2;
+    cursor: pointer;
+}
+
+.search-result-item:hover {
+    background: var(--sidebar-hover);
+}
+
+.search-result-meta {
+    display: flex;
+    align-items: baseline;
+    gap: .4rem;
+    font-size: calc(var(--chat-base-current) * .8rem / 1.15rem);
+    color: #767676;
+    margin-bottom: .2rem;
+}
+
+.search-result-name {
+    color: #333;
+    font-weight: 600;
+}
+
+.search-result-time {
+    margin-left: auto;
+    flex: none;
+}
+
+.search-result-snippet {
+    font-size: calc(var(--chat-base-current) * 1rem / 1.15rem);
+    color: #1b1b1b;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.search-result-snippet mark,
+.search-result-name mark {
+    background: #fff3a0;
+    color: inherit;
+    border-radius: .15em;
+    padding: 0 .05em;
+}
+
+/* 跳轉後在訊息串裡標出符合關鍵字的文字 */
+.bubble mark.search-highlight {
+    background: #fff3a0;
+    color: inherit;
+    border-radius: .15em;
+    padding: 0 .05em;
+}
+
+/* 跳轉到的目標訊息短暫閃爍，幫助使用者找到它在畫面中的位置 */
+@keyframes message-highlight-flash {
+    0%, 100% {
+        box-shadow: none;
+    }
+
+    30% {
+        box-shadow: 0 0 0 .2rem var(--line-green);
+    }
+}
+
+.message-row.message-highlight-flash .bubble {
+    animation: message-highlight-flash 1.6s ease-out;
+}
+
 /* === 訊息區 === */
 
 .message-area {

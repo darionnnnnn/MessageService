@@ -32,6 +32,7 @@
                 <span id="chat-header-name" class="chat-header-name">選擇一個群組</span>
                 <span id="chat-header-members" class="chat-header-members"></span>
             </div>
+            <button id="search-toggle-btn" type="button" class="btn btn-sm btn-header-action" aria-label="搜尋訊息">🔍</button>
             <div class="font-size-toggle dropdown">
                 <button class="btn btn-sm btn-header-action dropdown-toggle" type="button" id="font-size-dropdown-btn" data-bs-toggle="dropdown" aria-expanded="false">Aa</button>
                 <ul class="dropdown-menu dropdown-menu-end">
@@ -40,9 +41,26 @@
                     <li><button type="button" class="dropdown-item" data-font-size="large">大</button></li>
                 </ul>
             </div>
+
+            <div id="search-panel" class="search-panel d-none">
+                <div class="search-panel-bar">
+                    <input id="search-input" type="search" class="search-panel-input" placeholder="搜尋訊息內容或使用者名稱" aria-label="搜尋訊息內容或使用者名稱">
+                    <div class="search-scope-toggle" role="group" aria-label="搜尋範圍">
+                        <button type="button" class="active" data-scope="group">本群組</button>
+                        <button type="button" data-scope="all">全部群組</button>
+                    </div>
+                    <button id="search-close-btn" type="button" class="search-close-btn" aria-label="關閉搜尋">✕</button>
+                </div>
+                <div id="search-results" class="search-results"></div>
+            </div>
         </header>
 
         <div id="connection-banner" class="connection-banner d-none">連線中斷，正在嘗試重新連線…</div>
+
+        <div id="historical-banner" class="historical-banner d-none">
+            <span>正在檢視歷史訊息</span>
+            <button id="historical-back-btn" type="button">回到最新</button>
+        </div>
 
         <div id="message-area" class="message-area">
             <button id="load-more-btn" type="button" class="load-more-pill" disabled>載入更早 7 天</button>
