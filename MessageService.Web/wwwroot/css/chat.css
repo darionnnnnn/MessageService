@@ -1011,9 +1011,12 @@ body.chat-page {
     background: rgba(0, 0, 0, .75);
 }
 
-/* === 側欄拖曳調整寬度／兩段式收合（僅桌面版；手機版是單欄全螢幕切換，這些一律停用） === */
+/* === 側欄拖曳調整寬度／兩段式收合（僅桌面版；手機版是單欄全螢幕切換，這些一律停用） ===
 
-@media (min-width: 769px) {
+   條件寫成手機斷點的「精確補集」而不是 min-width: 769px：顯示縮放 125%／瀏覽器縮放會產生
+   768.5px 這種分數視埠寬，min-width:769px 與 max-width:768px 都不匹配，收合鈕會看得見卻按不動。 */
+
+@media not all and (max-width: 768px) {
     /* 拖曳分隔線：熱區 5px，用負邊距疊在側欄邊界上，不額外佔版面寬度 */
     .sidebar-resizer {
         flex: none;
