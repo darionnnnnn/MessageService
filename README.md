@@ -14,6 +14,9 @@ MessageService.sln
 └── MessageService.Web.Tests/
 ```
 
+**其他文件**：[docs/LINE-BOT-SETUP.md](docs/LINE-BOT-SETUP.md)（建立 Bot 與串接的逐步操作、疑難排解）、
+[docs/WEB-UI-DESIGN-NOTES.md](docs/WEB-UI-DESIGN-NOTES.md)（檢視端歷次改版的設計決策理由與放棄的替代方案）。
+
 ---
 
 ## MessageService（收錄端）
@@ -79,7 +82,7 @@ dotnet user-secrets set "Line:ChannelAccessToken" "<你的 access token>"
 
 ### 本機串接 LINE 測試
 
-完整的逐步操作（建立 Bot、取得金鑰、Webhook 設定、測試驗收、疑難排解）see **[LINE-BOT-SETUP.md](LINE-BOT-SETUP.md)**。快速版：
+完整的逐步操作（建立 Bot、取得金鑰、Webhook 設定、測試驗收、疑難排解）see **[docs/LINE-BOT-SETUP.md](docs/LINE-BOT-SETUP.md)**。快速版：
 
 1. LINE Developers Console 建立 Messaging API channel，**啟用 Allow bot to join group chats**（不開就完全收不到群組訊息）
 2. 取得 Channel Secret（Basic settings 分頁）與 Channel Access Token（Messaging API 分頁），用 user-secrets 寫入

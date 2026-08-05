@@ -1,5 +1,5 @@
-/* LINE 風格檢視器的視覺 token，數值取樣自 LINE 官方 App 實機截圖（詳見 WEB-UI-REDESIGN-PLAN.md §2.6）。
-   只做亮色主題，本次刻意不做深色模式。 */
+/* LINE 風格檢視器的視覺 token，數值取樣自 LINE 官方 App 實機截圖
+   （設計決策沿革見 docs/WEB-UI-DESIGN-NOTES.md）。只做亮色主題，刻意不做深色模式。 */
 :root {
     --line-chat-bg: #8CABDC;
     /* 標頭改白底：原本 #7B9BD2 與聊天背景 #8CABDC 只差一階、幾乎沒有分界，
