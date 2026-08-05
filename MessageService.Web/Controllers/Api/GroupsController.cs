@@ -10,8 +10,13 @@ namespace MessageService.Web.Controllers.Api;
 [Route("api/groups")]
 public class GroupsController(MessageDbContext dbContext, IMaskingService maskingService) : ControllerBase
 {
+    // 側欄未讀數的上限：超過就一律顯示「99+」，也順便讓 COUNT 查詢在 SQL 端就截斷，
+    // 不必真的數完一個很久沒看的群組累積的成千上萬則
+    private const int UnreadCap = 100;
+
     [HttpGet]
-    public async Task<ActionResult<IReadOnlyList<GroupDto>>> GetGroups(CancellationToken cancellationToken)
+    public async Task<ActionResult<IReadOnlyList<GroupDto>>> GetGroups(
+        [FromQuery] string? read, CancellationToken cancellationToken)
     {
         // GroupBy+Max 是 EF Core 能穩定轉譯成單一 SQL 的聚合寫法；GroupBy+OrderBy().First() 在部分
         // provider 上會退回 client evaluation，改用「先找每群組最後一則的 Id，再用 Id 撈整列」兩段式查詢
@@ -24,6 +29,25 @@ public class GroupsController(MessageDbContext dbContext, IMaskingService maskin
         {
             return Ok(Array.Empty<GroupDto>());
         }
+
+        // 已讀基準：每個瀏覽器自己記在 localStorage，用 ?read=群組:最後已讀Id,... 帶上來。
+        // 未讀數＝該群組 Id 大於基準的訊息數（上限 UnreadCap）。沒帶基準的群組視為全部已讀（0），
+        // 避免第一次開啟就整排 99+
+        var readBaselines = ParseReadBaselines(read);
+        var unreadByGroup = new Dictionary<string, int>();
+        foreach (var entry in latestIdsByGroup)
+        {
+            if (!readBaselines.TryGetValue(entry.GroupId, out var baseline) || entry.LastId <= baseline)
+            {
+                continue;
+            }
+            unreadByGroup[entry.GroupId] = await dbContext.GroupMessages
+                .Where(m => m.GroupId == entry.GroupId && m.Id > baseline)
+                .Take(UnreadCap)
+                .CountAsync(cancellationToken);
+        }
+
+        var lastIdByGroup = latestIdsByGroup.ToDictionary(x => x.GroupId, x => x.LastId);
 
         var latestIds = latestIdsByGroup.Select(x => x.LastId).ToList();
         var lastMessages = await dbContext.GroupMessages
@@ -60,12 +84,41 @@ public class GroupsController(MessageDbContext dbContext, IMaskingService maskin
                     cached?.PictureUrl,
                     preview,
                     lastMessage.EventTimestamp,
-                    memberCounts.GetValueOrDefault(id, 0));
+                    memberCounts.GetValueOrDefault(id, 0),
+                    lastIdByGroup[id],
+                    unreadByGroup.GetValueOrDefault(id, 0));
             })
             .OrderByDescending(g => g.LastMessageAt)
             .ToList();
 
         return Ok(result);
+    }
+
+    // 解析 ?read=群組:最後已讀Id,群組:最後已讀Id... 成對照表；格式不合的 pair 直接略過，
+    // 不讓一個壞掉的查詢字串整個弄垮側欄
+    private static Dictionary<string, long> ParseReadBaselines(string? read)
+    {
+        var baselines = new Dictionary<string, long>();
+        if (string.IsNullOrWhiteSpace(read))
+        {
+            return baselines;
+        }
+
+        foreach (var pair in read.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var separator = pair.LastIndexOf(':');
+            if (separator <= 0 || separator == pair.Length - 1)
+            {
+                continue;
+            }
+            var groupId = pair[..separator];
+            if (long.TryParse(pair[(separator + 1)..], out var lastReadId))
+            {
+                baselines[groupId] = lastReadId;
+            }
+        }
+
+        return baselines;
     }
 
 }

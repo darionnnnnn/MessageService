@@ -7,7 +7,9 @@
     <aside id="sidebar" class="sidebar">
         <div class="sidebar-header">
             <span class="app-brand-dot" aria-hidden="true"></span>
-            訊息紀錄
+            <span class="sidebar-brand-text">訊息紀錄</span>
+            <button id="sidebar-collapse-btn" type="button" class="sidebar-collapse-btn"
+                    aria-expanded="true" aria-controls="sidebar" aria-label="收合為窄欄" title="收合為窄欄">‹</button>
         </div>
         <div class="sidebar-search">
             <span class="sidebar-search-icon" aria-hidden="true">🔍</span>
@@ -17,15 +19,19 @@
             <div class="group-list-empty">載入群組中…</div>
         </div>
         <div class="sidebar-footer">
-            <button type="button" class="sidebar-settings-link" data-bs-toggle="modal" data-bs-target="#settings-modal">
+            <button type="button" class="sidebar-settings-link" data-bs-toggle="modal" data-bs-target="#settings-modal" title="設定">
                 <span aria-hidden="true">⚙️</span>
-                設定
+                <span class="sidebar-settings-text">設定</span>
             </button>
         </div>
     </aside>
 
+    <div id="sidebar-resizer" class="sidebar-resizer" role="separator" aria-orientation="vertical"
+         aria-label="調整群組列表寬度" aria-valuemin="200" aria-valuemax="480" aria-valuenow="320" tabindex="0"></div>
+
     <section id="chat-panel" class="chat-panel">
         <header id="chat-header" class="chat-header">
+            <button id="sidebar-expand-btn" type="button" class="sidebar-expand-btn" aria-label="顯示群組列表" title="顯示群組列表">☰</button>
             <button id="mobile-back-btn" type="button" class="mobile-back-btn" aria-label="返回群組列表">‹</button>
             <div id="chat-header-avatar" class="avatar chat-header-avatar"></div>
             <div class="chat-header-info">

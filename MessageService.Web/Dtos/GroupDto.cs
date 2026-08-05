@@ -6,4 +6,6 @@ public record GroupDto(
     string? PictureUrl,
     string? LastMessagePreview,
     DateTimeOffset? LastMessageAt,
-    int MemberCount);
+    int MemberCount,
+    long LastMessageId,
+    int UnreadCount);

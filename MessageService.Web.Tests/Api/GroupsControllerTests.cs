@@ -141,4 +141,109 @@ public class GroupsControllerTests : IDisposable
 
         Assert.Equal(2, Assert.Single(groups!).MemberCount);
     }
+
+    [Fact]
+    public async Task GetGroups_NoReadParam_ReturnsLastMessageIdAndZeroUnread()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var last = new GroupMessage
+        {
+            WebhookEventId = "e2", LineMessageId = "m2", GroupId = "G1", MessageType = "text", Text = "new",
+            EventTimestamp = now, ReceivedAt = now
+        };
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            dbContext.GroupMessages.Add(new GroupMessage
+            {
+                WebhookEventId = "e1", LineMessageId = "m1", GroupId = "G1", MessageType = "text", Text = "old",
+                EventTimestamp = now.AddMinutes(-1), ReceivedAt = now.AddMinutes(-1)
+            });
+            dbContext.GroupMessages.Add(last);
+            await Task.CompletedTask;
+        });
+
+        var group = Assert.Single((await _fixture.Client.GetFromJsonAsync<List<GroupDto>>("/api/groups"))!);
+
+        Assert.Equal(last.Id, group.LastMessageId);
+        Assert.Equal(0, group.UnreadCount);
+    }
+
+    [Fact]
+    public async Task GetGroups_WithReadBaseline_CountsOnlyNewerMessages()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var first = new GroupMessage
+        {
+            WebhookEventId = "e1", LineMessageId = "m1", GroupId = "G1", MessageType = "text", Text = "1",
+            EventTimestamp = now.AddMinutes(-2), ReceivedAt = now.AddMinutes(-2)
+        };
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            dbContext.GroupMessages.Add(first);
+            dbContext.GroupMessages.Add(new GroupMessage
+            {
+                WebhookEventId = "e2", LineMessageId = "m2", GroupId = "G1", MessageType = "text", Text = "2",
+                EventTimestamp = now.AddMinutes(-1), ReceivedAt = now.AddMinutes(-1)
+            });
+            dbContext.GroupMessages.Add(new GroupMessage
+            {
+                WebhookEventId = "e3", LineMessageId = "m3", GroupId = "G1", MessageType = "text", Text = "3",
+                EventTimestamp = now, ReceivedAt = now
+            });
+            await Task.CompletedTask;
+        });
+
+        // baseline = 第一則的 Id，之後兩則算未讀
+        var groups = await _fixture.Client.GetFromJsonAsync<List<GroupDto>>($"/api/groups?read=G1:{first.Id}");
+
+        Assert.Equal(2, Assert.Single(groups!).UnreadCount);
+    }
+
+    [Fact]
+    public async Task GetGroups_UnreadCount_CappedAt100()
+    {
+        var now = DateTimeOffset.UtcNow;
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            for (var i = 0; i < 105; i++)
+            {
+                dbContext.GroupMessages.Add(new GroupMessage
+                {
+                    WebhookEventId = $"e{i}", LineMessageId = $"m{i}", GroupId = "G1", MessageType = "text", Text = "x",
+                    EventTimestamp = now.AddSeconds(i), ReceivedAt = now.AddSeconds(i)
+                });
+            }
+            await Task.CompletedTask;
+        });
+
+        // baseline = 0：全部 105 則都算未讀，但要在 SQL 端截斷成上限 100
+        var groups = await _fixture.Client.GetFromJsonAsync<List<GroupDto>>("/api/groups?read=G1:0");
+
+        Assert.Equal(100, Assert.Single(groups!).UnreadCount);
+    }
+
+    [Theory]
+    [InlineData("garbage")]
+    [InlineData("G1")]
+    [InlineData(":5")]
+    [InlineData("G1:abc")]
+    [InlineData("G1:")]
+    public async Task GetGroups_MalformedReadParam_IsIgnoredAndTreatedAsRead(string read)
+    {
+        var now = DateTimeOffset.UtcNow;
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            dbContext.GroupMessages.Add(new GroupMessage
+            {
+                WebhookEventId = "e1", LineMessageId = "m1", GroupId = "G1", MessageType = "text", Text = "hi",
+                EventTimestamp = now, ReceivedAt = now
+            });
+            await Task.CompletedTask;
+        });
+
+        var groups = await _fixture.Client.GetFromJsonAsync<List<GroupDto>>($"/api/groups?read={read}");
+
+        // 壞掉的 pair 一律略過 → 該群組沒有有效 baseline → 未讀視為 0，且不擲例外
+        Assert.Equal(0, Assert.Single(groups!).UnreadCount);
+    }
 }
