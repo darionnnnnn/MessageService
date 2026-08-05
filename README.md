@@ -98,8 +98,10 @@ dotnet user-secrets set "Line:ChannelAccessToken" "<你的 access token>"
 
 **對話頁（`/`）**：原生 JS 模擬 LINE 的雙欄版面（Bootstrap 只保留 modal/toast/表單控件），所有資料透過 API 取得（不走 MVC Model 傳遞）。
 
-- **左側欄**：群組列表（頭貼、名稱、最後訊息預覽、時間，依最後活動倒序），前端即時搜尋過濾，底部為設定入口（開啟設定 modal）。取代早期的下拉選單；側欄與聊天面板的所有區塊共用同一份 `--gutter`/`--radius-*` token（chat.css），群組項目與設定入口是內縮圓角卡而非通版直角色塊
-- **聊天面板**：標頭有自己的底色（`--line-header-bg`，比訊息區深一階）＋陰影，跟訊息區明確分層（群組頭貼＋名稱＋成員數＋🔍搜尋＋「Aa」字級下拉）；訊息泡泡首顆帶指向頭貼的小尾巴（左上角、跟著字級用 em 縮放，避免大字級時圓角比尾巴大造成脫節）、時間戳貼泡泡外側；底部仿 LINE 輸入列但唯讀化（圖示灰化不可點、中央膠囊顯示同步狀態）
+- **左側欄**：群組列表（48px 圓角方形頭貼、名稱、最後訊息預覽、時間、未讀數 badge，依最後活動倒序），前端即時搜尋過濾，底部為設定入口（開啟設定 modal）。取代早期的下拉選單；側欄與聊天面板的所有區塊共用同一份 `--gutter`/`--radius-*` token（chat.css），群組項目與設定入口是內縮圓角卡而非通版直角色塊
+- **側欄寬度與收合（桌面版）**：分隔線可拖曳調整寬度（200–480px，Pointer Events + `setPointerCapture`；拖到 <140px 吸附成窄欄、窄欄拖出 >180px 回展開，兩門檻錯開防臨界抖動；雙擊重設 320px；分隔線可 Tab 聚焦，←→/Home/End 鍵盤調整）；標題列「‹」鈕兩段式收合：全寬 → 72px 窄欄（只剩頭貼，原生 title 提示群組名、未讀 badge 疊頭貼右上、點頭貼即切換群組）→ 完全隱藏（聊天標頭出現「☰」展開鈕）。寬度與收合狀態各自記在 localStorage（`chat-sidebar-width`/`chat-sidebar-state`）；手機版（≤768px）一律停用（單欄全螢幕切換，桌面存的狀態不生效）
+- **側欄未讀數**：每群組的「最後已讀訊息 Id」記在 localStorage（`chat-read-state`，每台裝置各自算，不進 DB），輪詢 `/api/groups?read=` 帶上基準由後端計數（上限 99+）。開著的群組視為已讀（切入群組、新訊息接進畫面時都會推進基準）；本裝置第一次看到的群組直接以最後一則為基準（不會初次開啟整排 99+）；已消失的群組基準自動清掉
+- **聊天面板**：標頭白底＋細分隔線（`--line-header-bg`/`--line-header-border`，仿 LINE 桌面版，與藍色訊息區明確分界；群組頭貼＋名稱＋成員數＋🔍搜尋＋「Aa」字級下拉）；訊息泡泡首顆帶指向頭貼的小尾巴（左上角、跟著字級用 em 縮放，避免大字級時圓角比尾巴大造成脫節）、時間戳貼泡泡外側；同一人連續訊息間距收緊、換人／換日的首則才拉開（LINE 的節奏）；泡泡寬度除相對 75% 外另有 34rem 絕對上限（寬螢幕不會拉出超長泡泡）；底部仿 LINE 輸入列但唯讀化（圖示灰化不可點、中央膠囊顯示同步狀態）
 - **頭貼**：`Original` 模式顯示真實 LINE 頭貼（`referrerpolicy="no-referrer"`，載入失敗 fallback 代號圖示）；其他模式一律顯示伺服器指派的動植物代號圖示（emoji 渲染，前端 `ICON_EMOJI` 對照表需與後端 `AvatarIconCatalog` 的 IconKey 同步維護）
 - **字級**：設定「字體大小」數值輸入（px）＝聊天頁「中」檔泡泡文字的實際大小，小／大依比例（.87×／1.13×）跟著調整；聊天頁全部文字（不含頭貼/圖示）與設定 modal 本身的文字都吃同一份 `--font-base-px`（localStorage key `chat-font-base-px`，設在 `document.documentElement` 上、透過 inline style 覆寫、不寫死在樣式表裡，才不會被 CSS cascade 蓋掉）。設定 modal 跟聊天頁是同一個頁面，調字級時背後的聊天畫面會即時跟著變
 - 預設載入 3 天內對話，「載入更早 7 天」膠囊以最舊訊息 Id 當游標往前翻頁，沒有更早歷史時自動 disable。兩個「按了會沒反應」的空窗情況都有處理：畫面上一則訊息都沒有（沒有游標可用）時改成放大天數視窗重繪；群組沉寂比一個視窗還久時由 API 把視窗錨定到下一則更早訊息，保證每次點擊都會前進。膠囊本身（可按的「載入更早」）常駐顯示；沒有更早歷史時的「沒有更早的訊息」是單純的狀態告知，只在捲到最頂部附近才顯示，捲到畫面中間看到會很突兀
@@ -118,7 +120,7 @@ dotnet user-secrets set "Line:ChannelAccessToken" "<你的 access token>"
 
 | 端點 | 用途 |
 |---|---|
-| `GET /api/groups` | 群組清單（僅列出有訊息的群組，名稱取自快取，無快取則顯示 GroupId；含最後訊息預覽〔已套遮蔽〕、最後訊息時間、成員數，依最後活動倒序） |
+| `GET /api/groups?read=` | 群組清單（僅列出有訊息的群組，名稱取自快取，無快取則顯示 GroupId；含最後訊息預覽〔已套遮蔽〕、最後訊息時間、成員數、最後訊息 Id，依最後活動倒序）。`read=群組:最後已讀Id,...`（可省略）帶各群組的已讀基準，回應附每群組未讀數（SQL 端計數並截斷在 100，前端顯示 99+；格式不合的 pair 直接略過，沒帶基準的群組未讀數為 0） |
 | `GET /api/groups/{groupId}/messages?days=` / `?beforeId=&days=` / `?afterId=` / `?aroundId=&days=` | 初載 / 往前加載 / 輪詢新訊息 / 以指定訊息為錨點開前後視窗（搜尋結果跳轉用），回應已套用遮蔽 |
 | `GET /api/messages/{id}/content` | 內容串流，支援 HTTP Range（見下方實作說明） |
 | `GET /api/messages/statuses?ids=` | 查詢多筆內容目前的 `DownloadStatus` |
@@ -254,6 +256,6 @@ dotnet test
 ```
 
 - `MessageService.Tests`：簽章驗證、五種型別分流（含 audio）、防重送、背景下載（成功/轉檔輪詢/轉檔失敗/重試耗盡/啟動接續）、群組/成員名稱快取（新增/過期更新/API 失敗 fallback）、保留期清除（含 CASCADE 驗證）、Controller 整合測試（401/200/畸形 body 仍 200）
-- `MessageService.Web.Tests`：Groups/Messages API（分頁游標、hasMore、空視窗仍回 latestId、沉寂期長於視窗仍能翻頁、遮蔽套用）、內容串流（200/206/416/malformed Range）、Settings API（CRUD、群組範圍替換、單列設定被刪後補建）、`MaskingService`/`MaskingRuleSet`（含名稱遮蔽邊界情況）、IP 白名單 middleware（允許/拒絕/空白名單/CIDR）
+- `MessageService.Web.Tests`：Groups/Messages API（分頁游標、hasMore、空視窗仍回 latestId、沉寂期長於視窗仍能翻頁、遮蔽套用、側欄未讀數〔依 `?read=` 基準計數、上限 100、畸形參數容錯、未帶參數為 0〕）、內容串流（200/206/416/malformed Range）、Settings API（CRUD、群組範圍替換、單列設定被刪後補建）、`MaskingService`/`MaskingRuleSet`（含名稱遮蔽邊界情況）、IP 白名單 middleware（允許/拒絕/空白名單/CIDR）
 
 測試都使用 SQLite（in-memory 或暫存檔），Web 端整合測試用 `IStartupFilter` 在 TestServer 補一個固定來源 IP（TestServer 的請求沒有真正 TCP 連線，`Connection.RemoteIpAddress` 預設是 null）。

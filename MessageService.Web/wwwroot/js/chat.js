@@ -43,6 +43,12 @@
         requestToken: 0,
         following: true,
         unreadCount: 0,
+        // 側欄各群組的「最後已讀訊息 Id」基準，每台裝置各自記在 localStorage（見 READ_STATE_KEY）。
+        // 未讀數字本身由後端依這份基準計算，前端只負責維護基準
+        readState: {},
+        // 側欄收合狀態（expanded / rail / hidden）與展開時的寬度（px），皆存 localStorage
+        sidebarState: 'expanded',
+        sidebarWidth: 320,
         pendingContentIds: new Set(),
         lastAppendedDateKey: null,
         lastAppendedSenderId: null,
@@ -605,12 +611,30 @@
 
         btn.appendChild(text);
 
+        // 收合成窄欄時整列文字會隱藏、只剩頭貼，用原生 title 當 tooltip 顯示群組名
+        // （自製 tooltip 會被群組列表的 overflow 裁掉）
+        btn.title = group.displayName;
+
+        // 右側直欄：上面是最後訊息時間、下面是未讀 badge
+        const meta = document.createElement('div');
+        meta.className = 'group-item-meta';
+
         if (group.lastMessageAt) {
             const time = document.createElement('div');
             time.className = 'group-item-time';
             time.textContent = formatListTime(group.lastMessageAt);
-            btn.appendChild(time);
+            meta.appendChild(time);
         }
+
+        // 正在看的群組視為已讀，不顯示 badge；其餘顯示未讀數，上限 99+
+        if (group.unreadCount > 0 && group.groupId !== state.groupId) {
+            const badge = document.createElement('span');
+            badge.className = 'group-item-badge';
+            badge.textContent = group.unreadCount > 99 ? '99+' : String(group.unreadCount);
+            meta.appendChild(badge);
+        }
+
+        btn.appendChild(meta);
 
         btn.addEventListener('click', () => {
             selectGroup(group.groupId);
@@ -622,7 +646,12 @@
 
     function updateActiveGroupItem() {
         for (const item of els.groupList.querySelectorAll('.group-item')) {
-            item.classList.toggle('active', item.dataset.groupId === state.groupId);
+            const isActive = item.dataset.groupId === state.groupId;
+            item.classList.toggle('active', isActive);
+            // 選取中的群組不顯示未讀 badge（開啟即已讀），立即把既有 badge 拿掉
+            if (isActive) {
+                item.querySelector('.group-item-badge')?.remove();
+            }
         }
     }
 
@@ -789,8 +818,9 @@
     // === 資料載入 ===
 
     async function loadGroups() {
-        const groups = await fetchJson('/api/groups');
+        const groups = await fetchJson('/api/groups' + readQuerySuffix());
         state.groups = groups;
+        seedReadStateForNewGroups(groups);
         renderGroupList(els.groupSearch.value);
 
         if (groups.length === 0) {
@@ -808,8 +838,9 @@
         }
         state.groupsPolling = true;
         try {
-            const groups = await fetchJson('/api/groups');
+            const groups = await fetchJson('/api/groups' + readQuerySuffix());
             state.groups = groups;
+            seedReadStateForNewGroups(groups);
 
             const previousScrollTop = els.groupList.scrollTop;
             renderGroupList(els.groupSearch.value);
@@ -849,8 +880,14 @@
         setFollowing(true);
         clearMessageList();
 
+        // 一進群組就把已讀基準推到目前已知的最後一則，側欄該群組的未讀 badge 立即清掉，
+        // 不必等訊息載入完成或下一輪輪詢
+        const selected = state.groups.find(g => g.groupId === groupId);
+        if (selected) {
+            markGroupRead(groupId, selected.lastMessageId);
+        }
         updateActiveGroupItem();
-        updateChatHeader(state.groups.find(g => g.groupId === groupId));
+        updateChatHeader(selected);
         updateLoadMoreButton();
 
         try {
@@ -883,6 +920,8 @@
             state.oldestId = page.messages[0].id;
         }
         state.newestId = page.latestId ?? state.newestId;
+        // 開著的群組視為已讀（LINE 慣例），把已讀基準推進到目前視窗最後一則
+        markGroupRead(state.groupId, state.newestId);
         state.hasMoreOlder = page.hasMore;
         // 先捲到底再判斷膠囊要不要顯示，不然這裡量到的還是捲動前（頂部）的位置，
         // 「沒有更早的訊息」會在捲到底之前閃一下才消失
@@ -962,6 +1001,8 @@
                     const wasFollowing = state.following;
                     appendMessages(page.messages, true);
                     state.newestId = page.messages[page.messages.length - 1].id;
+                    // 新訊息接進目前開著的群組，同步推進已讀基準（側欄不會對正在看的群組跳未讀）
+                    markGroupRead(state.groupId, state.newestId);
                     if (wasFollowing) {
                         scrollToBottom(true);
                     } else {
@@ -1053,6 +1094,251 @@
         }
     }
 
+    // === 側欄未讀數（已讀基準存 localStorage，每台裝置各自記，不進 DB） ===
+
+    const READ_STATE_KEY = 'chat-read-state';
+
+    function loadReadState() {
+        try {
+            const raw = localStorage.getItem(READ_STATE_KEY);
+            const parsed = raw ? JSON.parse(raw) : null;
+            // 只收「群組 → 數字」的健康條目，壞資料一律丟掉，不讓它污染後續查詢字串
+            if (parsed && typeof parsed === 'object') {
+                for (const [groupId, id] of Object.entries(parsed)) {
+                    if (typeof id === 'number' && Number.isFinite(id)) {
+                        state.readState[groupId] = id;
+                    }
+                }
+            }
+        } catch {
+            // localStorage 不可用或內容毀損就當作沒有已讀紀錄，未讀數會全部從 0 起算
+        }
+    }
+
+    function saveReadState() {
+        try {
+            localStorage.setItem(READ_STATE_KEY, JSON.stringify(state.readState));
+        } catch {
+            // 無痕模式等寫入失敗就只在本次工作階段記憶，不另外提示
+        }
+    }
+
+    // 把某群組的已讀基準往前推進到 id（只進不退），並持久化。群組被開啟或有新訊息接進畫面時呼叫
+    function markGroupRead(groupId, id) {
+        if (!groupId || typeof id !== 'number' || !Number.isFinite(id)) {
+            return;
+        }
+        if (!(state.readState[groupId] >= id)) {
+            state.readState[groupId] = id;
+            saveReadState();
+        }
+    }
+
+    // /api/groups 帶上目前所有已讀基準；整串一次 encode，冒號與逗號在伺服器端會被還原後解析
+    function readQuerySuffix() {
+        const pairs = Object.entries(state.readState).map(([groupId, id]) => `${groupId}:${id}`);
+        return pairs.length === 0 ? '' : `?read=${encodeURIComponent(pairs.join(','))}`;
+    }
+
+    // 讓已讀基準跟最新的群組清單對齊：
+    // 1. 第一次看到的群組（本裝置沒有任何已讀紀錄）直接以最後一則為基準視為已讀，
+    //    避免初次開啟整排都跳出一大包未讀；
+    // 2. 已經不存在的群組（訊息被保留期清除）把基準一併移除，
+    //    ?read= 查詢字串只帶目前清單中的群組，不會無限累積
+    function seedReadStateForNewGroups(groups) {
+        let changed = false;
+        for (const group of groups) {
+            if (!(group.groupId in state.readState)) {
+                state.readState[group.groupId] = group.lastMessageId ?? 0;
+                changed = true;
+            }
+        }
+        const knownIds = new Set(groups.map(g => g.groupId));
+        for (const groupId of Object.keys(state.readState)) {
+            if (!knownIds.has(groupId)) {
+                delete state.readState[groupId];
+                changed = true;
+            }
+        }
+        if (changed) {
+            saveReadState();
+        }
+    }
+
+    // === 側欄拖曳寬度／兩段式收合（狀態存 localStorage，每台裝置各自記，僅桌面版生效） ===
+
+    const SIDEBAR_STATE_KEY = 'chat-sidebar-state';
+    const SIDEBAR_WIDTH_KEY = 'chat-sidebar-width';
+    const SIDEBAR_STATES = ['expanded', 'rail', 'hidden'];
+    const SIDEBAR_MIN_WIDTH = 200;
+    const SIDEBAR_MAX_WIDTH = 480;
+    const SIDEBAR_DEFAULT_WIDTH = 320;
+    const SIDEBAR_RAIL_WIDTH = 72;      // 與 CSS --sidebar-rail-width 對齊
+    // 拖曳吸附遲滯：往內拖到 <140 吸附成窄欄，從窄欄往外拖要 >180 才切回展開，
+    // 兩個門檻錯開避免在臨界點抖動
+    const SIDEBAR_RAIL_SNAP_IN = 140;
+    const SIDEBAR_RAIL_SNAP_OUT = 180;
+    const SIDEBAR_KEYBOARD_STEP = 16;
+
+    function clampSidebarWidth(px) {
+        return Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, Math.round(px)));
+    }
+
+    function setSidebarWidth(px) {
+        const width = clampSidebarWidth(px);
+        state.sidebarWidth = width;
+        els.sidebar.style.setProperty('--sidebar-width', `${width}px`);
+        els.sidebarResizer.setAttribute('aria-valuenow', String(width));
+    }
+
+    function persistSidebarWidth() {
+        try {
+            localStorage.setItem(SIDEBAR_WIDTH_KEY, String(state.sidebarWidth));
+        } catch {
+            // localStorage 不可用就只在本次工作階段記憶
+        }
+    }
+
+    function applySidebarState(next) {
+        state.sidebarState = next;
+        els.chatApp.classList.toggle('sidebar-rail', next === 'rail');
+        els.chatApp.classList.toggle('sidebar-hidden', next === 'hidden');
+
+        const expanded = next === 'expanded';
+        els.sidebarCollapseBtn.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+        // 收合鈕只在 expanded／rail 兩態看得到（hidden 時側欄整個消失），label 描述「按下去會怎樣」
+        const label = expanded ? '收合為窄欄' : '隱藏群組列表';
+        els.sidebarCollapseBtn.setAttribute('aria-label', label);
+        els.sidebarCollapseBtn.title = label;
+
+        try {
+            localStorage.setItem(SIDEBAR_STATE_KEY, next);
+        } catch {
+            // localStorage 不可用就只在本次工作階段記憶
+        }
+    }
+
+    function cycleSidebarCollapse() {
+        if (state.sidebarState === 'expanded') {
+            applySidebarState('rail');
+        } else if (state.sidebarState === 'rail') {
+            applySidebarState('hidden');
+        } else {
+            applySidebarState('expanded');
+        }
+    }
+
+    function adjustSidebarWidthByKeyboard(delta) {
+        // 鍵盤只在展開態調整寬度，不用鍵盤觸發吸附窄欄（收合走收合鈕，避免箭頭鍵誤觸）
+        if (state.sidebarState !== 'expanded') {
+            return;
+        }
+        const target = delta === -Infinity ? SIDEBAR_MIN_WIDTH
+            : delta === Infinity ? SIDEBAR_MAX_WIDTH
+                : state.sidebarWidth + delta;
+        setSidebarWidth(target);
+        persistSidebarWidth();
+    }
+
+    function initSidebarChrome() {
+        els.sidebarCollapseBtn = $('sidebar-collapse-btn');
+        els.sidebarExpandBtn = $('sidebar-expand-btn');
+        els.sidebarResizer = $('sidebar-resizer');
+
+        let savedWidth;
+        try {
+            savedWidth = parseInt(localStorage.getItem(SIDEBAR_WIDTH_KEY), 10);
+        } catch {
+            savedWidth = NaN;
+        }
+        setSidebarWidth(Number.isFinite(savedWidth) ? savedWidth : SIDEBAR_DEFAULT_WIDTH);
+
+        let savedState;
+        try {
+            savedState = localStorage.getItem(SIDEBAR_STATE_KEY);
+        } catch {
+            savedState = null;
+        }
+        applySidebarState(SIDEBAR_STATES.includes(savedState) ? savedState : 'expanded');
+
+        els.sidebarCollapseBtn.addEventListener('click', cycleSidebarCollapse);
+        els.sidebarExpandBtn.addEventListener('click', () => applySidebarState('expanded'));
+
+        let dragStartX = 0;
+        let dragStartWidth = 0;
+
+        els.sidebarResizer.addEventListener('pointerdown', (e) => {
+            // 手機版沒有拖曳分隔線（單欄全螢幕），保險起見再擋一次
+            if (window.matchMedia('(max-width: 768px)').matches) {
+                return;
+            }
+            e.preventDefault();
+            els.sidebarResizer.setPointerCapture(e.pointerId);
+            dragStartX = e.clientX;
+            dragStartWidth = state.sidebarState === 'rail' ? SIDEBAR_RAIL_WIDTH : state.sidebarWidth;
+            els.chatApp.classList.add('resizing');
+        });
+
+        els.sidebarResizer.addEventListener('pointermove', (e) => {
+            if (!els.sidebarResizer.hasPointerCapture(e.pointerId)) {
+                return;
+            }
+            const width = dragStartWidth + (e.clientX - dragStartX);
+            if (width < SIDEBAR_RAIL_SNAP_IN) {
+                // 拖到很窄就即時預覽成窄欄
+                if (state.sidebarState !== 'rail') {
+                    applySidebarState('rail');
+                }
+            } else if (state.sidebarState === 'rail') {
+                // 從窄欄往外拖，超過 SNAP_OUT 才切回展開（遲滯）
+                if (width > SIDEBAR_RAIL_SNAP_OUT) {
+                    applySidebarState('expanded');
+                    setSidebarWidth(width);
+                }
+            } else {
+                setSidebarWidth(width);
+            }
+        });
+
+        const endDrag = (e) => {
+            if (els.sidebarResizer.hasPointerCapture(e.pointerId)) {
+                els.sidebarResizer.releasePointerCapture(e.pointerId);
+            }
+            els.chatApp.classList.remove('resizing');
+            // 只有展開態才把寬度記下來；窄欄的 72px 不覆蓋記憶，回到展開時沿用上次寬度
+            if (state.sidebarState === 'expanded') {
+                persistSidebarWidth();
+            }
+        };
+        els.sidebarResizer.addEventListener('pointerup', endDrag);
+        els.sidebarResizer.addEventListener('pointercancel', endDrag);
+
+        // 雙擊分隔線重設回預設寬度並展開
+        els.sidebarResizer.addEventListener('dblclick', () => {
+            applySidebarState('expanded');
+            setSidebarWidth(SIDEBAR_DEFAULT_WIDTH);
+            persistSidebarWidth();
+        });
+
+        els.sidebarResizer.addEventListener('keydown', (e) => {
+            let handled = true;
+            if (e.key === 'ArrowLeft') {
+                adjustSidebarWidthByKeyboard(-SIDEBAR_KEYBOARD_STEP);
+            } else if (e.key === 'ArrowRight') {
+                adjustSidebarWidthByKeyboard(SIDEBAR_KEYBOARD_STEP);
+            } else if (e.key === 'Home') {
+                adjustSidebarWidthByKeyboard(-Infinity);
+            } else if (e.key === 'End') {
+                adjustSidebarWidthByKeyboard(Infinity);
+            } else {
+                handled = false;
+            }
+            if (handled) {
+                e.preventDefault();
+            }
+        });
+    }
+
     // === 初始化 ===
 
     function init() {
@@ -1085,6 +1371,8 @@
         els.historicalBackBtn = $('historical-back-btn');
 
         initFontSizeToggle();
+        loadReadState();
+        initSidebarChrome();
 
         els.imageModalImg.addEventListener('click', toggleImageZoom);
         // 點空白處（不是圖片本身、也不是關閉鈕）關閉燈箱，補回全螢幕 modal 少掉的「點背景關閉」直覺

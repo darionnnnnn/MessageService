@@ -2,7 +2,13 @@
    只做亮色主題，本次刻意不做深色模式。 */
 :root {
     --line-chat-bg: #8CABDC;
-    --line-header-bg: #7B9BD2;
+    /* 標頭改白底：原本 #7B9BD2 與聊天背景 #8CABDC 只差一階、幾乎沒有分界，
+       LINE 桌面版的標頭是白底＋細分隔線，對比更明確 */
+    --line-header-bg: #FFFFFF;
+    --line-header-text: #111111;
+    /* 成員數等次要字，白底上約 5.3:1，過 AA */
+    --line-header-subtext: #6B6B6B;
+    --line-header-border: rgba(0, 0, 0, .08);
     --line-bubble-bg: #FFFFFF;
     --line-text: #111111;
     --line-sender-name: #3D4A5C;
@@ -14,7 +20,20 @@
     --line-link: #2C64C6;
     --sidebar-border: #E5E5E5;
     --sidebar-hover: #F5F6F8;
-    --sidebar-active: #EAF3FF;
+    /* 選取態改 LINE 的淺灰（原本 #EAF3FF 淡藍不是 LINE 的語彙） */
+    --sidebar-active: #EDEDED;
+    /* 焦點環從 --sidebar-active 拆出來獨立管理：選取色改灰之後，若沿用同一個 token，
+       輸入框的鍵盤焦點提示也會跟著變灰而看不清楚，焦點提示要維持有辨識度的藍 */
+    --focus-ring: #7EA6E0;
+    /* 未讀數 badge：沿用 LINE 正宗綠底白字。白字對 #06C755 對比僅約 2.3:1，未達 4.5:1，
+       這是刻意保留品牌識別的例外（badge 另有位置／形狀作為冗餘指標）；若驗收要求嚴格
+       達標，改用 #0E873F（白字 4.6:1）即可 */
+    --unread-badge-bg: #06C755;
+    /* 側欄收合成窄欄（rail）時的寬度，只顯示頭貼 */
+    --sidebar-rail-width: 72px;
+    /* 互動過渡時間統一落在 150–300ms 區間 */
+    --transition-fast: 150ms ease;
+    --transition-med: 200ms ease;
     /* 側欄與聊天面板共用同一份左右留白／圓角，改版體檢時發現各區塊各自為政
        （.75rem/.9rem/1rem/1.25rem 混用）才會有「沒對齊」的感覺 */
     --gutter: 1rem;
@@ -59,13 +78,15 @@ body.chat-page {
 /* === 側欄（群組列表） === */
 
 .sidebar {
-    width: 320px;
+    /* 寬度由 JS 用 inline 的 --sidebar-width 覆蓋（拖曳調整）；手機版 media query 會用 100% 蓋掉 */
+    width: var(--sidebar-width, 320px);
     flex: none;
     background: #fff;
     border-right: 1px solid var(--sidebar-border);
     display: flex;
     flex-direction: column;
     min-height: 0;
+    transition: width var(--transition-med);
 }
 
 .sidebar-header {
@@ -78,6 +99,40 @@ body.chat-page {
     gap: .5rem;
     border-bottom: 1px solid #eee;
     color: #1b1b1b;
+}
+
+.sidebar-brand-text {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* 收合鈕（全寬→窄欄→隱藏）；展開鈕（隱藏→全寬，位在聊天標頭） */
+.sidebar-collapse-btn,
+.sidebar-expand-btn {
+    flex: none;
+    border: none;
+    background: transparent;
+    color: #6b6b6b;
+    font-size: 1.3rem;
+    line-height: 1;
+    padding: 0 .25rem;
+    border-radius: var(--radius-sm);
+    transition: background-color var(--transition-fast);
+}
+
+.sidebar-collapse-btn:hover,
+.sidebar-expand-btn:hover {
+    background: var(--sidebar-hover);
+}
+
+/* 展開鈕預設隱藏，只有側欄完全收起（sidebar-hidden）時才在聊天標頭現身（見桌面 media query） */
+.sidebar-expand-btn {
+    display: none;
+    color: #484F59;
+    font-size: 1.35rem;
 }
 
 .app-brand-dot {
@@ -114,7 +169,7 @@ body.chat-page {
 
 .sidebar-search input:focus {
     background: #fff;
-    box-shadow: 0 0 0 .15rem var(--sidebar-active);
+    box-shadow: 0 0 0 .15rem var(--focus-ring);
 }
 
 .group-list {
@@ -138,13 +193,14 @@ body.chat-page {
     width: calc(100% - 1rem);
     margin: .1rem .5rem;
     align-items: center;
-    gap: .6rem;
-    padding: .55rem calc(var(--gutter) - .5rem);
+    gap: .55rem;
+    padding: .5rem calc(var(--gutter) - .5rem);
     border: none;
     border-radius: var(--radius-md);
     background: transparent;
     text-align: left;
     cursor: pointer;
+    transition: background-color var(--transition-fast);
 }
 
 .group-item:hover {
@@ -174,18 +230,40 @@ body.chat-page {
 
 .group-item-preview {
     font-size: calc(var(--chat-base-current) * .95rem / 1.15rem);
-    color: #767676;
+    /* #6B6B6B 對選取態灰底 #EDEDED 才過 4.5:1（原 #767676 只有約 4.0:1） */
+    color: #6B6B6B;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
 }
 
+/* 右側直欄：最後訊息時間（上）＋未讀 badge（下）；沿用原本時間戳貼齊列頂端的對齊 */
+.group-item-meta {
+    flex: none;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    align-self: flex-start;
+    gap: .3rem;
+    margin-top: .15rem;
+}
+
 .group-item-time {
     font-size: calc(var(--chat-base-current) * .85rem / 1.15rem);
     color: #9a9a9a;
-    flex: none;
-    align-self: flex-start;
-    margin-top: .15rem;
+}
+
+/* LINE 式未讀數：綠底白字圓膠囊；字級沿用聊天字級公式，跟著小/中/大一起縮放 */
+.group-item-badge {
+    background: var(--unread-badge-bg);
+    color: #fff;
+    font-weight: 700;
+    font-size: calc(var(--chat-base-current) * .78rem / 1.15rem);
+    line-height: 1;
+    padding: .2em .45em;
+    border-radius: 999px;
+    min-width: 1.5em;
+    text-align: center;
 }
 
 .sidebar-footer {
@@ -237,16 +315,20 @@ body.chat-page {
     object-fit: cover;
 }
 
+/* LINE 桌面版清單／標頭頭貼是圓角方形（squircle），不是正圓；訊息串裡的 sender 頭貼
+   仍維持正圓（見 .message-row .avatar），與 LINE 一致 */
 .group-avatar {
-    width: 44px;
-    height: 44px;
-    font-size: 1.4rem;
+    width: 48px;
+    height: 48px;
+    font-size: 1.5rem;
+    border-radius: 38%;
 }
 
 .chat-header-avatar {
-    width: 34px;
-    height: 34px;
-    font-size: 1.1rem;
+    width: 36px;
+    height: 36px;
+    font-size: 1.15rem;
+    border-radius: 38%;
 }
 
 .message-row .avatar {
@@ -279,7 +361,8 @@ body.chat-page {
     gap: .6rem;
     padding: .55rem var(--gutter);
     background: var(--line-header-bg);
-    box-shadow: 0 1px 3px rgba(0, 0, 0, .12);
+    /* 白底標頭改用細分隔線取代陰影，更貼近 LINE 桌面版 */
+    border-bottom: 1px solid var(--line-header-border);
     position: relative;
     z-index: 1;
 }
@@ -291,8 +374,13 @@ body.chat-page {
     background: transparent;
     font-size: 1.5rem;
     line-height: 1;
-    color: #12314f;
+    color: #484F59;
     padding: 0 .2rem;
+    border-radius: var(--radius-sm);
+}
+
+.mobile-back-btn:hover {
+    background: var(--sidebar-hover);
 }
 
 .chat-header-info {
@@ -306,7 +394,7 @@ body.chat-page {
 .chat-header-name {
     font-weight: 600;
     font-size: calc(var(--chat-base-current) * 1.2rem / 1.15rem);
-    color: #12314f;
+    color: var(--line-header-text);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -314,16 +402,22 @@ body.chat-page {
 
 .chat-header-members {
     font-size: calc(var(--chat-base-current) * .95rem / 1.15rem);
-    color: #2c4a68;
+    color: var(--line-header-subtext);
     flex: none;
 }
 
 .btn-header-action {
-    color: #12314f;
+    color: #484F59;
     border: none;
     background: transparent;
     font-weight: 700;
     padding: .25rem .5rem;
+    border-radius: var(--radius-sm);
+    transition: background-color var(--transition-fast);
+}
+
+.btn-header-action:hover {
+    background: var(--sidebar-hover);
 }
 
 .btn-header-action::after {
@@ -417,7 +511,7 @@ body.chat-page {
 
 .search-panel-input:focus {
     outline: none;
-    box-shadow: 0 0 0 .15rem var(--sidebar-active);
+    box-shadow: 0 0 0 .15rem var(--focus-ring);
 }
 
 .search-scope-toggle {
@@ -589,12 +683,25 @@ body.chat-page {
     border-radius: 1rem;
 }
 
+/* LINE 的節奏：同一人連續訊息貼得很近，換人／換日的第一則（帶頭貼）才拉開間距。
+   泡泡寬度除了相對 75%，再加一個絕對上限，寬螢幕（1440+）泡泡才不會被拉得過長
+   （34rem 以根字級為基準、不隨聊天字級縮放，放大字級時維持上限、自然多換行） */
 .message-row {
     display: flex;
     align-items: flex-start;
     gap: .5rem;
-    margin: .15rem 0;
-    max-width: 75%;
+    margin: .125rem 0 0;
+    max-width: min(75%, 34rem);
+}
+
+.message-row.show-avatar {
+    margin-top: .625rem;
+}
+
+/* 第一則（或緊接日期分隔線的那則）不需要額外上距，日期分隔線本身已有 margin */
+.message-list > .message-row:first-child,
+.date-separator + .message-row {
+    margin-top: 0;
 }
 
 .message-group {
@@ -619,7 +726,7 @@ body.chat-page {
     position: relative;
     background: var(--line-bubble-bg);
     color: var(--line-text);
-    border-radius: 1.1rem;
+    border-radius: .9rem;
     padding: .5rem .7rem;
     word-break: break-word;
     box-shadow: 0 1px 1px rgba(0, 0, 0, .1);
@@ -798,9 +905,40 @@ body.chat-page {
     animation: message-pop-in .25s ease-out both;
 }
 
+/* === 互動與無障礙通則 === */
+
+/* 聊天頁所有可按的原生 button 都給 pointer 游標（部分既有按鈕沒有明確指定） */
+.chat-app button:not(:disabled) {
+    cursor: pointer;
+}
+
+/* 鍵盤操作時焦點清楚可見，統一用焦點環顏色的實心外框；滑鼠點擊（:focus 但非
+   :focus-visible）不顯示，避免點一下就框一圈 */
+.group-item:focus-visible,
+.btn-header-action:focus-visible,
+.sidebar-settings-link:focus-visible,
+.mobile-back-btn:focus-visible,
+.search-result-item:focus-visible,
+.sidebar-collapse-btn:focus-visible,
+.sidebar-expand-btn:focus-visible,
+.sidebar-resizer:focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 2px;
+}
+
 @media (prefers-reduced-motion: reduce) {
     .message-row.message-enter {
         animation: none;
+    }
+
+    .sidebar,
+    .group-item,
+    .btn-header-action,
+    .mobile-back-btn,
+    .sidebar-resizer,
+    .sidebar-collapse-btn,
+    .sidebar-expand-btn {
+        transition: none;
     }
 }
 
@@ -873,6 +1011,93 @@ body.chat-page {
     background: rgba(0, 0, 0, .75);
 }
 
+/* === 側欄拖曳調整寬度／兩段式收合（僅桌面版；手機版是單欄全螢幕切換，這些一律停用） === */
+
+@media (min-width: 769px) {
+    /* 拖曳分隔線：熱區 5px，用負邊距疊在側欄邊界上，不額外佔版面寬度 */
+    .sidebar-resizer {
+        flex: none;
+        width: 5px;
+        margin: 0 -2px;
+        z-index: 2;
+        cursor: col-resize;
+        background: transparent;
+        transition: background-color var(--transition-fast);
+    }
+
+    .sidebar-resizer:hover,
+    .chat-app.resizing .sidebar-resizer {
+        background: var(--focus-ring);
+    }
+
+    /* 拖曳進行中：停用文字選取與寬度過渡動畫，避免游標拖曳時抖動 */
+    .chat-app.resizing {
+        user-select: none;
+    }
+
+    .chat-app.resizing .sidebar {
+        transition: none;
+    }
+
+    /* --- 窄欄（rail）：只顯示頭貼，仿 LINE 桌面版壓縮清單 --- */
+    .chat-app.sidebar-rail .sidebar {
+        width: var(--sidebar-rail-width);
+    }
+
+    .chat-app.sidebar-rail .sidebar-brand-text,
+    .chat-app.sidebar-rail .app-brand-dot,
+    .chat-app.sidebar-rail .sidebar-search,
+    .chat-app.sidebar-rail .sidebar-settings-text,
+    .chat-app.sidebar-rail .group-item-text {
+        display: none;
+    }
+
+    .chat-app.sidebar-rail .sidebar-header {
+        justify-content: center;
+        padding: .9rem 0;
+    }
+
+    .chat-app.sidebar-rail .group-item {
+        justify-content: center;
+        gap: 0;
+        padding: .4rem 0;
+        position: relative;
+    }
+
+    .chat-app.sidebar-rail .sidebar-settings-link {
+        justify-content: center;
+        gap: 0;
+    }
+
+    /* 窄欄時未讀 badge 疊在頭貼右上角，時間戳讓位 */
+    .chat-app.sidebar-rail .group-item-meta {
+        position: absolute;
+        top: .2rem;
+        right: .55rem;
+        margin: 0;
+    }
+
+    .chat-app.sidebar-rail .group-item-time {
+        display: none;
+    }
+
+    /* --- 完全隱藏：側欄收成 0，聊天標頭出現展開鈕 --- */
+    .chat-app.sidebar-hidden .sidebar {
+        width: 0;
+        visibility: hidden;
+        overflow: hidden;
+        border-right: none;
+    }
+
+    .chat-app.sidebar-hidden .sidebar-resizer {
+        display: none;
+    }
+
+    .chat-app.sidebar-hidden .sidebar-expand-btn {
+        display: inline-block;
+    }
+}
+
 /* === 手機版：群組列表與聊天面板全螢幕切換 === */
 
 @media (max-width: 768px) {
@@ -898,5 +1123,13 @@ body.chat-page {
 
     .mobile-back-btn {
         display: inline-block;
+    }
+
+    /* 桌面版的側欄拖曳／收合控制在手機版一律停用（手機是單欄全螢幕切換），
+       且側欄在手機版是 position:absolute width:100%，桌面存下來的 rail/hidden 狀態不生效 */
+    .sidebar-resizer,
+    .sidebar-collapse-btn,
+    .sidebar-expand-btn {
+        display: none;
     }
 }
