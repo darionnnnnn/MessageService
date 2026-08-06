@@ -291,6 +291,41 @@
         });
     }
 
+    // === 對話寬度（跟對話頁共用同一份 localStorage key 與 CSS 變數，比照上面的字體大小） ===
+
+    const FULL_WIDTH_STORAGE_KEY = 'chat-full-width';
+
+    // 未勾選一定要 removeProperty：預設寬度由樣式表的媒體查詢決定（桌面 2/3、手機 75%），
+    // 留下 inline 值會把手機版也一起鎖死
+    function applyChatWidth(full) {
+        if (full) {
+            document.documentElement.style.setProperty('--bubble-max-width', '100%');
+        } else {
+            document.documentElement.style.removeProperty('--bubble-max-width');
+        }
+    }
+
+    function initFullWidthToggle() {
+        // 頁面載入時 chat.js 已經套用過同一份設定，這裡只需要把勾選狀態補上
+        let full = false;
+        try {
+            full = localStorage.getItem(FULL_WIDTH_STORAGE_KEY) === 'true';
+        } catch {
+            // localStorage 不可用就顯示未勾選
+        }
+        els.fullWidthToggle.checked = full;
+
+        els.fullWidthToggle.addEventListener('change', () => {
+            const checked = els.fullWidthToggle.checked;
+            applyChatWidth(checked);
+            try {
+                localStorage.setItem(FULL_WIDTH_STORAGE_KEY, String(checked));
+            } catch {
+                // localStorage 不可用（例如無痕模式）就只套用當次畫面，不用另外提示
+            }
+        });
+    }
+
     // === 初始化 ===
     // 設定現在是聊天頁裡的 modal，不再是獨立頁面：元素綁定跟不需要資料的監聽器在頁面
     // 載入時就做完，實際打 API 撈資料延後到第一次打開 modal 才做（shown.bs.modal），
@@ -298,6 +333,7 @@
 
     function wireElements() {
         els.fontBasePxInput = $('font-base-px-input');
+        els.fullWidthToggle = $('full-width-toggle');
         els.toastContainer = $('toast-container');
         els.keywordTbody = $('keyword-tbody');
         els.keywordForm = $('keyword-form');
@@ -317,6 +353,7 @@
 
     function wireStaticListeners() {
         initFontBasePx();
+        initFullWidthToggle();
 
         els.replacementCustom.addEventListener('change', () => { els.replacementInput.disabled = false; });
         els.replacementDefault.addEventListener('change', () => { els.replacementInput.disabled = true; });
