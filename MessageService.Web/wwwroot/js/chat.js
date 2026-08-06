@@ -1061,6 +1061,26 @@
         document.documentElement.style.setProperty('--font-base-px', `${px}px`);
     }
 
+    // === 對話寬度（同樣存 localStorage，每台裝置各自記，不進 DB） ===
+
+    const FULL_WIDTH_STORAGE_KEY = 'chat-full-width';
+
+    // 未勾選時要 removeProperty 而不是設回預設值：預設寬度是由樣式表的媒體查詢決定的
+    // （桌面 2/3、手機 75%），一旦在 documentElement 上留下 inline 值就會把手機版也鎖死
+    function applyChatWidth() {
+        let full = false;
+        try {
+            full = localStorage.getItem(FULL_WIDTH_STORAGE_KEY) === 'true';
+        } catch {
+            // localStorage 不可用就用預設寬度
+        }
+        if (full) {
+            document.documentElement.style.setProperty('--bubble-max-width', '100%');
+        } else {
+            document.documentElement.style.removeProperty('--bubble-max-width');
+        }
+    }
+
     function applyFontSize(size) {
         for (const s of FONT_SIZES) {
             els.chatApp.classList.toggle(`font-size-${s}`, s === size);
@@ -1371,6 +1391,7 @@
         els.historicalBackBtn = $('historical-back-btn');
 
         initFontSizeToggle();
+        applyChatWidth();
         loadReadState();
         initSidebarChrome();
 

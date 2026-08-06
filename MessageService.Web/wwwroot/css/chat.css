@@ -39,6 +39,18 @@
     --gutter: 1rem;
     --radius-sm: .5rem;
     --radius-md: .75rem;
+    /* 泡泡寬度上限。手機／窄視窗維持 75%（2/3 在 375px 只剩 250px，太窄）；
+       桌面版下方媒體查詢改成 2/3。設定裡勾選「全版面」時，JS 會在 documentElement
+       上以 inline style 覆寫成 100%——inline 優先於任何選擇器，蓋得掉媒體查詢 */
+    --bubble-max-width: 75%;
+}
+
+/* 桌面版對話寬度預設 2/3：先前用絕對上限 34rem，在 1920px 螢幕上只吃掉三分之一版面、
+   右側固定空一大塊。斷點寫成手機斷點的精確補集（理由同下方側欄區塊的說明） */
+@media not all and (max-width: 768px) {
+    :root {
+        --bubble-max-width: calc(200% / 3);
+    }
 }
 
 /* chat-page 拿掉一般頁面的邊距，讓雙欄版面吃滿整個視窗高度，不用 calc(100vh - 魔術數字) 猜 header 高度 */
@@ -684,14 +696,13 @@ body.chat-page {
 }
 
 /* LINE 的節奏：同一人連續訊息貼得很近，換人／換日的第一則（帶頭貼）才拉開間距。
-   泡泡寬度除了相對 75%，再加一個絕對上限，寬螢幕（1440+）泡泡才不會被拉得過長
-   （34rem 以根字級為基準、不隨聊天字級縮放，放大字級時維持上限、自然多換行） */
+   寬度上限走 --bubble-max-width（桌面 2/3、手機 75%、勾選全版面時 100%），見 :root 說明 */
 .message-row {
     display: flex;
     align-items: flex-start;
     gap: .5rem;
     margin: .125rem 0 0;
-    max-width: min(75%, 34rem);
+    max-width: var(--bubble-max-width);
 }
 
 .message-row.show-avatar {
@@ -796,9 +807,12 @@ body.chat-page {
     display: block;
 }
 
+/* 影片／語音另立絕對上限：泡泡加寬後這兩個會跟著長大（全版面模式下在寬螢幕會變成
+   整排寬的播放器）。圖片有 max-height 自然受限、貼圖是固定尺寸，都不受影響——
+   結果是只有文字受惠於加寬，媒體維持合理尺寸 */
 .bubble video.msg-video,
 .bubble audio.msg-audio {
-    max-width: 100%;
+    max-width: min(100%, 30rem);
     border-radius: .5rem;
 }
 
