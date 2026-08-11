@@ -1,35 +1,21 @@
-using MessageService.Data;
-using MessageService.Models;
 using MessageService.Models.Line;
 using MessageService.Services;
 using MessageService.Tests.TestSupport;
-using Microsoft.Data.Sqlite;
-using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace MessageService.Tests.Services;
 
-public class WebhookEventHandlerTests : IDisposable
+// WebhookEventHandler 現在只負責「這個 webhook 事件該不該收、該組成什麼 IngestEnvelope」，
+// 不再碰資料庫——落地邏輯搬到 DirectIngestSinkTests。這份測試把原本斷言 DB 狀態的地方
+// 全部改成斷言寫進 outbox 的 envelope 內容，涵蓋範圍與原本相同。
+public class WebhookEventHandlerTests
 {
-    private readonly SqliteConnection _connection;
-    private readonly MessageDbContext _dbContext;
-    private readonly FakeContentDownloadQueue _queue = new();
-    private readonly FakeProfileRefreshQueue _profileRefreshQueue = new();
+    private readonly FakeOutboxWriter _outbox = new();
     private readonly WebhookEventHandler _handler;
 
     public WebhookEventHandlerTests()
     {
-        _connection = SqliteTestDatabase.CreateOpenConnection();
-        var options = new DbContextOptionsBuilder<MessageDbContext>().UseSqlite(_connection).Options;
-        _dbContext = new MessageDbContext(options);
-        _dbContext.Database.EnsureCreated();
-        _handler = new WebhookEventHandler(_dbContext, _queue, _profileRefreshQueue, NullLogger<WebhookEventHandler>.Instance);
-    }
-
-    public void Dispose()
-    {
-        _dbContext.Dispose();
-        _connection.Dispose();
+        _handler = new WebhookEventHandler(_outbox, NullLogger<WebhookEventHandler>.Instance);
     }
 
     private static WebhookEvent GroupMessageEvent(string webhookEventId, LineMessage message, string groupId = "G1", string? userId = "U1") =>
@@ -43,110 +29,93 @@ public class WebhookEventHandlerTests : IDisposable
         };
 
     [Fact]
-    public async Task TextMessage_InGroup_IsSaved()
+    public async Task TextMessage_InGroup_IsQueued()
     {
         var evt = GroupMessageEvent("evt-1", new LineMessage { Id = "m1", Type = "text", Text = "hello" });
 
         await _handler.HandleAsync(new WebhookRequest { Events = [evt] }, CancellationToken.None);
 
-        var saved = Assert.Single(_dbContext.GroupMessages);
-        Assert.Equal("text", saved.MessageType);
-        Assert.Equal("hello", saved.Text);
-        Assert.Equal("G1", saved.GroupId);
-        Assert.Equal("U1", saved.UserId);
-        Assert.Empty(_dbContext.MessageContents);
-        Assert.Empty(_queue.Enqueued);
+        var envelope = Assert.Single(_outbox.Enqueued);
+        Assert.Equal("text", envelope.MessageType);
+        Assert.Equal("hello", envelope.Text);
+        Assert.Equal("G1", envelope.GroupId);
+        Assert.Equal("U1", envelope.UserId);
+        Assert.False(envelope.HasContent);
     }
 
     [Fact]
-    public async Task SavedMessage_EnqueuesProfileRefreshForGroupAndUser()
-    {
-        var evt = GroupMessageEvent("evt-1", new LineMessage { Id = "m1", Type = "text", Text = "hello" }, groupId: "G1", userId: "U1");
-
-        await _handler.HandleAsync(new WebhookRequest { Events = [evt] }, CancellationToken.None);
-
-        var task = Assert.Single(_profileRefreshQueue.Enqueued);
-        Assert.Equal("G1", task.GroupId);
-        Assert.Equal("U1", task.UserId);
-    }
-
-    [Fact]
-    public async Task DuplicateOrIgnoredEvent_DoesNotEnqueueProfileRefresh()
+    public async Task IgnoredEvent_IsNotQueued()
     {
         var evt = GroupMessageEvent("evt-1", new LineMessage { Id = "m1", Type = "location" });
 
         await _handler.HandleAsync(new WebhookRequest { Events = [evt] }, CancellationToken.None);
 
-        Assert.Empty(_profileRefreshQueue.Enqueued);
+        Assert.Empty(_outbox.Enqueued);
     }
 
     [Fact]
-    public async Task StickerMessage_SavesPlaceholderText()
+    public async Task StickerMessage_QueuesPlaceholderText()
     {
         var evt = GroupMessageEvent("evt-1", new LineMessage { Id = "m1", Type = "sticker" });
 
         await _handler.HandleAsync(new WebhookRequest { Events = [evt] }, CancellationToken.None);
 
-        var saved = Assert.Single(_dbContext.GroupMessages);
-        Assert.Equal("sticker", saved.MessageType);
-        Assert.Equal("(貼圖)", saved.Text);
-        Assert.Empty(_dbContext.MessageContents);
+        var envelope = Assert.Single(_outbox.Enqueued);
+        Assert.Equal("sticker", envelope.MessageType);
+        Assert.Equal("(貼圖)", envelope.Text);
+        Assert.False(envelope.HasContent);
     }
 
     [Fact]
-    public async Task StickerMessage_SavesStickerIdAndPackageId()
+    public async Task StickerMessage_QueuesStickerIdAndPackageId()
     {
         var evt = GroupMessageEvent("evt-1", new LineMessage { Id = "m1", Type = "sticker", StickerId = "52002734", PackageId = "11537" });
 
         await _handler.HandleAsync(new WebhookRequest { Events = [evt] }, CancellationToken.None);
 
-        var saved = Assert.Single(_dbContext.GroupMessages);
-        Assert.Equal("52002734", saved.StickerId);
-        Assert.Equal("11537", saved.PackageId);
+        var envelope = Assert.Single(_outbox.Enqueued);
+        Assert.Equal("52002734", envelope.StickerId);
+        Assert.Equal("11537", envelope.PackageId);
     }
 
     [Fact]
     public async Task NonStickerMessage_LeavesStickerIdAndPackageIdNull()
     {
-        // LineMessage 理論上不該混著貼圖欄位，但防禦性驗證：非貼圖訊息一律不寫入這兩個欄位
+        // LineMessage 理論上不該混著貼圖欄位，但防禦性驗證：非貼圖訊息一律不帶這兩個欄位
         var evt = GroupMessageEvent("evt-1", new LineMessage { Id = "m1", Type = "text", Text = "hi", StickerId = "should-be-ignored" });
 
         await _handler.HandleAsync(new WebhookRequest { Events = [evt] }, CancellationToken.None);
 
-        var saved = Assert.Single(_dbContext.GroupMessages);
-        Assert.Null(saved.StickerId);
-        Assert.Null(saved.PackageId);
+        var envelope = Assert.Single(_outbox.Enqueued);
+        Assert.Null(envelope.StickerId);
+        Assert.Null(envelope.PackageId);
     }
 
     [Theory]
     [InlineData("image")]
     [InlineData("video")]
     [InlineData("audio")]
-    public async Task ImageOrVideoOrAudioMessage_CreatesPendingContentAndEnqueues(string messageType)
+    public async Task ImageOrVideoOrAudioMessage_MarksHasContent(string messageType)
     {
         var evt = GroupMessageEvent("evt-1", new LineMessage { Id = "m1", Type = messageType });
 
         await _handler.HandleAsync(new WebhookRequest { Events = [evt] }, CancellationToken.None);
 
-        var savedMessage = Assert.Single(_dbContext.GroupMessages);
-        Assert.Null(savedMessage.Text);
-        var content = Assert.Single(_dbContext.MessageContents);
-        Assert.Equal(DownloadStatus.Pending, content.DownloadStatus);
-        Assert.Equal(savedMessage.Id, content.GroupMessageId);
-        Assert.Equal(content.Id, Assert.Single(_queue.Enqueued));
+        var envelope = Assert.Single(_outbox.Enqueued);
+        Assert.Null(envelope.Text);
+        Assert.True(envelope.HasContent);
     }
 
     [Fact]
-    public async Task FileMessage_StoresFileNameAndEnqueues()
+    public async Task FileMessage_QueuesFileNameAndMarksHasContent()
     {
         var evt = GroupMessageEvent("evt-1", new LineMessage { Id = "m1", Type = "file", FileName = "report.pdf" });
 
         await _handler.HandleAsync(new WebhookRequest { Events = [evt] }, CancellationToken.None);
 
-        var content = Assert.Single(_dbContext.MessageContents);
-        Assert.Equal("report.pdf", content.FileName);
-        Assert.Equal(DownloadStatus.Pending, content.DownloadStatus);
-        Assert.Single(_queue.Enqueued);
+        var envelope = Assert.Single(_outbox.Enqueued);
+        Assert.Equal("report.pdf", envelope.ContentFileName);
+        Assert.True(envelope.HasContent);
     }
 
     [Fact]
@@ -162,7 +131,7 @@ public class WebhookEventHandlerTests : IDisposable
 
         await _handler.HandleAsync(new WebhookRequest { Events = [evt] }, CancellationToken.None);
 
-        Assert.Empty(_dbContext.GroupMessages);
+        Assert.Empty(_outbox.Enqueued);
     }
 
     [Fact]
@@ -172,7 +141,7 @@ public class WebhookEventHandlerTests : IDisposable
 
         await _handler.HandleAsync(new WebhookRequest { Events = [evt] }, CancellationToken.None);
 
-        Assert.Empty(_dbContext.GroupMessages);
+        Assert.Empty(_outbox.Enqueued);
     }
 
     [Fact]
@@ -187,17 +156,19 @@ public class WebhookEventHandlerTests : IDisposable
 
         await _handler.HandleAsync(new WebhookRequest { Events = [evt] }, CancellationToken.None);
 
-        Assert.Empty(_dbContext.GroupMessages);
+        Assert.Empty(_outbox.Enqueued);
     }
 
     [Fact]
-    public async Task DuplicateWebhookEventId_IsSkipped()
+    public async Task DuplicateWebhookEventId_IsQueuedTwice()
     {
+        // 防重送不再是 handler 的責任——它只負責解析並寫進 outbox，同一個 WebhookEventId
+        // 出現兩次就寫兩筆，去重交給落地那端的資料庫唯一索引（見 DirectIngestSinkTests）
         var evt = GroupMessageEvent("evt-1", new LineMessage { Id = "m1", Type = "text", Text = "hello" });
 
         await _handler.HandleAsync(new WebhookRequest { Events = [evt] }, CancellationToken.None);
         await _handler.HandleAsync(new WebhookRequest { Events = [evt] }, CancellationToken.None);
 
-        Assert.Single(_dbContext.GroupMessages);
+        Assert.Equal(2, _outbox.Enqueued.Count);
     }
 }
