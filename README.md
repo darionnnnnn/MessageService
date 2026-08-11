@@ -15,7 +15,8 @@ MessageService.sln
 ```
 
 **其他文件**：[docs/LINE-BOT-SETUP.md](docs/LINE-BOT-SETUP.md)（建立 Bot 與串接的逐步操作、疑難排解）、
-[docs/WEB-UI-DESIGN-NOTES.md](docs/WEB-UI-DESIGN-NOTES.md)（檢視端歷次改版的設計決策理由與放棄的替代方案）。
+[docs/WEB-UI-DESIGN-NOTES.md](docs/WEB-UI-DESIGN-NOTES.md)（檢視端歷次改版的設計決策理由與放棄的替代方案）、
+[docs/DEPLOYMENT-MODES.md](docs/DEPLOYMENT-MODES.md)（收錄端三種部署模式：架構、設定、決策理由、目前進度）。
 
 ---
 
@@ -23,15 +24,24 @@ MessageService.sln
 
 bot 加入群組後，透過 LINE webhook 接收群組內的訊息並寫入資料庫。職責只有三件事：**收 webhook → 落地資料庫 → 每日清除逾期資料**，不提供查詢 API。
 
-### 架構
+支援三種部署模式（`Deployment:Mode`：`Full`／`Line`／`Db`），因應收 webhook 的主機未必碰得到
+資料庫的情況；預設 `Full` 就是下面這張圖、也是今天唯一功能完整的模式，**其餘兩種模式目前仍在
+建置中**，詳見 [docs/DEPLOYMENT-MODES.md](docs/DEPLOYMENT-MODES.md)。
+
+### 架構（`Full` 模式）
 
 ```
 LINE Platform ──POST──▶ LineWebhookController
                             │ 1. 驗證 X-Line-Signature（HMAC-SHA256）
-                            │ 2. 反序列化 webhook events
                             ▼
                      WebhookEventHandler
-                            │ 過濾群組訊息、防重送、依型別分流
+                            │ 過濾群組訊息、依型別分流、組成 IngestEnvelope
+                            ▼
+                  outbox.db（本機 SQLite，立即回 200，跟主資料庫完全獨立）
+                            ▼
+              OutboxForwarderService（背景排空，失敗按退避重試）
+                            ▼
+                DirectIngestSink（防重送：WebhookEventId 唯一索引）
                             ▼
                 ┌── GroupMessages / MessageContents(Pending) ──┐
                 │                                              │
@@ -61,10 +71,15 @@ RetentionCleanupService（每日固定時間刪除超過保留年限的訊息，
 
 | 設定鍵 | 說明 |
 |---|---|
+| `Deployment:Mode` | `Full`（預設）／`Line`／`Db`，見 [docs/DEPLOYMENT-MODES.md](docs/DEPLOYMENT-MODES.md) |
 | `Database:Provider` | `SqlServer`（正式，appsettings.json 預設）或 `Sqlite`（開發，appsettings.Development.json 預設） |
 | `ConnectionStrings:SqlServer` / `Sqlite` | 連線字串 |
+| `ConnectionStrings:Outbox` | 本機 outbox 的 SQLite 檔，預設 `Data Source=outbox.db` |
 | `Line:ChannelSecret` | 簽章驗證用。**勿進版控**，開發用 user-secrets、正式用環境變數 |
 | `Line:ChannelAccessToken` | 內容下載與 profile API 用，同上 |
+| `Line:OutboundHere` | 這台要不要對外呼叫 LINE API（預設 `true`＝`Full` 模式恆用），見 [docs/DEPLOYMENT-MODES.md](docs/DEPLOYMENT-MODES.md) |
+| `Ingest:BaseUrl` / `Ingest:ApiKey` | `Line`／`Db` 模式拆機用，`Full` 模式不需要 |
+| `Outbox:PollIntervalSeconds` / `BatchSize` / `BaseRetryDelaySeconds` / `MaxRetryDelaySeconds` | outbox 排空節奏與重試退避，預設 5／50／5／300 |
 | `Retention:Years` | 保留年限（預設 3） |
 | `Retention:CleanupTimeOfDay` | 每日清除時間（本地時間，預設 03:00:00） |
 | `ContentDownload:MaxRetries` | 下載重試次數（預設 3） |
@@ -236,6 +251,7 @@ ASPNETCORE_ENVIRONMENT=Production dotnet ef database update --project MessageSer
 
 - **圖片/影片/語音/檔案存 DB（varbinary）而非磁碟**：檢視端只要連 DB 就能讀到；保留期清除靠 CASCADE 一次帶走，不會產生孤兒檔案。代價是 DB 容量成長快，若量大屆時再評估 FILESTREAM 或磁碟存放（內容獨立一表已為搬遷留好最小改動面）
 - **webhook 一律回 200**（簽章合法後）：回非 2xx 會讓 LINE 重送並可能判定 webhook 失效；個別事件失敗只記 log
+- **webhook 收進來後只寫本機 outbox，不直接碰資料庫**：落地（含防重送）延後到背景排空時才做，webhook 回應時間因此跟資料庫是否可用完全脫鉤，短暫斷線不會掉訊息；這也是收錄端支援網段分離部署（`Deployment:Mode`）的基礎，詳見 [docs/DEPLOYMENT-MODES.md](docs/DEPLOYMENT-MODES.md)
 - **下載走背景佇列**：影片/語音要等 LINE 轉檔、檔案可達數百 MB，不能在 webhook 請求內同步處理；服務重啟會自動撈回殘留的 Pending 接續下載
 - **群組/成員名稱背景快取**：同樣不在 webhook 請求內同步呼叫 LINE profile API，避免拖慢 webhook 回應
 - **SQLite 的 DateTimeOffset 限制**：SQLite 只支援相等比較，`<`/`>` 無法轉譯。`MessageDbContext` 在 SQLite 環境對需要範圍比較的 `DateTimeOffset` 欄位（`EventTimestamp`、`Groups`/`GroupMembers` 的 `UpdatedAt`）套 `DateTimeOffsetToBinaryConverter`；SQL Server 維持原生 `datetimeoffset`（保持型別對其他工具可讀）
@@ -258,7 +274,7 @@ ASPNETCORE_ENVIRONMENT=Production dotnet ef database update --project MessageSer
 dotnet test
 ```
 
-- `MessageService.Tests`：簽章驗證、五種型別分流（含 audio）、防重送、背景下載（成功/轉檔輪詢/轉檔失敗/重試耗盡/啟動接續）、群組/成員名稱快取（新增/過期更新/API 失敗 fallback）、保留期清除（含 CASCADE 驗證）、Controller 整合測試（401/200/畸形 body 仍 200）
+- `MessageService.Tests`：webhook 事件解析（五種型別分流含 audio、過濾規則）、outbox 落地（`DirectIngestSink` 的防重送——`WebhookEventId` 唯一索引、撞鍵與暫時性儲存失敗以回查分辨〔前者當重複成功、後者拋回 outbox 重試不掉訊息〕、change tracker 不污染同批後續、各型別存檔行為）、outbox 排空（到期判斷、批次上限、失敗退避與封頂、單筆失敗不影響同批其他筆）、部署模式（convention 單元行為＋真實 host 整合驗證：Db 模式 webhook 端點 404、Line 模式啟動即失敗、設定缺漏時啟動驗證擋下）、背景下載（成功/轉檔輪詢/轉檔失敗/重試耗盡/啟動接續）、群組/成員名稱快取（新增/過期更新/API 失敗 fallback）、保留期清除（含 CASCADE 驗證）、Controller 整合測試（401/200/畸形 body 仍 200、webhook 經真實 outbox＋背景排空落地資料庫）
 - `MessageService.Web.Tests`：Groups/Messages API（分頁游標、hasMore、空視窗仍回 latestId、沉寂期長於視窗仍能翻頁、遮蔽套用、側欄未讀數〔依 `?read=` 基準計數、上限 100、畸形參數容錯、未帶參數為 0〕）、內容串流（200/206/416/malformed Range）、Settings API（CRUD、群組範圍替換、單列設定被刪後補建）、`MaskingService`/`MaskingRuleSet`（含名稱遮蔽邊界情況）、IP 白名單 middleware（允許/拒絕/空白名單/CIDR）
 
 測試都使用 SQLite（in-memory 或暫存檔），Web 端整合測試用 `IStartupFilter` 在 TestServer 補一個固定來源 IP（TestServer 的請求沒有真正 TCP 連線，`Connection.RemoteIpAddress` 預設是 null）。

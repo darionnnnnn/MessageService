@@ -1,14 +1,14 @@
-using MessageService.Data;
-using MessageService.Models;
 using MessageService.Models.Line;
-using Microsoft.EntityFrameworkCore;
+using MessageService.Outbox;
 
 namespace MessageService.Services;
 
+/// <summary>只負責把 webhook 事件解析、過濾成 IngestEnvelope，寫進本地 outbox 就回——
+/// 完全不碰資料庫、不打任何網路，webhook 回應時間因此跟後端（不論是直連的資料庫，
+/// 還是 Line 模式要打的遠端 API）是否可用完全脫鉤。真正的落地邏輯在 outbox 排空後
+/// 交給 IIngestSink（DirectIngestSink／未來的 HttpIngestSink）。</summary>
 public class WebhookEventHandler(
-    MessageDbContext dbContext,
-    IContentDownloadQueue downloadQueue,
-    IProfileRefreshQueue profileRefreshQueue,
+    IOutboxWriter outboxWriter,
     ILogger<WebhookEventHandler> logger) : IWebhookEventHandler
 {
     private static readonly HashSet<string> DownloadableTypes = ["image", "video", "audio", "file"];
@@ -35,14 +35,6 @@ public class WebhookEventHandler(
             return;
         }
 
-        var alreadyExists = await dbContext.GroupMessages
-            .AnyAsync(m => m.WebhookEventId == webhookEvent.WebhookEventId, cancellationToken);
-        if (alreadyExists)
-        {
-            logger.LogInformation("Skipping duplicate webhook event {WebhookEventId}", webhookEvent.WebhookEventId);
-            return;
-        }
-
         var text = messageType switch
         {
             "text" => webhookEvent.Message.Text,
@@ -50,51 +42,24 @@ public class WebhookEventHandler(
             _ => null
         };
 
-        var groupMessage = new GroupMessage
-        {
-            WebhookEventId = webhookEvent.WebhookEventId,
-            LineMessageId = webhookEvent.Message.Id ?? "",
-            GroupId = webhookEvent.Source.GroupId,
-            UserId = webhookEvent.Source.UserId,
-            MessageType = messageType,
-            Text = text,
+        var envelope = new IngestEnvelope(
+            WebhookEventId: webhookEvent.WebhookEventId,
+            LineMessageId: webhookEvent.Message.Id ?? "",
+            GroupId: webhookEvent.Source.GroupId,
+            UserId: webhookEvent.Source.UserId,
+            MessageType: messageType,
+            Text: text,
             // Text 維持 "(貼圖)" 當 fallback 顯示用（前端載圖失敗或舊訊息沒有這兩個欄位時）
-            StickerId = messageType == "sticker" ? webhookEvent.Message.StickerId : null,
-            PackageId = messageType == "sticker" ? webhookEvent.Message.PackageId : null,
-            EventTimestamp = DateTimeOffset.FromUnixTimeMilliseconds(webhookEvent.Timestamp),
-            ReceivedAt = DateTimeOffset.UtcNow
-        };
+            StickerId: messageType == "sticker" ? webhookEvent.Message.StickerId : null,
+            PackageId: messageType == "sticker" ? webhookEvent.Message.PackageId : null,
+            EventTimestamp: DateTimeOffset.FromUnixTimeMilliseconds(webhookEvent.Timestamp),
+            ReceivedAt: DateTimeOffset.UtcNow,
+            HasContent: DownloadableTypes.Contains(messageType),
+            ContentFileName: messageType == "file" ? webhookEvent.Message.FileName : null);
 
-        if (DownloadableTypes.Contains(messageType))
-        {
-            groupMessage.Content = new MessageContent
-            {
-                FileName = messageType == "file" ? webhookEvent.Message.FileName : null,
-                DownloadStatus = DownloadStatus.Pending
-            };
-        }
+        await outboxWriter.EnqueueAsync(envelope, cancellationToken);
 
-        dbContext.GroupMessages.Add(groupMessage);
-
-        try
-        {
-            await dbContext.SaveChangesAsync(cancellationToken);
-        }
-        catch (DbUpdateException ex)
-        {
-            logger.LogWarning(ex, "Failed to save webhook event {WebhookEventId}, treating as duplicate", webhookEvent.WebhookEventId);
-            return;
-        }
-
-        logger.LogInformation("Saved {MessageType} message {LineMessageId} from group {GroupId}{Pending}",
-            messageType, groupMessage.LineMessageId, groupMessage.GroupId,
-            groupMessage.Content is null ? "" : " (content download queued)");
-
-        if (groupMessage.Content is not null)
-        {
-            downloadQueue.Enqueue(groupMessage.Content.Id);
-        }
-
-        profileRefreshQueue.Enqueue(new ProfileRefreshTask(groupMessage.GroupId, groupMessage.UserId));
+        logger.LogInformation("Queued {MessageType} message {LineMessageId} from group {GroupId} to outbox",
+            messageType, envelope.LineMessageId, envelope.GroupId);
     }
 }
