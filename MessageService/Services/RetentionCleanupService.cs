@@ -1,4 +1,5 @@
 using MessageService.Data;
+using MessageService.Models;
 using MessageService.Options;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -11,6 +12,13 @@ public class RetentionCleanupService(
     IOptions<RetentionOptions> options,
     ILogger<RetentionCleanupService> logger) : BackgroundService
 {
+    /// <summary>一次刪除的筆數上限——保留期到期時可能一次要清掉數十萬列，含 CASCADE 帶走的
+    /// varbinary(max) 內容可達數十 GB。單一交易砍整批會讓交易紀錄檔暴增、GroupMessages
+    /// 整表被鎖住數分鐘，期間 webhook 落地與檢視端全部卡住。分批跑，批次之間讓路給其他查詢。</summary>
+    private const int BatchSize = 1000;
+
+    private static readonly TimeSpan DelayBetweenBatches = TimeSpan.FromMilliseconds(200);
+
     private readonly RetentionOptions _options = options.Value;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -55,11 +63,50 @@ public class RetentionCleanupService(
         using var scope = scopeFactory.CreateScope();
         var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
 
-        var cutoff = DateTimeOffset.UtcNow.AddYears(-_options.Years);
-        var deletedCount = await dbContext.GroupMessages
-            .Where(m => m.EventTimestamp < cutoff)
-            .ExecuteDeleteAsync(cancellationToken);
+        var retentionDays = await GetRetentionDaysAsync(dbContext, cancellationToken);
+        var cutoff = DateTimeOffset.UtcNow.AddDays(-retentionDays);
 
-        logger.LogInformation("Retention cleanup removed {Count} group messages older than {Cutoff:yyyy-MM-dd}", deletedCount, cutoff);
+        var totalDeleted = 0;
+        while (true)
+        {
+            // 先撈這一批要刪的 Id，再用 Id 清單下 ExecuteDeleteAsync——ExecuteDeleteAsync
+            // 本身不穩定支援 OrderBy+Take 直接轉譯成單一 SQL，分兩步在兩個 provider 上都可靠
+            var idsToDelete = await dbContext.GroupMessages
+                .Where(m => m.EventTimestamp < cutoff)
+                .OrderBy(m => m.Id)
+                .Take(BatchSize)
+                .Select(m => m.Id)
+                .ToListAsync(cancellationToken);
+
+            if (idsToDelete.Count == 0)
+            {
+                break;
+            }
+
+            var deletedCount = await dbContext.GroupMessages
+                .Where(m => idsToDelete.Contains(m.Id))
+                .ExecuteDeleteAsync(cancellationToken);
+            totalDeleted += deletedCount;
+
+            if (idsToDelete.Count < BatchSize)
+            {
+                break;
+            }
+
+            await Task.Delay(DelayBetweenBatches, cancellationToken);
+        }
+
+        logger.LogInformation(
+            "Retention cleanup removed {Count} group messages older than {Cutoff:yyyy-MM-dd} (retention: {RetentionDays} days)",
+            totalDeleted, cutoff, retentionDays);
+    }
+
+    private static async Task<int> GetRetentionDaysAsync(MessageDbContext dbContext, CancellationToken cancellationToken)
+    {
+        var retentionDays = await dbContext.ViewerSettings
+            .Where(v => v.Id == ViewerSettings.SingletonId)
+            .Select(v => (int?)v.RetentionDays)
+            .FirstOrDefaultAsync(cancellationToken);
+        return retentionDays ?? ViewerSettings.DefaultRetentionDays;
     }
 }

@@ -235,4 +235,120 @@ public class SettingsControllerTests : IDisposable
         var allUsers = await _fixture.Client.GetFromJsonAsync<List<GroupMemberDto>>("/api/users");
         Assert.Equal(2, allUsers!.Count);
     }
+
+    // === 保留天數（決策6：搬進 Web 設定頁，RetentionCleanupService 每次執行讀 DB） ===
+
+    [Fact]
+    public async Task GetRetentionSettings_DefaultsToThreeYears()
+    {
+        var settings = await _fixture.Client.GetFromJsonAsync<RetentionSettingsDto>("/api/settings/retention");
+
+        Assert.Equal(ViewerSettings.DefaultRetentionDays, settings!.RetentionDays);
+    }
+
+    [Fact]
+    public async Task UpdateRetentionSettings_PersistsNewValue()
+    {
+        var response = await _fixture.Client.PutAsJsonAsync("/api/settings/retention", new RetentionSettingsDto(30));
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+
+        var settings = await _fixture.Client.GetFromJsonAsync<RetentionSettingsDto>("/api/settings/retention");
+        Assert.Equal(30, settings!.RetentionDays);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    [InlineData(3651)]
+    public async Task UpdateRetentionSettings_OutOfRange_ReturnsBadRequest(int days)
+    {
+        var response = await _fixture.Client.PutAsJsonAsync("/api/settings/retention", new RetentionSettingsDto(days));
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task UpdateRetentionSettings_WhenSingletonRowMissing_RecreatesItWithFixedId()
+    {
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            dbContext.ViewerSettings.RemoveRange(dbContext.ViewerSettings);
+            await Task.CompletedTask;
+        });
+
+        var response = await _fixture.Client.PutAsJsonAsync("/api/settings/retention", new RetentionSettingsDto(90));
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+
+        var settings = await _fixture.Client.GetFromJsonAsync<RetentionSettingsDto>("/api/settings/retention");
+        Assert.Equal(90, settings!.RetentionDays);
+    }
+
+    // === 個資去識別化開關（決策7：預設全開） ===
+
+    [Fact]
+    public async Task GetPiiMaskingSettings_DefaultsToAllEnabled()
+    {
+        var settings = await _fixture.Client.GetFromJsonAsync<PiiMaskingSettingsDto>("/api/settings/pii-masking");
+
+        Assert.True(settings!.MaskNationalId);
+        Assert.True(settings.MaskMobilePhone);
+        Assert.True(settings.MaskLandline);
+        Assert.True(settings.MaskNhiCard);
+    }
+
+    [Fact]
+    public async Task UpdatePiiMaskingSettings_PersistsEachFlagIndependently()
+    {
+        var response = await _fixture.Client.PutAsJsonAsync(
+            "/api/settings/pii-masking", new PiiMaskingSettingsDto(false, true, false, true));
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+
+        var settings = await _fixture.Client.GetFromJsonAsync<PiiMaskingSettingsDto>("/api/settings/pii-masking");
+        Assert.False(settings!.MaskNationalId);
+        Assert.True(settings.MaskMobilePhone);
+        Assert.False(settings.MaskLandline);
+        Assert.True(settings.MaskNhiCard);
+    }
+
+    [Fact]
+    public async Task UpdatePiiMaskingSettings_TakesEffectInMessageMasking()
+    {
+        var now = DateTimeOffset.UtcNow;
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            dbContext.GroupMessages.Add(new GroupMessage
+            {
+                WebhookEventId = "e1", LineMessageId = "m1", GroupId = "G1", MessageType = "text",
+                Text = "身分證A123456789", EventTimestamp = now, ReceivedAt = now
+            });
+            await Task.CompletedTask;
+        });
+
+        await _fixture.Client.PutAsJsonAsync(
+            "/api/settings/pii-masking", new PiiMaskingSettingsDto(false, true, true, true));
+
+        var page = await _fixture.Client.GetFromJsonAsync<MessagesPageDto>("/api/groups/G1/messages?days=3");
+
+        Assert.Equal("身分證A123456789", Assert.Single(page!.Messages).Text);
+    }
+
+    [Fact]
+    public async Task UpdatePiiMaskingSettings_WhenSingletonRowMissing_RecreatesItWithFixedId()
+    {
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            dbContext.ViewerSettings.RemoveRange(dbContext.ViewerSettings);
+            await Task.CompletedTask;
+        });
+
+        var response = await _fixture.Client.PutAsJsonAsync(
+            "/api/settings/pii-masking", new PiiMaskingSettingsDto(false, false, false, false));
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+
+        var settings = await _fixture.Client.GetFromJsonAsync<PiiMaskingSettingsDto>("/api/settings/pii-masking");
+        Assert.False(settings!.MaskNationalId);
+        Assert.False(settings.MaskMobilePhone);
+        Assert.False(settings.MaskLandline);
+        Assert.False(settings.MaskNhiCard);
+    }
 }
