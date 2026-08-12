@@ -159,6 +159,7 @@
     function createDateSeparator(iso) {
         const sep = document.createElement('div');
         sep.className = 'date-separator';
+        sep.dataset.dateKey = dateKey(iso);
         const span = document.createElement('span');
         span.textContent = formatDateSeparator(iso);
         sep.appendChild(span);
@@ -448,6 +449,12 @@
         const list = els.messageList;
         const previousScrollHeight = list.scrollHeight;
         const previousScrollTop = list.scrollTop;
+        // 銜接處判斷用：往前加載的這批訊息接上既有清單頂端時，如果兩邊同一天，
+        // 既有清單頂端那個日期分隔線就是多的（新批次結尾也會插一個同一天的）
+        const previousFirstChild = list.firstChild;
+        const previousFirstDateKey = previousFirstChild instanceof HTMLElement
+            ? previousFirstChild.dataset.dateKey ?? null
+            : null;
 
         const fragment = document.createDocumentFragment();
         let lastDateKey = null;
@@ -465,6 +472,11 @@
         }
 
         list.insertBefore(fragment, list.firstChild);
+
+        if (previousFirstDateKey !== null && lastDateKey === previousFirstDateKey) {
+            previousFirstChild.remove();
+        }
+
         list.scrollTop = previousScrollTop + (list.scrollHeight - previousScrollHeight);
     }
 

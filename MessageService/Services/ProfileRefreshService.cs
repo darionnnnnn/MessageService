@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using MessageService.Options;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
@@ -13,6 +14,11 @@ public class ProfileRefreshService(
     ILogger<ProfileRefreshService> logger) : BackgroundService
 {
     private readonly ProfileCacheOptions _options = options.Value;
+
+    /// <summary>程序內失敗冷卻：group 用 GroupId 當鍵、member 用 "GroupId:UserId"，見
+    /// ProfileCacheOptions.FailureRetryAfter 的說明。單例 BackgroundService 的欄位，
+    /// 整個服務生命週期共用一份，重啟就重置。</summary>
+    private readonly ConcurrentDictionary<string, DateTimeOffset> _failureCooldowns = new();
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -41,16 +47,24 @@ public class ProfileRefreshService(
         // 這也是 IProfileStore 把 staleness 跟 upsert 拆成兩支方法的理由
         var staleness = await profileStore.GetStalenessAsync(task.GroupId, task.UserId, cutoff, cancellationToken);
 
-        if (staleness.GroupStale)
+        if (staleness.GroupStale && !IsInCooldown(task.GroupId))
         {
             await RefreshGroupAsync(profileStore, profileClient, task.GroupId, cancellationToken);
         }
 
-        if (task.UserId is not null && staleness.MemberStale)
+        if (task.UserId is not null && staleness.MemberStale && !IsInCooldown(MemberCooldownKey(task.GroupId, task.UserId)))
         {
             await RefreshMemberAsync(profileStore, profileClient, task.GroupId, task.UserId, cancellationToken);
         }
     }
+
+    private bool IsInCooldown(string key) =>
+        _failureCooldowns.TryGetValue(key, out var until) && until > DateTimeOffset.UtcNow;
+
+    private void RecordFailure(string key) =>
+        _failureCooldowns[key] = DateTimeOffset.UtcNow + _options.FailureRetryAfter;
+
+    private static string MemberCooldownKey(string groupId, string userId) => $"{groupId}:{userId}";
 
     private async Task RefreshGroupAsync(
         IProfileStore profileStore, ILineProfileClient profileClient, string groupId, CancellationToken cancellationToken)
@@ -59,9 +73,11 @@ public class ProfileRefreshService(
         if (summary is null)
         {
             logger.LogWarning("Group summary unavailable for group {GroupId}", groupId);
+            RecordFailure(groupId);
             return;
         }
 
+        _failureCooldowns.TryRemove(groupId, out _);
         await profileStore.UpsertGroupAsync(groupId, summary, cancellationToken);
     }
 
@@ -72,9 +88,11 @@ public class ProfileRefreshService(
         if (profile is null)
         {
             logger.LogWarning("Member profile unavailable for group {GroupId} user {UserId}", groupId, userId);
+            RecordFailure(MemberCooldownKey(groupId, userId));
             return;
         }
 
+        _failureCooldowns.TryRemove(MemberCooldownKey(groupId, userId), out _);
         await profileStore.UpsertMemberAsync(groupId, userId, profile, cancellationToken);
     }
 }

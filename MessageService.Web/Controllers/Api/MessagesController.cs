@@ -16,6 +16,10 @@ public class MessagesController(
 {
     public const int MaxDays = 3650;
 
+    /// <summary>單次回應的訊息筆數硬上限——沒有這個上限，忙碌群組按幾次「載入更早」之後
+    /// DOM 會累積上萬個節點，捲動開始掉幀。截斷時哪一端被丟棄依查詢方向而定，見 GetMessages。</summary>
+    public const int MessageWindowLimit = 500;
+
     [HttpGet("api/groups/{groupId}/messages")]
     public async Task<ActionResult<MessagesPageDto>> GetMessages(
         string groupId,
@@ -91,8 +95,18 @@ public class MessagesController(
             query = query.Where(m => m.EventTimestamp >= cutoff);
         }
 
-        var rows = await query
-            .OrderBy(m => m.Id)
+        // 截斷方向依查詢意圖而定：afterId（輪詢）要保留離游標最近、時間上最早的那批，往前追趕；
+        // aroundId（搜尋跳轉）以錨點為中心，離錨點越近優先權越高；初載／beforeId 都是「往回看」
+        // 的視窗，越接近游標（或現在）越優先，被丟的是視窗裡更久遠的那一批。多撈一筆
+        // （MessageWindowLimit + 1）用來判斷是否真的被截斷，不必另外一次 COUNT 查詢。
+        IOrderedQueryable<GroupMessage> capOrdered = aroundId is { } anchorId
+            ? query.OrderBy(m => Math.Abs(m.Id - anchorId))
+            : afterId is not null
+                ? query.OrderBy(m => m.Id)
+                : query.OrderByDescending(m => m.Id);
+
+        var capped = await capOrdered
+            .Take(MessageWindowLimit + 1)
             .Select(m => new
             {
                 m.Id,
@@ -106,6 +120,9 @@ public class MessagesController(
                     : new { m.Content.Id, m.Content.FileName, m.Content.ContentType, m.Content.DownloadStatus }
             })
             .ToListAsync(cancellationToken);
+
+        var truncated = capped.Count > MessageWindowLimit;
+        var rows = capped.Take(MessageWindowLimit).OrderBy(r => r.Id).ToList();
 
         var userIds = rows.Select(r => r.UserId).Where(id => id is not null).Cast<string>().Distinct().ToList();
         var members = await dbContext.GroupMembers
@@ -176,11 +193,14 @@ public class MessagesController(
                 .MaxAsync(cancellationToken);
         }
 
-        return Ok(new MessagesPageDto(messages, hasMore, latestId));
+        return Ok(new MessagesPageDto(messages, hasMore, latestId, truncated));
     }
 
     public const int SearchResultLimit = 100;
     private const int SearchCandidateLimit = 300;
+
+    /// <summary>內容命中／姓名命中各自的保留配額，見 Search 方法內的說明。</summary>
+    private const int SearchQuotaPerCategory = 50;
 
     [HttpGet("api/messages/search")]
     public async Task<ActionResult<IReadOnlyList<MessageSearchResultDto>>> Search(
@@ -256,10 +276,19 @@ public class MessagesController(
             .Select(m => new { m.Id, m.GroupId, m.UserId, m.MessageType, m.Text, m.EventTimestamp })
             .ToListAsync(cancellationToken);
 
+        // 內容命中與姓名命中各自保留固定配額（見類別常數說明）——不然搜「王」這種同時是常見字
+        // 又是姓氏的關鍵字，結果會被該姓氏成員的近期訊息灌滿，真正含關鍵字的訊息反而排不進來
         var merged = new Dictionary<long, (string GroupId, string? UserId, string MessageType, string? Text, DateTimeOffset EventTimestamp)>();
 
+        // textCandidates 已經照 Id（＝到達順序）由新到舊排好，依序取前 SearchQuotaPerCategory 筆
+        // 複驗通過的，就是最近的配額筆數，不必額外排序
         foreach (var row in textCandidates)
         {
+            if (merged.Count >= SearchQuotaPerCategory)
+            {
+                break;
+            }
+
             // 遮蔽後複驗：被關鍵字規則遮掉的詞（例如「密碼」）搜不到，摘要也只會顯示遮蔽後的文字
             var maskedText = maskingRules.MaskText(row.GroupId, row.Text!);
             if (maskedText.Contains(q, StringComparison.OrdinalIgnoreCase))
@@ -270,6 +299,7 @@ public class MessagesController(
 
         if (nameMatchedKeys.Count > 0)
         {
+            var nameCandidates = new List<(long Id, string GroupId, string? UserId, string MessageType, string? Text, DateTimeOffset EventTimestamp)>();
             foreach (var group in nameMatchedKeys.GroupBy(k => k.GroupId))
             {
                 var userIds = group.Select(k => k.UserId).ToList();
@@ -281,10 +311,14 @@ public class MessagesController(
                     .Select(m => new { m.Id, m.GroupId, m.UserId, m.MessageType, m.Text, m.EventTimestamp })
                     .ToListAsync(cancellationToken);
 
-                foreach (var row in rows)
-                {
-                    merged.TryAdd(row.Id, (row.GroupId, row.UserId, row.MessageType, row.Text, row.EventTimestamp));
-                }
+                nameCandidates.AddRange(rows.Select(r => (r.Id, r.GroupId, r.UserId, r.MessageType, r.Text, r.EventTimestamp)));
+            }
+
+            // 多個成員符合姓名比對時，候選是分別各撈一批再合併的，要重新依時間排序才能正確
+            // 取出「整體最近」的配額筆數，不是每個成員各自取到配額
+            foreach (var row in nameCandidates.OrderByDescending(r => r.EventTimestamp).Take(SearchQuotaPerCategory))
+            {
+                merged.TryAdd(row.Id, (row.GroupId, row.UserId, row.MessageType, row.Text, row.EventTimestamp));
             }
         }
 

@@ -236,4 +236,57 @@ public class MessageSearchTests : IDisposable
 
         Assert.Equal(System.Net.HttpStatusCode.NotFound, response.StatusCode);
     }
+
+    [Fact]
+    public async Task Search_ContentAndNameMatchesBothExceedQuota_EachCategoryCappedIndependently()
+    {
+        // 沒有各自配額時：姓名命中比較新，會把「整體最近 100 筆」全灌成姓名命中，內容命中
+        // 幾乎被擠光——這裡刻意讓姓名命中（90 筆）比內容命中（60 筆）更新，重現這個情境
+        var now = DateTimeOffset.UtcNow;
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            dbContext.GroupMembers.Add(new GroupMember { GroupId = "G1", UserId = "U-name", DisplayName = "小明", UpdatedAt = now });
+            (await dbContext.ViewerSettings.SingleAsync()).NameDisplayMode = NameDisplayMode.Original;
+
+            // 姓名命中：90 則，內容跟關鍵字無關，時間最新（Id 遞增＝時間遞增，最後一筆最新）
+            for (var i = 0; i < 90; i++)
+            {
+                dbContext.GroupMessages.Add(TextMessage($"name-{i}", "G1", "U-name", now.AddMinutes(-(89 - i)), $"name-hit-{i}"));
+            }
+
+            // 內容命中：60 則，文字含關鍵字，時間較舊（一天前那個區間內）
+            for (var i = 0; i < 60; i++)
+            {
+                dbContext.GroupMessages.Add(TextMessage($"content-{i}", "G1", "U-content", now.AddDays(-1).AddMinutes(-(59 - i)), $"提到小明的訊息-{i}"));
+            }
+            await Task.CompletedTask;
+        });
+
+        var results = await _fixture.Client.GetFromJsonAsync<List<MessageSearchResultDto>>("/api/messages/search?q=小明");
+
+        Assert.NotNull(results);
+        var nameHitCount = results.Count(r => r.Snippet.StartsWith("name-hit-"));
+        var contentHitCount = results.Count(r => r.Snippet.Contains("提到小明的訊息"));
+        Assert.Equal(100, results.Count);
+        Assert.Equal(50, nameHitCount);
+        Assert.Equal(50, contentHitCount);
+    }
+
+    [Fact]
+    public async Task Search_ContentMatchesWithinQuota_AllReturned()
+    {
+        var now = DateTimeOffset.UtcNow;
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            for (var i = 0; i < 10; i++)
+            {
+                dbContext.GroupMessages.Add(TextMessage($"c{i}", "G1", "U1", now.AddMinutes(-(9 - i)), $"提到腳踏車-{i}"));
+            }
+            await Task.CompletedTask;
+        });
+
+        var results = await _fixture.Client.GetFromJsonAsync<List<MessageSearchResultDto>>("/api/messages/search?q=腳踏車");
+
+        Assert.Equal(10, results!.Count);
+    }
 }
