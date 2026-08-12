@@ -3,20 +3,23 @@
 收錄端（`MessageService`）所在網段未必碰得到資料庫，因此支援三種部署角色，
 由 `Deployment:Mode` 設定決定；同一份程式碼、同一個專案，角色只是設定差異，不是不同的部署產物。
 
-> **目前進度（2026-08-11）**：Stage 0＋1 已完成——模式切換的骨架、路由閘門、本機 outbox
-> 與背景排空全部到位，**但只有 `Full` 模式功能完整可用**（等同過去唯一支援的形態，
-> 行為零改變）。`Line` 模式目前**啟動就會失敗**（見下方「目前限制」）；`Db` 模式雖然
-> 啟動得起來，但因為 ingest API 還沒實作，沒有任何管道能把資料送進來，實務上還不能用。
+> **目前進度（2026-08-12）**：Stage 0＋1＋2 已完成——`Full`／`Line`／`Db` 三種模式**都能真的
+> 跑起來**，訊息收送的完整拆機拓撲已用兩個真實實體端到端驗證過（webhook 進 Line 端、
+> 轉送到 Db 端、含斷線期間 outbox 累積＋恢復後自動排空且無重複，見「端到端驗證紀錄」）。
+> 還沒做的是 Stage 3：媒體下載與頭貼快取目前仍只能在有資料庫存取的主機執行，`Line` 模式
+> 拆機後這兩件事暫時做不了（見下方「目前限制」）——純文字訊息的收送已經是完整可用的形態。
 
 ## 三種模式
 
 | | Full（預設） | Line | Db |
 |---|---|---|---|
 | `/api/line/webhook` | ✓ | ✓ | 404（路由不存在，非拒絕） |
+| `/api/ingest/*` | ✓（需設 `Ingest:ApiKey` 才存在） | 404（路由不存在） | ✓（需設 `Ingest:ApiKey`） |
 | 直連資料庫 | ✓ | ✗ | ✓ |
 | 本機 outbox＋排空 | ✓ | ✓ | ✗（無 webhook，無事件可寫） |
-| 落地方式 | outbox → DirectIngestSink | outbox → （Stage 2 才有的 HttpIngestSink） | 尚無接收端點 |
-| 保留期清除 / 內容下載 / 頭貼快取 | ✓ | ✗（本輪不動） | ✓ |
+| 落地方式 | outbox → `DirectIngestSink` | outbox → `HttpIngestSink` → 對方的 `/api/ingest/events` | `IngestController` → `DirectIngestSink` |
+| 保留期清除 | ✓ | ✗ | ✓ |
+| 內容下載 / 頭貼快取 | ✓ | 尚未支援（Stage 3） | ✓ |
 
 `Full` 就是今天的行為：收 webhook、寫本機 outbox、由背景服務排空並直接寫進資料庫。
 沒有設定 `Deployment:Mode` 就是這個模式，**既有部署完全不受影響**。
@@ -31,12 +34,21 @@ LINE ──▶ LineWebhookController ──▶ WebhookEventHandler
                               outbox.db（本機 SQLite，跟主資料庫完全獨立）
                                         ▲ 立即回 200
                                         │
-                              OutboxForwarderService（背景排空，失敗按退避重試）
+                              OutboxForwarderService（背景排空，失敗按退避重試，
+                                        │              死信門檻 MaxAttempts 或永久性失敗）
                                         ▼
                                    IIngestSink
                           ┌─────────────┴─────────────┐
-                    DirectIngestSink           HttpIngestSink（Stage 2，尚未實作）
-                    （Full／Db，EF 直寫）         （Line，打 ingest API）
+                    DirectIngestSink              HttpIngestSink
+                    （Full／Db，EF 直寫）      （Line，POST /api/ingest/events）
+                                                          │
+                                                          ▼
+                                          IngestIpAllowlistMiddleware
+                                          ＋IngestApiKeyMiddleware（X-Ingest-Key）
+                                                          ▼
+                                                  IngestController
+                                                          ▼
+                                              （對方主機的）DirectIngestSink
 ```
 
 webhook 回應時間因此跟資料庫或遠端 API 是否可用完全脫鉤：即使主資料庫短暫斷線，
@@ -50,10 +62,13 @@ webhook 回應時間因此跟資料庫或遠端 API 是否可用完全脫鉤：�
 | `Deployment:Mode` | `Full`（預設）／`Line`／`Db` |
 | `ConnectionStrings:Outbox` | 本機 outbox 的 SQLite 檔（`Full`／`Line` 才用得到），預設 `Data Source=outbox.db` |
 | `Line:OutboundHere` | 這台要不要對外呼叫 LINE API（媒體下載＋頭貼快取）。**Stage 1 尚未依這個設定做任何事**，先聲明形狀，實際生效要等 Stage 3 的 `IContentWorkSource` |
-| `Ingest:BaseUrl` / `Ingest:ApiKey` | `Line` 模式打去哪個 `Db` 模式主機、用什麼金鑰；`Db` 模式用同一把金鑰驗證進來的請求 |
+| `Ingest:BaseUrl` | `Line` 模式打去哪個 `Db` 模式主機的 ingest API（如 `https://db-host/`） |
+| `Ingest:ApiKey` | 雙邊共用密鑰：`Line` 端當 `X-Ingest-Key` 標頭送出、`Db`／`Full` 端驗證進來的請求，兩邊必須一致。**留空時 `/api/ingest/*` 整個不存在（404）**——避免單機部署意外多開一個沒人保護的寫入端點 |
+| `AllowedClientIps` | `/api/ingest/*` 的 IP 白名單（跟 `MessageService.Web` 的同名設定是獨立的兩份，各自只保護各自的端點），只在 `Full`／`Db` 模式生效；空白名單視為全拒 |
 | `Outbox:PollIntervalSeconds` | outbox 空的時候的保底輪詢間隔（寫入會立刻叫醒，這只是撿回到期重試項目用），預設 5 |
 | `Outbox:BatchSize` | 一輪最多處理幾筆，預設 50 |
 | `Outbox:BaseRetryDelaySeconds` / `MaxRetryDelaySeconds` | 重試退避：第 N 次失敗延遲約 `Base × N`，封頂 `Max`，預設 5／300 |
+| `Outbox:MaxAttempts` | 累計失敗達到這個次數就標記死信、不再重試（見下方「死信」），預設 20 |
 
 ## 設計決策
 
@@ -84,28 +99,59 @@ webhook 回應時間因此跟資料庫或遠端 API 是否可用完全脫鉤：�
 - **`Line:OutboundHere` 而不是拆成「下載開關」＋「頭貼快取開關」**：媒體下載與頭貼快取
   都只需要 outbound HTTPS，沒有理由拆成兩個獨立設定；一對主機恰好一台要設 `true`，
   啟動時無法互相檢查，設錯（兩台都真或都假）不會啟動失敗，只會變成重複下載或永遠不下載。
-- **`Line:OutboundHere=true` 卻沒有 `ChannelAccessToken` 目前不會啟動失敗**：Stage 1
-  還沒有任何註冊邏輯依據 `OutboundHere` 做決定（那是 Stage 3 才會接上的
+- **`Line:OutboundHere=true` 卻沒有 `ChannelAccessToken` 目前不會啟動失敗**：Stage 1／2
+  都還沒有任何註冊邏輯依據 `OutboundHere` 做決定（那是 Stage 3 才會接上的
   `IContentWorkSource`），現在就要求這個設定只會對還沒用到它的部署造成不必要的啟動失敗。
   等 Stage 3 真的接上後，這裡的驗證要一併補上。
+- **ingest API 判定「重複」不回獨立狀態碼，一律 200**：規劃階段本來想讓 `IngestController`
+  對「新寫入」回 200、對「判定為重複」回 409，讓客戶端更容易觀察。實作時發現這會逼
+  `IIngestSink.SubmitAsync` 多開一個回傳值來區分兩種結果，而這個介面的既有契約
+  （Stage 1 就定案、已被測試釘住）明講「成功（含判定為重複而略過）就正常回傳」——
+  對呼叫端而言兩者都是「這筆已經在後端了，outbox 可以刪掉」，沒有行為上的差異，
+  純觀察用途不值得為此打破一個已穩定的契約。**因此 `IngestController` 對兩者一律回 200**，
+  `HttpIngestSink` 也只看 `IsSuccessStatusCode`，不特別處理 409。
+- **`/api/ingest` 的兩個中介層只在 `hasDatabaseAccess`（`Full`／`Db`）才註冊**：一開始
+  不分模式一律掛上 `UseWhen`，結果 `Line` 模式的主機每次啟動都印一行
+  「AllowedClientIps 是空的」警告——這台主機本來就不會收到 `/api/ingest` 流量，
+  這個警告只會讓人誤以為忘了設定。改成只在 controller 有機會存在的模式才註冊中介層。
+- **`X-Ingest-Key` 用固定時間比較，`AllowedClientIps` 是 ingest API 專屬的獨立設定**：
+  跟 `MessageService.Web/Middleware/IpAllowlistMiddleware.cs` 是同一套邏輯的獨立複本
+  （兩專案互不參照），也刻意不跟 webhook 的簽章驗證共用任何機制——服務對服務的憑證
+  跟「LINE 平台可信」是兩種完全不同的信任來源，混在一起會讓兩邊的威脅模型糾纏不清。
+
+## 端到端驗證紀錄（2026-08-12，Stage 2 完工後）
+
+用兩個真實本機實體驗證過完整拆機拓撲（非模擬）：`Db` 模式（`localhost:5081`，接資料庫，
+設 `Ingest:ApiKey`＋`AllowedClientIps`）與 `Line` 模式（`localhost:5082`，
+`Ingest:BaseUrl` 指向前者）。用正確 HMAC-SHA256 簽章送真實格式的 LINE webhook payload：
+
+1. **正常路徑**：Line 端驗簽通過 → 寫本機 outbox → 回 200 → forwarder 排空 → `HttpIngestSink`
+   打 `Db` 端 `/api/ingest/events` → `IngestIpAllowlistMiddleware`／`IngestApiKeyMiddleware`
+   放行 → `IngestController` → `DirectIngestSink` 寫入。直接查 `Db` 端 SQLite 確認訊息內容、
+   `GroupId`、`UserId`、`LineMessageId`、`WebhookEventId` 全部正確落地。
+2. **斷線容忍**：中途 `kill` 掉 `Db` 實體，Line 端再收一則 webhook——**webhook 仍回 200**
+   （沒有因為後端不通就讓 LINE 判定失效重送），訊息留在 Line 端本機 outbox（`Attempts` 遞增、
+   `LastError` 記錄連線失敗訊息），資料沒有遺失。
+3. **自動恢復**：重啟 `Db` 實體後，Line 端的 `OutboxForwarderService` 在下一輪退避到期時
+   自動重試成功，outbox 排空回 0 筆，兩則訊息（含斷線期間那則）都正確落地、無重複列——
+   驗證了 `WebhookEventId` 唯一索引在拆機場景下確實擋住了 outbox 重試可能產生的重複寫入。
+
+這證實了本輪最初的三個需求（長期兩形態都要支援／LINE 連外落在哪端都能跑／API 不通不能掉訊息）
+在純文字訊息的收送路徑上已經真正成立，不只是通過自動化測試。
 
 ## 目前限制（誠實記錄，別誤以為做完了）
 
-- **`Deployment:Mode=Line` 現在啟動就會丟 `InvalidOperationException`**：`HttpIngestSink`
-  （把 outbox 推去遠端 ingest API）是 Stage 2 的工作，還沒實作。寫在 outbox 裡的訊息
-  沒有東西能把它排空，所以刻意讓這個模式現在選不了，而不是讓它悄悄跑起來、訊息卡死在本機
-  outbox 永遠出不去。錯誤訊息會直接說明原因與現階段該用 `Full`。
-- **`Deployment:Mode=Db` 沒有接收端點**：ingest API controller（`/api/ingest/*`）同樣是
-  Stage 2 的工作。這個模式現在啟動得起來（資料庫、`DirectIngestSink` 都已就緒，
-  是為了讓 Stage 2 落地時只需要加 controller，不必再動 DI 註冊），但沒有任何東西會呼叫它。
-- **outbox 沒有死信處理**：一筆序列化失敗或永遠無法落地的項目會照退避規則無限重試
-  （封頂在 `MaxRetryDelaySeconds`），只會在 log 看到持續的警告，不會被隔離或丟棄。
-  單一使用者的內部工具目前可接受，量大或要長期無人值守時要補。
-- **兩套 `IIngestSink` 的等價性還沒有測試釘住**：因為 Stage 1 只有 `DirectIngestSink`
-  一種實作，「同一批輸入兩條路徑要產生相同結果」的等價性測試等 Stage 2
-  `HttpIngestSink` 落地後才補得出來、也才有意義。
-- **數百 MB 的媒體內容過 API 這件事還沒設計**：`IContentWorkSource` 的 API 實作、blob
-  串流上傳，是 Stage 3 的範圍，目前完全沒有著手。
+- **媒體下載與頭貼快取還只能在有資料庫存取的主機執行**：`ContentDownloadService`／
+  `ProfileRefreshService` 目前仍直接依賴 `MessageDbContext`。`Line` 模式拆機後，
+  這兩個背景服務不會在該主機啟動（見 `Program.cs` 的 `hasDatabaseAccess` 判斷），
+  訊息本身會正常收送，但媒體內容與頭貼快取要等 Stage 3 的 `IContentWorkSource`／
+  `IProfileSink` 落地才能在拆機情境下運作。純文字訊息不受影響。
+- **outbox 死信沒有專用的重送介面**：達到 `MaxAttempts` 或收到 `PermanentIngestException`
+  的項目會被標記 `DeadLetteredAt`、停止自動重試，但資料留在 `outbox.db` 裡不會自動消失，
+  只能手動查 `LastError` 欄位後決定怎麼處理。啟動時若偵測到死信筆數 >0 會印一行
+  Warning log 提醒，量大時要考慮補一個管理介面。
+- **`IContentWorkSource`／`IProfileSink` 的 API 實作、blob 串流上傳**：Stage 3 的範圍，
+  目前完全沒有著手。
 
 ## 分階段
 
@@ -113,6 +159,6 @@ webhook 回應時間因此跟資料庫或遠端 API 是否可用完全脫鉤：�
 |---|---|---|
 | 0 | 模式列舉、設定、啟動驗證、路由閘門 | ✅ 已完成 |
 | 1 | outbox＋forwarder＋`IIngestSink`／`DirectIngestSink` | ✅ 已完成 |
-| 2 | ingest API controller＋`HttpIngestSink` | 未開始 |
-| 3 | `IContentWorkSource` 的 API 實作＋blob 串流上傳 | 未開始 |
-| 4 | 設定樣板、部署檢查表、三模式測試矩陣、文件收尾 | 未開始 |
+| 2 | ingest API controller＋`HttpIngestSink`＋死信 | ✅ 已完成，端到端驗證通過 |
+| 3 | `IContentWorkSource`／`IProfileSink` 的 API 實作＋blob 串流上傳 | 未開始 |
+| 4 | 設定樣板、部署檢查表、兩套 sink 等價性自動化測試、文件收尾 | 未開始 |

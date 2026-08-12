@@ -15,4 +15,9 @@ public class OutboxOptions
     public int BaseRetryDelaySeconds { get; set; } = 5;
 
     public int MaxRetryDelaySeconds { get; set; } = 300;
+
+    /// <summary>累計失敗次數達到這個門檻就標記死信、不再重試（見 OutboxEntry.DeadLetteredAt）。
+    /// 只保護「暫時性失敗重試了也沒用」的情況；PermanentIngestException（例如 ingest API
+    /// 判定 payload 格式不合）不管次數，第一次遇到就直接死信。</summary>
+    public int MaxAttempts { get; set; } = 20;
 }

@@ -18,6 +18,7 @@ public class OutboxDbContext(DbContextOptions<OutboxDbContext> options) : DbCont
             // 不支援 </>／range，跟 MessageDbContext 對 EventTimestamp 的處理是同一個原因、同一種修法
             entity.Property(e => e.CreatedAt).HasConversion(new DateTimeOffsetToBinaryConverter());
             entity.Property(e => e.NextAttemptAt).HasConversion(new DateTimeOffsetToBinaryConverter());
+            entity.Property(e => e.DeadLetteredAt).HasConversion(new DateTimeOffsetToBinaryConverter());
             entity.HasIndex(e => e.NextAttemptAt);
         });
     }

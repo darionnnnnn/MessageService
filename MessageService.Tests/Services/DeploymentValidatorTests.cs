@@ -28,12 +28,38 @@ public class DeploymentValidatorTests
     }
 
     [Fact]
-    public void Line_AlwaysThrows_BecauseStage2NotImplemented()
+    public void Line_WithBaseUrlAndApiKeyAndChannelSecret_DoesNotThrow()
     {
-        // Stage 1 範圍：Line 模式的 ingest API 客戶端（HttpIngestSink）還沒實作，
-        // 就算把該給的設定都給齊了也應該啟動失敗，而不是悄悄跑起來累積永遠排不空的 outbox
+        var ex = Record.Exception(() =>
+            Validate(DeploymentMode.Line, new LineOptions { ChannelSecret = "secret" },
+                new IngestOptions { BaseUrl = "https://db-host", ApiKey = "key" }));
+
+        Assert.Null(ex);
+    }
+
+    [Fact]
+    public void Line_WithoutBaseUrl_Throws()
+    {
         Assert.Throws<InvalidOperationException>(() =>
             Validate(DeploymentMode.Line, new LineOptions { ChannelSecret = "secret" },
+                new IngestOptions { BaseUrl = "", ApiKey = "key" }));
+    }
+
+    [Fact]
+    public void Line_WithoutApiKey_Throws()
+    {
+        Assert.Throws<InvalidOperationException>(() =>
+            Validate(DeploymentMode.Line, new LineOptions { ChannelSecret = "secret" },
+                new IngestOptions { BaseUrl = "https://db-host", ApiKey = "" }));
+    }
+
+    [Fact]
+    public void Line_WithoutChannelSecret_Throws()
+    {
+        // Line 模式仍然收 webhook，跟 Full 模式一樣需要簽章驗證用的 ChannelSecret——
+        // 這條規則是既有的（Full_WithoutChannelSecret_Throws 已涵蓋 Full），這裡確認 Line 一致
+        Assert.Throws<InvalidOperationException>(() =>
+            Validate(DeploymentMode.Line, new LineOptions { ChannelSecret = "" },
                 new IngestOptions { BaseUrl = "https://db-host", ApiKey = "key" }));
     }
 

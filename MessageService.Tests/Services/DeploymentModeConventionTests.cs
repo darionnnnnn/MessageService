@@ -34,7 +34,7 @@ public class DeploymentModeConventionTests
     {
         var application = CreateApplication(typeof(WebhookLikeController));
 
-        new DeploymentModeConvention(mode).Apply(application);
+        new DeploymentModeConvention(mode, ingestApiEnabled: true).Apply(application);
 
         Assert.Single(application.Controllers);
     }
@@ -44,7 +44,7 @@ public class DeploymentModeConventionTests
     {
         var application = CreateApplication(typeof(WebhookLikeController), typeof(UngatedController));
 
-        new DeploymentModeConvention(DeploymentMode.Db).Apply(application);
+        new DeploymentModeConvention(DeploymentMode.Db, ingestApiEnabled: true).Apply(application);
 
         var remaining = Assert.Single(application.Controllers);
         Assert.Equal(typeof(UngatedController).GetTypeInfo(), remaining.ControllerType);
@@ -58,8 +58,48 @@ public class DeploymentModeConventionTests
     {
         var application = CreateApplication(typeof(UngatedController));
 
-        new DeploymentModeConvention(mode).Apply(application);
+        new DeploymentModeConvention(mode, ingestApiEnabled: true).Apply(application);
 
         Assert.Single(application.Controllers);
+    }
+
+    // ==== RequiresIngestApiKeyAttribute：獨立於模式的第二道閘門 ====
+
+    [EnabledInModes(DeploymentMode.Full, DeploymentMode.Db)]
+    [RequiresIngestApiKey]
+    private class IngestLikeController;
+
+    [Fact]
+    public void Apply_RequiresApiKey_ApiEnabled_KeepsController()
+    {
+        var application = CreateApplication(typeof(IngestLikeController));
+
+        new DeploymentModeConvention(DeploymentMode.Full, ingestApiEnabled: true).Apply(application);
+
+        Assert.Single(application.Controllers);
+    }
+
+    [Fact]
+    public void Apply_RequiresApiKey_ApiDisabled_RemovesControllerEvenIfModeMatches()
+    {
+        var application = CreateApplication(typeof(IngestLikeController), typeof(UngatedController));
+
+        // 模式本身允許（Full 在 EnabledInModes 清單中），但金鑰沒配置——兩道閘門獨立判定，
+        // 任一道不過都要移除
+        new DeploymentModeConvention(DeploymentMode.Full, ingestApiEnabled: false).Apply(application);
+
+        var remaining = Assert.Single(application.Controllers);
+        Assert.Equal(typeof(UngatedController).GetTypeInfo(), remaining.ControllerType);
+    }
+
+    [Fact]
+    public void Apply_RequiresApiKey_ModeNotAllowed_RemovedRegardlessOfApiKey()
+    {
+        var application = CreateApplication(typeof(IngestLikeController));
+
+        // Line 不在 IngestLikeController 的 EnabledInModes 清單中——即使金鑰配置了也不該存在
+        new DeploymentModeConvention(DeploymentMode.Line, ingestApiEnabled: true).Apply(application);
+
+        Assert.Empty(application.Controllers);
     }
 }
