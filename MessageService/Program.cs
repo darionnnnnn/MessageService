@@ -185,6 +185,11 @@ if (hasDatabaseAccess && databaseProvider == "Sqlite")
     using var scope = app.Services.CreateScope();
     var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
     dbContext.Database.EnsureCreated();
+
+    // EnsureCreated() 只在資料庫檔案完全不存在時建表——既有的 messages.db 補上本輪新增的
+    // 欄位／索引要在這裡另外處理，見 MessageDbSchemaUpgrader 的說明
+    var messageDbConnectionString = builder.Configuration.GetConnectionString("Sqlite") ?? "Data Source=messages.db";
+    MessageDbSchemaUpgrader.EnsureSchema(messageDbConnectionString);
 }
 
 if (receivesWebhook)

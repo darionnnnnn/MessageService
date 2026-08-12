@@ -25,11 +25,21 @@ public class MessageDbContext(DbContextOptions<MessageDbContext> options) : DbCo
                 .WithOne(c => c.GroupMessage)
                 .HasForeignKey<MessageContent>(c => c.GroupMessageId)
                 .OnDelete(DeleteBehavior.Cascade);
+
+            // LINE 的 group id／user id 是 33 字元定長；原本的 nvarchar(max) 在 SQL Server 上
+            // 是 LOB 型別，索引鍵不能用 LOB，所以檢視端每一種查詢（側欄、未讀數、訊息視窗、搜尋）
+            // 用 GroupId 過濾時全部是全表掃描。收斂成有限長度才建得了下面兩個索引。
+            entity.Property(m => m.GroupId).HasMaxLength(64);
+            entity.Property(m => m.UserId).HasMaxLength(64);
+            entity.Property(m => m.MessageType).HasMaxLength(20);
+
+            entity.HasIndex(m => new { m.GroupId, m.Id }); // 未讀數／afterId／beforeId／hasMore
+            entity.HasIndex(m => new { m.GroupId, m.EventTimestamp }); // 天數視窗／aroundId
         });
 
         modelBuilder.Entity<MessageContent>(entity =>
         {
-            entity.Property(c => c.DownloadStatus).HasConversion<string>();
+            entity.Property(c => c.DownloadStatus).HasConversion<string>().HasMaxLength(20);
         });
 
         modelBuilder.Entity<Group>().HasKey(g => g.GroupId);
@@ -71,6 +81,9 @@ public class MessageDbContext(DbContextOptions<MessageDbContext> options) : DbCo
                 .HasConversion(new DateTimeOffsetToBinaryConverter());
             modelBuilder.Entity<GroupMember>()
                 .Property(m => m.UpdatedAt)
+                .HasConversion(new DateTimeOffsetToBinaryConverter());
+            modelBuilder.Entity<MessageContent>()
+                .Property(c => c.LastAttemptAt)
                 .HasConversion(new DateTimeOffsetToBinaryConverter());
         }
     }

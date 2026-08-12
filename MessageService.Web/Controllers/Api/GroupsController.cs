@@ -74,8 +74,14 @@ public class GroupsController(MessageDbContext dbContext, IMaskingService maskin
         var result = groupIds
             .Select(id =>
             {
+                // 兩段查詢之間若剛好被保留期清除刪掉那則訊息（罕見但可能），這個群組這輪就跳過，
+                // 不讓整支側欄 API 500——下一輪輪詢會用當時仍存在的最後一則訊息重新算出結果
+                if (!lastMessages.TryGetValue(id, out var lastMessage))
+                {
+                    return null;
+                }
+
                 groupCache.TryGetValue(id, out var cached);
-                var lastMessage = lastMessages[id];
                 var preview = MessagePreviewFormatter.Format(lastMessage.MessageType, lastMessage.Text, maskingRules, id);
 
                 return new GroupDto(
@@ -88,7 +94,8 @@ public class GroupsController(MessageDbContext dbContext, IMaskingService maskin
                     lastIdByGroup[id],
                     unreadByGroup.GetValueOrDefault(id, 0));
             })
-            .OrderByDescending(g => g.LastMessageAt)
+            .Where(g => g is not null)
+            .OrderByDescending(g => g!.LastMessageAt)
             .ToList();
 
         return Ok(result);
