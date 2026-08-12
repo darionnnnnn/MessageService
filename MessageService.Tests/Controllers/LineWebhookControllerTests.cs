@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using MessageService.Data;
 using MessageService.Outbox;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
@@ -25,6 +26,15 @@ public class LineWebhookControllerTests : IDisposable
         _outboxDbPath = Path.Combine(Path.GetTempPath(), $"messageservice-test-outbox-{Guid.NewGuid():N}.db");
         _factory = new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
         {
+            // 不用預設的 Development 環境：會自動載入這台開發機 user-secrets 裡一把真的 LINE
+            // Channel Access Token，讓 Line:OutboundHere 預設 true 卻沒設 ChannelAccessToken
+            // 的啟動驗證規則被意外滿足、測不出問題（只在這台機器「湊巧通過」，CI 會炸）；
+            // 這份檔案測的是簽章驗證與 outbox 落地，跟媒體下載無關，直接關掉 OutboundHere。
+            // 同時 appsettings.Development.json 對 Database:Provider 的 Sqlite 覆寫也一併
+            // 消失，要明確設定，否則會落回 appsettings.json 的 SqlServer 預設值。
+            builder.UseEnvironment("Testing");
+            builder.UseSetting("Database:Provider", "Sqlite");
+            builder.UseSetting("Line:OutboundHere", "false");
             builder.UseSetting("ConnectionStrings:Sqlite", $"Data Source={_dbPath}");
             builder.UseSetting("ConnectionStrings:Outbox", $"Data Source={_outboxDbPath}");
             builder.UseSetting("Line:ChannelSecret", ChannelSecret);

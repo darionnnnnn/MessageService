@@ -1,15 +1,18 @@
 using MessageService.Controllers;
+using MessageService.Options;
 using MessageService.Services;
 using MessageService.Tests.TestSupport;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging.Abstractions;
+using OptionsFactory = Microsoft.Extensions.Options.Options;
 
 namespace MessageService.Tests.Controllers;
 
 // 端到端行為（含真實 DirectIngestSink＋資料庫、認證中介層）已在 DeploymentModeTests 用真實
-// host 驗證；這裡只單獨測 controller 對 IIngestSink 例外的映射邏輯，用 FakeIngestSink
-// 模擬 DirectIngestSinkTests 已經釘住的「暫時性失敗會往外拋」這個契約在 HTTP 層怎麼呈現。
+// host 驗證；這裡單獨測 controller 對 IIngestSink 例外的映射邏輯、IngestSideEffects 有沒有被
+// 正確呼叫、以及 Stage 3 新增端點（content-work／profiles）對 IContentWorkSource／IProfileStore
+// 的轉發是否正確——用 Fake 依賴隔開，不需要真的資料庫或 HTTP。
 public class IngestControllerTests
 {
     private static IngestEnvelope SampleEnvelope() => new(
@@ -26,26 +29,40 @@ public class IngestControllerTests
         HasContent: false,
         ContentFileName: null);
 
+    private static IngestController CreateController(
+        IIngestSink? sink = null,
+        FakeContentWorkSource? contentWorkSource = null,
+        FakeProfileStore? profileStore = null,
+        FakeContentDownloadQueue? downloadQueue = null,
+        FakeProfileRefreshQueue? profileRefreshQueue = null) =>
+        new(
+            sink ?? new FakeIngestSink(),
+            contentWorkSource ?? new FakeContentWorkSource(),
+            profileStore ?? new FakeProfileStore(),
+            downloadQueue ?? new FakeContentDownloadQueue(),
+            profileRefreshQueue ?? new FakeProfileRefreshQueue(),
+            OptionsFactory.Create(new IngestOptions()),
+            NullLogger<IngestController>.Instance);
+
+    // === POST events ===
+
     [Fact]
     public async Task SubmitEvent_SinkSucceeds_ReturnsOk()
     {
         var sink = new FakeIngestSink();
-        var controller = new IngestController(sink, NullLogger<IngestController>.Instance);
+        var controller = CreateController(sink: sink);
 
         var result = await controller.SubmitEvent(SampleEnvelope(), CancellationToken.None);
 
-        Assert.IsType<OkResult>(result);
+        Assert.IsType<OkObjectResult>(result);
         Assert.Single(sink.Submitted);
     }
 
     [Fact]
     public async Task SubmitEvent_SinkThrows_Returns500()
     {
-        // 對應 DirectIngestSink 判定「暫時性失敗」時往外拋的情境——這裡驗證它會變成
-        // Line 端的 HttpIngestSink 認得出來的「可重試」狀態碼（見 HttpIngestSinkTests
-        // 對非 400 狀態碼一律當可重試的斷言）
         var sink = new FakeIngestSink { ThrowOnNextSubmit = new InvalidOperationException("db unreachable") };
-        var controller = new IngestController(sink, NullLogger<IngestController>.Instance);
+        var controller = CreateController(sink: sink);
 
         var result = await controller.SubmitEvent(SampleEnvelope(), CancellationToken.None);
 
@@ -56,12 +73,134 @@ public class IngestControllerTests
     [Fact]
     public async Task SubmitEvent_SinkThrowsOperationCanceled_PropagatesRatherThanReturning500()
     {
-        // 停機取消不是「這筆處理失敗」，是請求本身被中止——讓例外照 ASP.NET Core 正常管線
-        // 處理（通常轉譯為連線中止），不應該包裝成看起來像業務邏輯失敗的 500
         var sink = new FakeIngestSink { ThrowOnNextSubmit = new OperationCanceledException() };
-        var controller = new IngestController(sink, NullLogger<IngestController>.Instance);
+        var controller = CreateController(sink: sink);
 
         await Assert.ThrowsAsync<OperationCanceledException>(
             () => controller.SubmitEvent(SampleEnvelope(), CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task SubmitEvent_ResultHasContentId_ResponseBodyIncludesIt()
+    {
+        var sink = new FakeIngestSink { NextContentId = 7 };
+        var controller = CreateController(sink: sink);
+
+        var result = await controller.SubmitEvent(SampleEnvelope(), CancellationToken.None);
+
+        var ok = Assert.IsType<OkObjectResult>(result);
+        var body = Assert.IsType<IngestEventResponse>(ok.Value);
+        Assert.Equal(7, body.ContentId);
+    }
+
+    [Fact]
+    public async Task SubmitEvent_ResultHasContentId_EnqueuesOnThisHostsOwnQueue()
+    {
+        // 這台主機（Db 端）自己要不要接手，取決於它自己的 IContentDownloadQueue 是不是 Null——
+        // 這裡用真的（Fake）佇列驗證 IngestSideEffects 真的被呼叫到
+        var sink = new FakeIngestSink { NextContentId = 7 };
+        var downloadQueue = new FakeContentDownloadQueue();
+        var controller = CreateController(sink: sink, downloadQueue: downloadQueue);
+
+        await controller.SubmitEvent(SampleEnvelope(), CancellationToken.None);
+
+        Assert.Equal(7, Assert.Single(downloadQueue.Enqueued));
+    }
+
+    // === content-work ===
+
+    [Fact]
+    public async Task GetContentWork_ReturnsPendingIdsFromSource()
+    {
+        var source = new FakeContentWorkSource { PendingIds = [1, 2, 3] };
+        var controller = CreateController(contentWorkSource: source);
+
+        var result = await controller.GetContentWork(CancellationToken.None);
+
+        var ok = Assert.IsType<OkObjectResult>(result.Result);
+        Assert.Equal(new long[] { 1, 2, 3 }, Assert.IsAssignableFrom<IReadOnlyList<long>>(ok.Value));
+    }
+
+    [Fact]
+    public async Task GetContentWorkItem_Exists_ReturnsOk()
+    {
+        var item = new ContentWorkItem(5, "line-msg-5", "image");
+        var source = new FakeContentWorkSource();
+        source.Items[5] = item;
+        var controller = CreateController(contentWorkSource: source);
+
+        var result = await controller.GetContentWorkItem(5, CancellationToken.None);
+
+        var ok = Assert.IsType<OkObjectResult>(result.Result);
+        Assert.Equal(item, ok.Value);
+    }
+
+    [Fact]
+    public async Task GetContentWorkItem_MissingOrNotPending_ReturnsNotFound()
+    {
+        var controller = CreateController(contentWorkSource: new FakeContentWorkSource());
+
+        var result = await controller.GetContentWorkItem(999, CancellationToken.None);
+
+        Assert.IsType<NotFoundResult>(result.Result);
+    }
+
+    [Fact]
+    public async Task MarkContentFailed_DelegatesToSource()
+    {
+        var source = new FakeContentWorkSource();
+        var controller = CreateController(contentWorkSource: source);
+
+        var result = await controller.MarkContentFailed(5, CancellationToken.None);
+
+        Assert.IsType<NoContentResult>(result);
+        Assert.Equal(5, Assert.Single(source.Failed));
+    }
+
+    // === profiles ===
+
+    [Fact]
+    public async Task GetProfileStaleness_DelegatesToStore()
+    {
+        var store = new FakeProfileStore { StalenessToReturn = new ProfileStaleness(true, false) };
+        var controller = CreateController(profileStore: store);
+
+        var result = await controller.GetProfileStaleness("G1", "U1", DateTimeOffset.UtcNow, CancellationToken.None);
+
+        var ok = Assert.IsType<OkObjectResult>(result.Result);
+        var staleness = Assert.IsType<ProfileStaleness>(ok.Value);
+        Assert.True(staleness.GroupStale);
+        Assert.False(staleness.MemberStale);
+    }
+
+    [Fact]
+    public async Task UpsertGroupProfile_DelegatesToStore()
+    {
+        var store = new FakeProfileStore();
+        var controller = CreateController(profileStore: store);
+        var summary = new GroupSummary("G1", "群組名", "https://example/pic.png");
+
+        var result = await controller.UpsertGroupProfile(summary, CancellationToken.None);
+
+        Assert.IsType<NoContentResult>(result);
+        var (groupId, saved) = Assert.Single(store.UpsertedGroups);
+        Assert.Equal("G1", groupId);
+        Assert.Equal(summary, saved);
+    }
+
+    [Fact]
+    public async Task UpsertMemberProfile_DelegatesToStore()
+    {
+        var store = new FakeProfileStore();
+        var controller = CreateController(profileStore: store);
+        var profile = new MemberProfile("U1", "顯示名", "https://example/pic.png");
+
+        var result = await controller.UpsertMemberProfile(new MemberUpsertRequest("G1", profile), CancellationToken.None);
+
+        Assert.IsType<NoContentResult>(result);
+        var (groupId, userId, saved) = Assert.Single(store.UpsertedMembers);
+        Assert.Equal("G1", groupId);
+        Assert.Equal("U1", userId);
+        Assert.Equal(profile, saved);
     }
 }

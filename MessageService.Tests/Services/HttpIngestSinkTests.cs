@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.Http.Json;
 using MessageService.Options;
 using MessageService.Services;
 using MessageService.Tests.TestSupport;
@@ -31,10 +32,15 @@ public class HttpIngestSinkTests
         return (sink, handler);
     }
 
+    private static HttpResponseMessage OkWithBody(long? contentId = null) => new(HttpStatusCode.OK)
+    {
+        Content = JsonContent.Create(new IngestEventResponse(contentId))
+    };
+
     [Fact]
     public async Task SubmitAsync_2xxResponse_ReturnsNormally()
     {
-        var (sink, _) = CreateSink(_ => new HttpResponseMessage(HttpStatusCode.OK));
+        var (sink, _) = CreateSink(_ => OkWithBody());
 
         var ex = await Record.ExceptionAsync(() => sink.SubmitAsync(SampleEnvelope(), CancellationToken.None));
 
@@ -42,9 +48,29 @@ public class HttpIngestSinkTests
     }
 
     [Fact]
+    public async Task SubmitAsync_2xxResponse_ReturnsContentIdFromBody()
+    {
+        var (sink, _) = CreateSink(_ => OkWithBody(contentId: 42));
+
+        var result = await sink.SubmitAsync(SampleEnvelope(), CancellationToken.None);
+
+        Assert.Equal(42, result.ContentId);
+    }
+
+    [Fact]
+    public async Task SubmitAsync_2xxResponse_NoContentId_ReturnsNullContentId()
+    {
+        var (sink, _) = CreateSink(_ => OkWithBody());
+
+        var result = await sink.SubmitAsync(SampleEnvelope(), CancellationToken.None);
+
+        Assert.Null(result.ContentId);
+    }
+
+    [Fact]
     public async Task SubmitAsync_SendsCorrectPathAndApiKeyHeader()
     {
-        var (sink, handler) = CreateSink(_ => new HttpResponseMessage(HttpStatusCode.OK), apiKey: "the-shared-secret");
+        var (sink, handler) = CreateSink(_ => OkWithBody(), apiKey: "the-shared-secret");
 
         await sink.SubmitAsync(SampleEnvelope(), CancellationToken.None);
 

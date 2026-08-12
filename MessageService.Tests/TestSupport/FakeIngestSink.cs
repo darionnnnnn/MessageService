@@ -10,7 +10,11 @@ public class FakeIngestSink : IIngestSink
     /// 用來驗證 OutboxForwarderService 的重試/退避行為。</summary>
     public Exception? ThrowOnNextSubmit { get; set; }
 
-    public Task SubmitAsync(IngestEnvelope envelope, CancellationToken cancellationToken)
+    /// <summary>下一次（且只有下一次）成功的 SubmitAsync 要回傳的 ContentId——預設 null
+    /// （純文字訊息）；測試媒體訊息／IngestSideEffects 入列行為時可以指定。</summary>
+    public long? NextContentId { get; set; }
+
+    public Task<IngestResult> SubmitAsync(IngestEnvelope envelope, CancellationToken cancellationToken)
     {
         if (ThrowOnNextSubmit is { } ex)
         {
@@ -19,6 +23,8 @@ public class FakeIngestSink : IIngestSink
         }
 
         Submitted.Add(envelope);
-        return Task.CompletedTask;
+        var result = new IngestResult(NextContentId);
+        NextContentId = null;
+        return Task.FromResult(result);
     }
 }

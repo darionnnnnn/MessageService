@@ -1,12 +1,11 @@
-using MessageService.Data;
-using MessageService.Models;
 using MessageService.Options;
-using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 
 namespace MessageService.Services;
 
+/// <summary>資料存取全部透過 IProfileStore（Full／Db 模式查本機 DB，Line 模式打 ingest API）——
+/// 這裡只保留「查 TTL → 打 LINE → 過期才 upsert」的流程本身，不直接碰任何資料庫或 HTTP client。</summary>
 public class ProfileRefreshService(
     IProfileRefreshQueue queue,
     IServiceScopeFactory scopeFactory,
@@ -34,28 +33,28 @@ public class ProfileRefreshService(
     public async Task ProcessAsync(ProfileRefreshTask task, CancellationToken cancellationToken)
     {
         using var scope = scopeFactory.CreateScope();
-        var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+        var profileStore = scope.ServiceProvider.GetRequiredService<IProfileStore>();
         var profileClient = scope.ServiceProvider.GetRequiredService<ILineProfileClient>();
         var cutoff = DateTimeOffset.UtcNow - _options.RefreshAfter;
 
-        await RefreshGroupAsync(dbContext, profileClient, task.GroupId, cutoff, cancellationToken);
+        // 一次查完群組與成員的 staleness——TTL 判斷一定要在打 LINE API 之前完成才省得到配額，
+        // 這也是 IProfileStore 把 staleness 跟 upsert 拆成兩支方法的理由
+        var staleness = await profileStore.GetStalenessAsync(task.GroupId, task.UserId, cutoff, cancellationToken);
 
-        if (task.UserId is not null)
+        if (staleness.GroupStale)
         {
-            await RefreshMemberAsync(dbContext, profileClient, task.GroupId, task.UserId, cutoff, cancellationToken);
+            await RefreshGroupAsync(profileStore, profileClient, task.GroupId, cancellationToken);
+        }
+
+        if (task.UserId is not null && staleness.MemberStale)
+        {
+            await RefreshMemberAsync(profileStore, profileClient, task.GroupId, task.UserId, cancellationToken);
         }
     }
 
     private async Task RefreshGroupAsync(
-        MessageDbContext dbContext, ILineProfileClient profileClient, string groupId,
-        DateTimeOffset cutoff, CancellationToken cancellationToken)
+        IProfileStore profileStore, ILineProfileClient profileClient, string groupId, CancellationToken cancellationToken)
     {
-        var existing = await dbContext.Groups.FindAsync([groupId], cancellationToken);
-        if (existing is not null && existing.UpdatedAt >= cutoff)
-        {
-            return;
-        }
-
         var summary = await profileClient.GetGroupSummaryAsync(groupId, cancellationToken);
         if (summary is null)
         {
@@ -63,36 +62,12 @@ public class ProfileRefreshService(
             return;
         }
 
-        if (existing is null)
-        {
-            dbContext.Groups.Add(new Group
-            {
-                GroupId = groupId,
-                GroupName = summary.GroupName,
-                PictureUrl = summary.PictureUrl,
-                UpdatedAt = DateTimeOffset.UtcNow
-            });
-        }
-        else
-        {
-            existing.GroupName = summary.GroupName;
-            existing.PictureUrl = summary.PictureUrl;
-            existing.UpdatedAt = DateTimeOffset.UtcNow;
-        }
-
-        await dbContext.SaveChangesAsync(cancellationToken);
+        await profileStore.UpsertGroupAsync(groupId, summary, cancellationToken);
     }
 
     private async Task RefreshMemberAsync(
-        MessageDbContext dbContext, ILineProfileClient profileClient, string groupId, string userId,
-        DateTimeOffset cutoff, CancellationToken cancellationToken)
+        IProfileStore profileStore, ILineProfileClient profileClient, string groupId, string userId, CancellationToken cancellationToken)
     {
-        var existing = await dbContext.GroupMembers.FindAsync([groupId, userId], cancellationToken);
-        if (existing is not null && existing.UpdatedAt >= cutoff)
-        {
-            return;
-        }
-
         var profile = await profileClient.GetGroupMemberProfileAsync(groupId, userId, cancellationToken);
         if (profile is null)
         {
@@ -100,24 +75,6 @@ public class ProfileRefreshService(
             return;
         }
 
-        if (existing is null)
-        {
-            dbContext.GroupMembers.Add(new GroupMember
-            {
-                GroupId = groupId,
-                UserId = userId,
-                DisplayName = profile.DisplayName,
-                PictureUrl = profile.PictureUrl,
-                UpdatedAt = DateTimeOffset.UtcNow
-            });
-        }
-        else
-        {
-            existing.DisplayName = profile.DisplayName;
-            existing.PictureUrl = profile.PictureUrl;
-            existing.UpdatedAt = DateTimeOffset.UtcNow;
-        }
-
-        await dbContext.SaveChangesAsync(cancellationToken);
+        await profileStore.UpsertMemberAsync(groupId, userId, profile, cancellationToken);
     }
 }

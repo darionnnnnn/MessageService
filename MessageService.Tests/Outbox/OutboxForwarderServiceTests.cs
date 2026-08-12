@@ -15,6 +15,8 @@ public class OutboxForwarderServiceTests : IDisposable
     private readonly SqliteConnection _connection;
     private readonly ServiceProvider _provider;
     private readonly FakeIngestSink _sink = new();
+    private readonly FakeContentDownloadQueue _downloadQueue = new();
+    private readonly FakeProfileRefreshQueue _profileRefreshQueue = new();
 
     public OutboxForwarderServiceTests()
     {
@@ -39,6 +41,8 @@ public class OutboxForwarderServiceTests : IDisposable
         new(
             _provider.GetRequiredService<IServiceScopeFactory>(),
             new FakeOutboxSignal(),
+            _downloadQueue,
+            _profileRefreshQueue,
             OptionsFactory.Create(options ?? new OutboxOptions
             {
                 BatchSize = 50,
@@ -109,6 +113,33 @@ public class OutboxForwarderServiceTests : IDisposable
         var submitted = Assert.Single(_sink.Submitted);
         Assert.Equal("evt-1", submitted.WebhookEventId);
         Assert.Empty(await GetRemainingEntriesAsync());
+    }
+
+    [Fact]
+    public async Task ProcessBatchAsync_SinkReturnsContentId_EnqueuesLocalDownload()
+    {
+        // Stage 3：forwarder 拿到 IngestResult 後要用「這台主機自己的」佇列呼叫
+        // IngestSideEffects——這是拆機模式下 Line 端知道要下載哪筆媒體的唯一管道
+        _sink.NextContentId = 99;
+        await SeedEntryAsync(SampleEnvelope("evt-media"));
+        var forwarder = CreateForwarder();
+
+        await forwarder.ProcessBatchAsync(CancellationToken.None);
+
+        Assert.Equal(99, Assert.Single(_downloadQueue.Enqueued));
+    }
+
+    [Fact]
+    public async Task ProcessBatchAsync_TextMessage_DoesNotEnqueueDownloadButEnqueuesProfileRefresh()
+    {
+        await SeedEntryAsync(SampleEnvelope("evt-text"));
+        var forwarder = CreateForwarder();
+
+        await forwarder.ProcessBatchAsync(CancellationToken.None);
+
+        Assert.Empty(_downloadQueue.Enqueued);
+        var task = Assert.Single(_profileRefreshQueue.Enqueued);
+        Assert.Equal("G1", task.GroupId); // SampleEnvelope 的預設 GroupId
     }
 
     [Fact]

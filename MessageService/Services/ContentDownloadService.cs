@@ -1,12 +1,11 @@
-using MessageService.Data;
-using MessageService.Models;
 using MessageService.Options;
-using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 
 namespace MessageService.Services;
 
+/// <summary>資料存取全部透過 IContentWorkSource（Full／Db 模式查本機 DB，Line 模式打
+/// ingest API）——這裡只保留下載重試／轉檔等待的流程本身，不直接碰任何資料庫。</summary>
 public class ContentDownloadService(
     IContentDownloadQueue queue,
     IServiceScopeFactory scopeFactory,
@@ -17,7 +16,7 @@ public class ContentDownloadService(
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        // 啟動接續失敗（例如 DB 還沒就緒）不能讓例外冒出 ExecuteAsync，
+        // 啟動接續失敗（例如 DB／ingest API 還沒就緒）不能讓例外冒出 ExecuteAsync，
         // 否則 BackgroundServiceExceptionBehavior.StopHost 會關掉整個服務；
         // 漏掉的 Pending 會在下次服務重啟時再被撈回
         try
@@ -45,65 +44,41 @@ public class ContentDownloadService(
     public async Task RequeuePendingAsync(CancellationToken cancellationToken)
     {
         using var scope = scopeFactory.CreateScope();
-        var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+        var workSource = scope.ServiceProvider.GetRequiredService<IContentWorkSource>();
 
-        // Failed 也一併重排：常見成因是設定錯誤（例如 access token 打錯）而非內容本身有問題，
-        // 修好設定重啟服務後應該自動補跑，不需要手動改 DB
-        var contents = await dbContext.MessageContents
-            .Where(c => c.DownloadStatus == DownloadStatus.Pending || c.DownloadStatus == DownloadStatus.Failed)
-            .ToListAsync(cancellationToken);
-
-        var failedCount = 0;
-        foreach (var content in contents)
+        var pendingIds = await workSource.GetPendingIdsAsync(cancellationToken);
+        foreach (var contentId in pendingIds)
         {
-            if (content.DownloadStatus == DownloadStatus.Failed)
-            {
-                content.DownloadStatus = DownloadStatus.Pending;
-                failedCount++;
-            }
-            queue.Enqueue(content.Id);
+            queue.Enqueue(contentId);
         }
 
-        if (failedCount > 0)
+        if (pendingIds.Count > 0)
         {
-            await dbContext.SaveChangesAsync(cancellationToken);
-        }
-
-        if (contents.Count > 0)
-        {
-            logger.LogInformation(
-                "Requeued {Count} content downloads from previous run ({FailedCount} previously failed)",
-                contents.Count, failedCount);
+            logger.LogInformation("Requeued {Count} content downloads from previous run", pendingIds.Count);
         }
     }
 
     public async Task ProcessAsync(long messageContentId, CancellationToken cancellationToken)
     {
         using var scope = scopeFactory.CreateScope();
-        var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+        var workSource = scope.ServiceProvider.GetRequiredService<IContentWorkSource>();
         var contentClient = scope.ServiceProvider.GetRequiredService<ILineContentClient>();
 
-        var content = await dbContext.MessageContents
-            .Include(c => c.GroupMessage)
-            .FirstOrDefaultAsync(c => c.Id == messageContentId, cancellationToken);
-
-        if (content?.GroupMessage is null || content.DownloadStatus != DownloadStatus.Pending)
+        var item = await workSource.GetAsync(messageContentId, cancellationToken);
+        if (item is null)
         {
             return;
         }
 
-        var lineMessageId = content.GroupMessage.LineMessageId;
-
         // 影片與語音在 LINE 端都要等轉檔完成才能下載原檔，圖片/檔案不需要
-        if (content.GroupMessage.MessageType is "video" or "audio")
+        if (item.MessageType is "video" or "audio")
         {
-            var transcoded = await WaitForTranscodingAsync(contentClient, lineMessageId, cancellationToken);
+            var transcoded = await WaitForTranscodingAsync(contentClient, item.LineMessageId, cancellationToken);
             if (!transcoded)
             {
                 logger.LogWarning("Transcoding did not succeed for message {LineMessageId}, marking content {MessageContentId} as Failed",
-                    lineMessageId, messageContentId);
-                content.DownloadStatus = DownloadStatus.Failed;
-                await dbContext.SaveChangesAsync(cancellationToken);
+                    item.LineMessageId, messageContentId);
+                await workSource.FailAsync(messageContentId, cancellationToken);
                 return;
             }
         }
@@ -112,14 +87,10 @@ public class ContentDownloadService(
         {
             try
             {
-                var result = await contentClient.GetContentAsync(lineMessageId, cancellationToken);
-                content.Content = result.Content;
-                content.ContentType = result.ContentType;
-                content.DownloadStatus = DownloadStatus.Completed;
-                content.CompletedAt = DateTimeOffset.UtcNow;
-                await dbContext.SaveChangesAsync(cancellationToken);
+                var result = await contentClient.GetContentAsync(item.LineMessageId, cancellationToken);
+                await workSource.CompleteAsync(messageContentId, result.Content, result.ContentType, cancellationToken);
                 logger.LogInformation("Downloaded content {MessageContentId} for message {LineMessageId} ({Bytes} bytes, {ContentType})",
-                    messageContentId, lineMessageId, result.Content.Length, result.ContentType);
+                    messageContentId, item.LineMessageId, result.Content.Length, result.ContentType);
                 return;
             }
             // 停機取消不是下載失敗：往外拋讓內容維持 Pending，重啟後由啟動接續補跑
@@ -141,8 +112,7 @@ public class ContentDownloadService(
 
         logger.LogError("All {MaxRetries} download attempts failed for message content {MessageContentId}, marking as Failed",
             _options.MaxRetries, messageContentId);
-        content.DownloadStatus = DownloadStatus.Failed;
-        await dbContext.SaveChangesAsync(cancellationToken);
+        await workSource.FailAsync(messageContentId, cancellationToken);
     }
 
     private async Task<bool> WaitForTranscodingAsync(ILineContentClient contentClient, string lineMessageId, CancellationToken cancellationToken)

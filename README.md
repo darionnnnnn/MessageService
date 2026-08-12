@@ -25,9 +25,9 @@ MessageService.sln
 bot 加入群組後，透過 LINE webhook 接收群組內的訊息並寫入資料庫。職責只有三件事：**收 webhook → 落地資料庫 → 每日清除逾期資料**，不提供查詢 API。
 
 支援三種部署模式（`Deployment:Mode`：`Full`／`Line`／`Db`），因應收 webhook 的主機未必碰得到
-資料庫的情況；預設 `Full` 就是下面這張圖。`Line`／`Db` 拆機模式的訊息收送（webhook → 本機
-outbox → `HttpIngestSink` 打對方的 ingest API → 落地）已端到端驗證可用，**媒體下載與頭貼快取
-目前仍只能在有資料庫存取的主機執行**（拆機後這兩件事在 `Line` 端暫時做不了），
+資料庫的情況；預設 `Full` 就是下面這張圖。三種模式**功能完全對等**（訊息收送、媒體下載、
+頭貼快取皆已用真實雙行程端到端驗證過，差別只在資料流經過幾台機器），媒體下載與頭貼快取
+獨立於模式、只看 `Line:OutboundHere` 這台主機要不要對外連 LINE，
 詳見 [docs/DEPLOYMENT-MODES.md](docs/DEPLOYMENT-MODES.md)。
 
 ### 架構（`Full` 模式）
@@ -276,7 +276,7 @@ ASPNETCORE_ENVIRONMENT=Production dotnet ef database update --project MessageSer
 dotnet test
 ```
 
-- `MessageService.Tests`：webhook 事件解析（五種型別分流含 audio、過濾規則）、outbox 落地（`DirectIngestSink` 的防重送——`WebhookEventId` 唯一索引、撞鍵與暫時性儲存失敗以回查分辨〔前者當重複成功、後者拋回 outbox 重試不掉訊息〕、change tracker 不污染同批後續、各型別存檔行為）、outbox 排空（到期判斷、批次上限、失敗退避與封頂、單筆失敗不影響同批其他筆、死信〔達 MaxAttempts 或永久性失敗即停止重試但不刪資料、死信項目不再被撿起〕）、outbox schema 升級（既有 outbox.db 補 DeadLetteredAt 欄位不動既有資料、新舊 schema 皆冪等）、部署模式（convention 單元行為＋真實 host 整合驗證：三模式路由閘門、Line／Db 啟動驗證缺漏擋下、ingest API 認證〔缺金鑰 404／錯金鑰 401／IP 不在白名單 403／正確金鑰經真實 DirectIngestSink 寫入並確認去重〕）、`HttpIngestSink`（狀態碼分流：2xx 成功、400 永久失敗、其餘與連線層錯誤皆可重試）、背景下載（成功/轉檔輪詢/轉檔失敗/重試耗盡/啟動接續）、群組/成員名稱快取（新增/過期更新/API 失敗 fallback）、保留期清除（含 CASCADE 驗證）、Controller 整合測試（401/200/畸形 body 仍 200、webhook 經真實 outbox＋背景排空落地資料庫）
+- `MessageService.Tests`：webhook 事件解析（五種型別分流含 audio、過濾規則）、outbox 落地（`DirectIngestSink` 的防重送——`WebhookEventId` 唯一索引、撞鍵與暫時性儲存失敗以回查分辨〔前者當重複成功、後者拋回 outbox 重試不掉訊息〕、change tracker 不污染同批後續、各型別存檔行為、重複情境也正確回傳既有 ContentId）、outbox 排空（到期判斷、批次上限、失敗退避與封頂、單筆失敗不影響同批其他筆、死信〔達 MaxAttempts 或永久性失敗即停止重試但不刪資料、死信項目不再被撿起〕、成功後依 IngestSideEffects 決定要不要入列本機佇列）、outbox schema 升級（既有 outbox.db 補 DeadLetteredAt 欄位不動既有資料、新舊 schema 皆冪等）、部署模式（convention 單元行為＋真實 host 整合驗證：三模式路由閘門、Line／Db 啟動驗證缺漏擋下、OutboundHere 與 ChannelAccessToken 的啟動驗證、ingest API 認證〔缺金鑰 404／錯金鑰 401／IP 不在白名單 403／正確金鑰經真實 DirectIngestSink 寫入並確認去重〕、content-work 與 profiles 端點的真實 HTTP 生命週期）、`HttpIngestSink`（狀態碼分流：2xx 成功並解析回應帶出 ContentId、400 永久失敗、其餘與連線層錯誤皆可重試）、`IContentWorkSource`／`IProfileStore` 兩套實作、Null 佇列（入列後 ReadAllAsync 永不產出）、`IngestSideEffects`（依 ContentId 有無決定要不要入列、Null 佇列搭配無錯誤）、**兩套 IIngestSink 落地路徑的等價性測試**（同一 envelope 分別走 DirectIngestSink 與 HttpIngestSink→真實 Db 模式 host，斷言產生的 GroupMessages／MessageContents 完全相同，含重複送出時兩邊都回傳同一個 ContentId）、背景下載（成功/轉檔輪詢/轉檔失敗/重試耗盡/啟動接續）、群組/成員名稱快取（新增/過期更新/API 失敗 fallback）、保留期清除（含 CASCADE 驗證）、Controller 整合測試（401/200/畸形 body 仍 200、webhook 經真實 outbox＋背景排空落地資料庫）
 - `MessageService.Web.Tests`：Groups/Messages API（分頁游標、hasMore、空視窗仍回 latestId、沉寂期長於視窗仍能翻頁、遮蔽套用、側欄未讀數〔依 `?read=` 基準計數、上限 100、畸形參數容錯、未帶參數為 0〕）、內容串流（200/206/416/malformed Range）、Settings API（CRUD、群組範圍替換、單列設定被刪後補建）、`MaskingService`/`MaskingRuleSet`（含名稱遮蔽邊界情況）、IP 白名單 middleware（允許/拒絕/空白名單/CIDR）
 
 測試都使用 SQLite（in-memory 或暫存檔），Web 端整合測試用 `IStartupFilter` 在 TestServer 補一個固定來源 IP（TestServer 的請求沒有真正 TCP 連線，`Connection.RemoteIpAddress` 預設是 null）。
