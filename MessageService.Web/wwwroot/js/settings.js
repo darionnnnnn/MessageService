@@ -245,6 +245,68 @@
         }
     }
 
+    // === 個資自動遮蔽（身分證／手機／市話／健保卡，格式比對，跟關鍵字規則是互補的兩層）===
+
+    async function loadPiiMaskingSettings() {
+        const settings = await fetchJson('/api/settings/pii-masking');
+        els.piiNationalIdToggle.checked = settings.maskNationalId;
+        els.piiMobileToggle.checked = settings.maskMobilePhone;
+        els.piiLandlineToggle.checked = settings.maskLandline;
+        els.piiNhiToggle.checked = settings.maskNhiCard;
+    }
+
+    async function handlePiiMaskingChange() {
+        try {
+            await fetchJson('/api/settings/pii-masking', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    maskNationalId: els.piiNationalIdToggle.checked,
+                    maskMobilePhone: els.piiMobileToggle.checked,
+                    maskLandline: els.piiLandlineToggle.checked,
+                    maskNhiCard: els.piiNhiToggle.checked
+                })
+            });
+            settingsDirty = true;
+            showToast('個資遮蔽設定已更新');
+        } catch {
+            showToast('更新失敗', true);
+        }
+    }
+
+    // === 訊息保留天數：不可逆操作，送出前要求二次確認（見 SettingsController 的說明）===
+
+    async function loadRetentionSettings() {
+        const settings = await fetchJson('/api/settings/retention');
+        els.retentionDaysInput.value = settings.retentionDays;
+    }
+
+    async function handleRetentionSave() {
+        const days = parseInt(els.retentionDaysInput.value, 10);
+        if (!Number.isFinite(days) || days < 1 || days > 3650) {
+            showToast('保留天數必須是 1～3650 之間的整數', true);
+            return;
+        }
+
+        const confirmed = window.confirm(
+            `確定要把保留天數改成 ${days} 天嗎？超過這個天數的訊息會在下次排程清除時永久刪除，無法復原。`);
+        if (!confirmed) {
+            return;
+        }
+
+        try {
+            await fetchJson('/api/settings/retention', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ retentionDays: days })
+            });
+            settingsDirty = true;
+            showToast('保留天數已更新');
+        } catch {
+            showToast('更新失敗', true);
+        }
+    }
+
     // === 字體大小（跟對話頁共用同一份 localStorage key，這裡改了對話頁下次開啟也會吃到；
     //     對話頁的「中」檔＝這裡設定的數值，「小」「大」依既有比例跟著調整） ===
 
@@ -347,6 +409,12 @@
         els.aliasEditor = $('alias-editor');
         els.aliasGroupFilter = $('alias-group-filter');
         els.aliasTbody = $('alias-tbody');
+        els.piiNationalIdToggle = $('pii-national-id-toggle');
+        els.piiMobileToggle = $('pii-mobile-toggle');
+        els.piiLandlineToggle = $('pii-landline-toggle');
+        els.piiNhiToggle = $('pii-nhi-toggle');
+        els.retentionDaysInput = $('retention-days-input');
+        els.retentionSaveBtn = $('retention-save-btn');
         els.settingsModal = $('settings-modal');
         els.settingsModalBody = $('settings-modal-body');
     }
@@ -364,6 +432,11 @@
         document.querySelectorAll('input[name="display-mode"]').forEach(
             radio => radio.addEventListener('change', handleDisplayModeChange));
         els.aliasGroupFilter.addEventListener('change', loadAliasEditor);
+
+        for (const toggle of [els.piiNationalIdToggle, els.piiMobileToggle, els.piiLandlineToggle, els.piiNhiToggle]) {
+            toggle.addEventListener('change', handlePiiMaskingChange);
+        }
+        els.retentionSaveBtn.addEventListener('click', handleRetentionSave);
 
         // 換分頁時把捲動位置歸零；不然上一個分頁捲很深時，切過去的新分頁會被卡在
         // 同一個捲動位置，內容被卡在畫面外
@@ -409,7 +482,7 @@
             els.aliasGroupFilter.appendChild(opt);
         }
 
-        await Promise.all([loadKeywords(), loadDisplaySettings()]);
+        await Promise.all([loadKeywords(), loadDisplaySettings(), loadPiiMaskingSettings(), loadRetentionSettings()]);
     }
 
     function init() {
