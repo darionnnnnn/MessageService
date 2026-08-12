@@ -21,13 +21,26 @@ public class LineContentClient : ILineContentClient
 
     public async Task<LineContentResult> GetContentAsync(string messageId, CancellationToken cancellationToken)
     {
-        using var response = await _httpClient.GetAsync(
-            $"v2/bot/message/{messageId}/content", cancellationToken);
-        response.EnsureSuccessStatusCode();
+        // ResponseHeadersRead：不等整個 body 到齊就回傳，讓下面直接串流讀取 body，
+        // 不在這裡把可達數百 MB 的影片／檔案整份讀進記憶體
+        var response = await _httpClient.GetAsync(
+            $"v2/bot/message/{messageId}/content", HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+        try
+        {
+            response.EnsureSuccessStatusCode();
 
-        var bytes = await response.Content.ReadAsByteArrayAsync(cancellationToken);
-        var contentType = response.Content.Headers.ContentType?.MediaType;
-        return new LineContentResult(bytes, contentType);
+            var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            var contentType = response.Content.Headers.ContentType?.MediaType;
+            var contentLength = response.Content.Headers.ContentLength;
+            // response 要活到呼叫端讀完 stream 為止（見 LineContentResult.DisposeAsync），
+            // 這裡刻意不用 using
+            return new LineContentResult(stream, contentType, contentLength, response);
+        }
+        catch
+        {
+            response.Dispose();
+            throw;
+        }
     }
 
     public async Task<TranscodingStatus> GetTranscodingStatusAsync(string messageId, CancellationToken cancellationToken)

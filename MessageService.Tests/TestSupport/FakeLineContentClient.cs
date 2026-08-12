@@ -8,7 +8,7 @@ public class FakeLineContentClient : ILineContentClient
     public List<string> TranscodingCalls { get; } = [];
 
     public Func<string, Task<LineContentResult>> OnGetContent { get; set; } =
-        _ => Task.FromResult(new LineContentResult([1, 2, 3], "application/octet-stream"));
+        _ => Task.FromResult(new LineContentResult(new MemoryStream([1, 2, 3]), "application/octet-stream", 3));
 
     public Func<string, Task<TranscodingStatus>> OnGetTranscodingStatus { get; set; } =
         _ => Task.FromResult(TranscodingStatus.Succeeded);

@@ -81,10 +81,14 @@ public class IngestController(
             sizeFeature.MaxRequestBodySize = ingestOptions.Value.MaxContentBytes;
         }
 
-        using var memoryStream = new MemoryStream();
-        await Request.Body.CopyToAsync(memoryStream, cancellationToken);
+        // 直接把 Request.Body 交給 work source 串流寫入，不再整份讀進記憶體組 byte[]；
+        // 呼叫端（ApiContentWorkSource）一律會帶 Content-Length，見該類別的說明
+        if (Request.ContentLength is not { } contentLength)
+        {
+            return BadRequest("Content-Length header is required.");
+        }
 
-        await contentWorkSource.CompleteAsync(id, memoryStream.ToArray(), Request.ContentType, cancellationToken);
+        await contentWorkSource.CompleteAsync(id, Request.Body, contentLength, Request.ContentType, cancellationToken);
         return NoContent();
     }
 

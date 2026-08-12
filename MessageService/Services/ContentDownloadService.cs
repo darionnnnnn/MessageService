@@ -28,6 +28,16 @@ public class ContentDownloadService(
             logger.LogError(ex, "Failed to requeue pending downloads at startup");
         }
 
+        // 多個 worker 共讀同一個 Channel（ChannelReader 天生支援多讀者，每筆項目只會被
+        // 其中一個 worker 拿到）：一支大檔案要等轉檔的期間，其他 worker 仍能繼續處理
+        // 排在後面的圖片/檔案，不會被整條佇列卡住
+        var workerCount = Math.Max(1, _options.MaxConcurrency);
+        var workers = Enumerable.Range(0, workerCount).Select(_ => RunWorkerAsync(stoppingToken));
+        await Task.WhenAll(workers);
+    }
+
+    private async Task RunWorkerAsync(CancellationToken stoppingToken)
+    {
         await foreach (var contentId in queue.ReadAllAsync(stoppingToken))
         {
             try
@@ -87,10 +97,10 @@ public class ContentDownloadService(
         {
             try
             {
-                var result = await contentClient.GetContentAsync(item.LineMessageId, cancellationToken);
-                await workSource.CompleteAsync(messageContentId, result.Content, result.ContentType, cancellationToken);
+                await using var result = await contentClient.GetContentAsync(item.LineMessageId, cancellationToken);
+                var bytesWritten = await CompleteFromResultAsync(workSource, messageContentId, result, cancellationToken);
                 logger.LogInformation("Downloaded content {MessageContentId} for message {LineMessageId} ({Bytes} bytes, {ContentType})",
-                    messageContentId, item.LineMessageId, result.Content.Length, result.ContentType);
+                    messageContentId, item.LineMessageId, bytesWritten, result.ContentType);
                 return;
             }
             // 停機取消不是下載失敗：往外拋讓內容維持 Pending，重啟後由啟動接續補跑
@@ -113,6 +123,30 @@ public class ContentDownloadService(
         logger.LogError("All {MaxRetries} download attempts failed for message content {MessageContentId}, marking as Failed",
             _options.MaxRetries, messageContentId);
         await workSource.FailAsync(messageContentId, cancellationToken);
+    }
+
+    /// <summary>LINE 的回應通常帶 Content-Length，直接串流交給 workSource。少數沒帶的情況下
+    /// （SQLite 的分塊寫入需要預知總長度）先落暫存檔量出實際長度，量完就砍掉，不佔用磁碟。</summary>
+    private static async Task<long> CompleteFromResultAsync(
+        IContentWorkSource workSource, long messageContentId, LineContentResult result, CancellationToken cancellationToken)
+    {
+        if (result.ContentLength is { } knownLength)
+        {
+            await workSource.CompleteAsync(messageContentId, result.Content, knownLength, result.ContentType, cancellationToken);
+            return knownLength;
+        }
+
+        var tempPath = Path.Combine(Path.GetTempPath(), $"msgsvc-content-{Guid.NewGuid():N}.tmp");
+        await using (var tempFile = new FileStream(
+            tempPath, FileMode.Create, FileAccess.ReadWrite, FileShare.None, 81920,
+            FileOptions.DeleteOnClose | FileOptions.Asynchronous))
+        {
+            await result.Content.CopyToAsync(tempFile, cancellationToken);
+            var length = tempFile.Length;
+            tempFile.Position = 0;
+            await workSource.CompleteAsync(messageContentId, tempFile, length, result.ContentType, cancellationToken);
+            return length;
+        }
     }
 
     private async Task<bool> WaitForTranscodingAsync(ILineContentClient contentClient, string lineMessageId, CancellationToken cancellationToken)

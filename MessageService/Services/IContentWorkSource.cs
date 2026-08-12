@@ -14,7 +14,10 @@ public interface IContentWorkSource
     /// 跟現行 ContentDownloadService.ProcessAsync 的狀態檢查是同一個判斷，只是搬進這裡。</summary>
     Task<ContentWorkItem?> GetAsync(long contentId, CancellationToken cancellationToken);
 
-    Task CompleteAsync(long contentId, byte[] content, string? contentType, CancellationToken cancellationToken);
+    /// <summary>contentLength 必須是 content 這個 Stream 讀到底的實際位元組數（不是預估值）——
+    /// SQLite 實作要用它先配置固定大小的 blob 再串流填入，見 DbContentWorkSource。呼叫端
+    /// （ContentDownloadService）若來源沒提供已知長度，要自行落地量出來，見該類別的說明。</summary>
+    Task CompleteAsync(long contentId, Stream content, long contentLength, string? contentType, CancellationToken cancellationToken);
 
     Task FailAsync(long contentId, CancellationToken cancellationToken);
 }

@@ -73,13 +73,30 @@ public class ApiContentWorkSourceTests
             return new HttpResponseMessage(HttpStatusCode.NoContent);
         });
 
-        await source.CompleteAsync(42, [1, 2, 3], "image/jpeg", CancellationToken.None);
+        await source.CompleteAsync(42, new MemoryStream([1, 2, 3]), 3, "image/jpeg", CancellationToken.None);
 
         Assert.Equal(HttpMethod.Put, handler.LastRequest!.Method);
         Assert.Equal("https://db-host.example/api/ingest/content/42", handler.LastRequest.RequestUri!.ToString());
         Assert.Equal([1, 2, 3], sentBody);
         Assert.Equal("image/jpeg", sentContentType);
         Assert.Equal("ingest-content", Assert.Single(factory.RequestedClientNames)); // blob 走長 timeout 的 client
+    }
+
+    [Fact]
+    public async Task CompleteAsync_SetsContentLengthHeader_FromExplicitLength()
+    {
+        // 來源串流多半不支援 Seek（例如 LINE API 的回應本身），StreamContent 沒辦法自動推算，
+        // 必須是明講的 contentLength 參數
+        long? sentContentLength = null;
+        var (source, _, _) = Create(request =>
+        {
+            sentContentLength = request.Content!.Headers.ContentLength;
+            return new HttpResponseMessage(HttpStatusCode.NoContent);
+        });
+
+        await source.CompleteAsync(42, new MemoryStream([1, 2, 3, 4, 5]), 5, "image/jpeg", CancellationToken.None);
+
+        Assert.Equal(5, sentContentLength);
     }
 
     [Fact]
@@ -92,7 +109,7 @@ public class ApiContentWorkSourceTests
             return new HttpResponseMessage(HttpStatusCode.NoContent);
         });
 
-        await source.CompleteAsync(42, [1], contentType: null, CancellationToken.None);
+        await source.CompleteAsync(42, new MemoryStream([1]), 1, contentType: null, CancellationToken.None);
 
         Assert.Null(sentContentType);
     }
@@ -117,7 +134,7 @@ public class ApiContentWorkSourceTests
         // 這裡不自己分辨可否重試（見類別註解——不疊加第二套死信機制）
         var (source, _, _) = Create(_ => new HttpResponseMessage(statusCode));
 
-        await Assert.ThrowsAsync<HttpRequestException>(() => source.CompleteAsync(1, [1], "a/b", CancellationToken.None));
+        await Assert.ThrowsAsync<HttpRequestException>(() => source.CompleteAsync(1, new MemoryStream([1]), 1, "a/b", CancellationToken.None));
         await Assert.ThrowsAsync<HttpRequestException>(() => source.FailAsync(1, CancellationToken.None));
     }
 }

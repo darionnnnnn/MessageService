@@ -37,9 +37,13 @@ public class ApiContentWorkSource(IHttpClientFactory httpClientFactory) : IConte
         return await response.Content.ReadFromJsonAsync<ContentWorkItem>(cancellationToken);
     }
 
-    public async Task CompleteAsync(long contentId, byte[] content, string? contentType, CancellationToken cancellationToken)
+    public async Task CompleteAsync(long contentId, Stream content, long contentLength, string? contentType, CancellationToken cancellationToken)
     {
-        using var body = new ByteArrayContent(content);
+        // StreamContent 邊讀邊送，不把整份內容（可達數百 MB）先讀進記憶體組成 byte[]；
+        // 來源串流多半不支援 Seek（例如 LINE API 的回應本身），所以要明講 ContentLength，
+        // 不能倚賴 StreamContent 從 stream.Length 自動推算
+        using var body = new StreamContent(content);
+        body.Headers.ContentLength = contentLength;
         if (contentType is not null)
         {
             body.Headers.ContentType = MediaTypeHeaderValue.Parse(contentType);

@@ -15,9 +15,11 @@ public class FakeContentWorkSource : IContentWorkSource
     public Task<ContentWorkItem?> GetAsync(long contentId, CancellationToken cancellationToken) =>
         Task.FromResult(Items.GetValueOrDefault(contentId));
 
-    public Task CompleteAsync(long contentId, byte[] content, string? contentType, CancellationToken cancellationToken)
+    public Task CompleteAsync(long contentId, Stream content, long contentLength, string? contentType, CancellationToken cancellationToken)
     {
-        Completed.Add((contentId, content, contentType));
+        using var memoryStream = new MemoryStream();
+        content.CopyTo(memoryStream);
+        Completed.Add((contentId, memoryStream.ToArray(), contentType));
         return Task.CompletedTask;
     }
 
