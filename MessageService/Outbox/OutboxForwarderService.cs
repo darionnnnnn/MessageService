@@ -56,6 +56,7 @@ public class OutboxForwarderService(
 
         var now = DateTimeOffset.UtcNow;
         var batch = await dbContext.Entries
+            .Where(e => e.DeadLetteredAt == null)
             .Where(e => e.NextAttemptAt == null || e.NextAttemptAt <= now)
             .OrderBy(e => e.Id)
             .Take(_options.BatchSize)
@@ -78,10 +79,35 @@ public class OutboxForwarderService(
                 dbContext.Entries.Remove(entry);
                 await dbContext.SaveChangesAsync(cancellationToken);
             }
+            catch (PermanentIngestException ex)
+            {
+                // 落地端明確判定「重試也沒用」（例如 ingest API 回 400）——不管累計次數，
+                // 第一次遇到就直接死信，不浪費重試次數也不刷無意義的退避 log
+                entry.Attempts++;
+                entry.LastError = ex.Message;
+                entry.DeadLetteredAt = now;
+                await dbContext.SaveChangesAsync(cancellationToken);
+
+                logger.LogError(ex,
+                    "Outbox entry {Id} (WebhookEventId {WebhookEventId}) permanently rejected by sink, dead-lettering without retry",
+                    entry.Id, entry.WebhookEventId);
+            }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 entry.Attempts++;
                 entry.LastError = ex.Message;
+
+                if (entry.Attempts >= _options.MaxAttempts)
+                {
+                    entry.DeadLetteredAt = now;
+                    await dbContext.SaveChangesAsync(cancellationToken);
+
+                    logger.LogError(ex,
+                        "Outbox entry {Id} (WebhookEventId {WebhookEventId}) exceeded MaxAttempts ({MaxAttempts}), dead-lettering",
+                        entry.Id, entry.WebhookEventId, _options.MaxAttempts);
+                    continue;
+                }
+
                 entry.NextAttemptAt = now + ComputeBackoff(entry.Attempts);
                 await dbContext.SaveChangesAsync(cancellationToken);
 

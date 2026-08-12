@@ -20,4 +20,9 @@ public class OutboxEntry
     public DateTimeOffset? NextAttemptAt { get; set; }
 
     public string? LastError { get; set; }
+
+    /// <summary>非 null＝死信：達到 OutboxOptions.MaxAttempts，或落地端明確回報永久性失敗
+    /// （例如 payload 格式不合，重試不會改變結果）。死信項目不會被 forwarder 撿起，
+    /// 但刻意不刪除這一列——訊息仍在，只是不再自動重試，需要人工判斷後手動處理。</summary>
+    public DateTimeOffset? DeadLetteredAt { get; set; }
 }

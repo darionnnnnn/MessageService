@@ -9,13 +9,12 @@ public static class DeploymentValidator
 {
     public static void Validate(DeploymentOptions deployment, LineOptions line, IngestOptions ingest, ILogger logger)
     {
-        if (deployment.Mode == DeploymentMode.Line)
+        if (deployment.Mode == DeploymentMode.Line &&
+            (string.IsNullOrWhiteSpace(ingest.BaseUrl) || string.IsNullOrWhiteSpace(ingest.ApiKey)))
         {
-            // Stage 2（ingest API 客戶端 HttpIngestSink）尚未實作——先讓啟動失敗，避免收了
-            // webhook、寫進本機 outbox，卻永遠沒有東西把它排空。目前只能先用 Full 模式。
             throw new InvalidOperationException(
-                "Deployment:Mode=Line 需要 ingest API 客戶端（規劃中的 Stage 2），目前尚未實作，" +
-                "且屆時需要設定 Ingest:BaseUrl 與 Ingest:ApiKey。請先使用 Deployment:Mode=Full。");
+                "Deployment:Mode=Line 需要設定 Ingest:BaseUrl（Db 模式主機的 ingest API 位址）與 " +
+                "Ingest:ApiKey（雙邊共用密鑰，須與 Db 端一致），否則 outbox 排出的事件無處可送。");
         }
 
         if (deployment.Mode == DeploymentMode.Db && string.IsNullOrWhiteSpace(ingest.ApiKey))
