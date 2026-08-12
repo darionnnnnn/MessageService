@@ -203,16 +203,12 @@ if (receivesWebhook)
     var outboxConnectionString = builder.Configuration.GetConnectionString("Outbox") ?? "Data Source=outbox.db";
     OutboxSchemaUpgrader.EnsureDeadLetterColumn(outboxConnectionString);
 
-    // 死信不會自動消失，只會在這裡的啟動 log 被看到——沒有專用的重送介面，量大時要靠這行
-    // log 提醒維運人員去查，避免累積到某天才被發現有一批訊息早就不再重試了
-    var deadLetterCount = outboxDbContext.Entries.Count(e => e.DeadLetteredAt != null);
-    if (deadLetterCount > 0)
-    {
-        var startupLogger = scope.ServiceProvider.GetRequiredService<ILogger<Program>>();
-        startupLogger.LogWarning(
-            "Outbox has {Count} dead-lettered entries awaiting manual review (see LastError column in outbox.db)",
-            deadLetterCount);
-    }
+    // webhook 執行緒寫、forwarder 執行緒讀刪；rollback journal 模式下兩邊會互相 block
+    // （busy_timeout 預設 30 秒，遠超 LINE 的 webhook 逾時），WAL 讓讀寫不互相阻塞
+    OutboxSchemaUpgrader.EnableWalMode(outboxConnectionString);
+
+    // 死信不會自動消失，只會在 OutboxForwarderService 的 log 被看到（啟動時先報一次、
+    // 之後每小時再報一次）——沒有專用的重送介面，量大時要靠那行 log 提醒維運人員去查
 }
 
 // Configure the HTTP request pipeline.

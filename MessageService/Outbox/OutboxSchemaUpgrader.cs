@@ -38,4 +38,17 @@ public static class OutboxSchemaUpgrader
         alter.CommandText = "ALTER TABLE Entries ADD COLUMN DeadLetteredAt INTEGER NULL";
         alter.ExecuteNonQuery();
     }
+
+    /// <summary>outbox.db 是 webhook 執行緒寫、forwarder 執行緒讀刪，預設 rollback journal
+    /// 模式下兩邊會互相 block（busy_timeout 預設 30 秒，遠超 LINE 的 webhook 逾時）。
+    /// WAL 是資料庫檔案的持久屬性，設一次即可，之後每次開啟連線都會沿用。</summary>
+    public static void EnableWalMode(string connectionString)
+    {
+        using var connection = new SqliteConnection(connectionString);
+        connection.Open();
+
+        using var pragma = connection.CreateCommand();
+        pragma.CommandText = "PRAGMA journal_mode=WAL;";
+        pragma.ExecuteNonQuery();
+    }
 }

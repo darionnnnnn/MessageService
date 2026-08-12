@@ -118,6 +118,39 @@ public class LineWebhookControllerTests : IDisposable
     }
 
     [Fact]
+    public async Task Post_OutboxWriteFails_Returns500()
+    {
+        // 模擬「本機 outbox 寫不進去」（磁碟滿／DB 鎖住／損毀）：把 outbox.db 設成唯讀，
+        // SaveChangesAsync 會炸 SqliteException，這是唯一會讓事件真的遺失的失敗，
+        // 必須回 500 讓 LINE redelivery 接手（跟 JSON 格式錯誤那種回 200 的情況不同）
+        SqliteConnection.ClearAllPools();
+        File.SetAttributes(_outboxDbPath, FileAttributes.ReadOnly);
+        try
+        {
+            const string body = """
+                {"destination":"d","events":[{
+                    "type":"message",
+                    "webhookEventId":"evt-readonly-outbox",
+                    "timestamp":1700000000000,
+                    "source":{"type":"group","groupId":"G1","userId":"U1"},
+                    "message":{"id":"m1","type":"text","text":"hello"}
+                }]}
+                """;
+            var content = new StringContent(body, Encoding.UTF8, "application/json");
+            var request = new HttpRequestMessage(HttpMethod.Post, "/api/line/webhook") { Content = content };
+            request.Headers.Add("X-Line-Signature", ComputeSignature(body));
+
+            var response = await _client.SendAsync(request);
+
+            Assert.Equal(HttpStatusCode.InternalServerError, response.StatusCode);
+        }
+        finally
+        {
+            File.SetAttributes(_outboxDbPath, FileAttributes.Normal);
+        }
+    }
+
+    [Fact]
     public async Task Post_ValidGroupTextMessage_LandsInDatabaseViaOutbox()
     {
         // 端到端驗證 Stage 0+1 的整條管線接對了：webhook → WebhookEventHandler 寫 outbox →

@@ -47,8 +47,7 @@ public class OutboxForwarderServiceTests : IDisposable
             {
                 BatchSize = 50,
                 BaseRetryDelaySeconds = 5,
-                MaxRetryDelaySeconds = 300,
-                MaxAttempts = 20
+                MaxRetryDelaySeconds = 300
             }),
             NullLogger<OutboxForwarderService>.Instance);
 
@@ -222,14 +221,13 @@ public class OutboxForwarderServiceTests : IDisposable
     [Fact]
     public async Task ProcessBatchAsync_RetryDelay_IsCappedAtMax()
     {
-        // 第 100 次嘗試：BaseRetryDelaySeconds(5) × 100 = 500，遠超過 MaxRetryDelaySeconds(300)，應該封頂。
-        // MaxAttempts 特意設得比 100 大——這裡要測的是退避時間的封頂算法，不是死信門檻，
-        // 兩者都用 attempts 這個欄位但語意不同，混在一起會讓這個測試連死信邏輯一起測了
+        // 第 100 次嘗試：BaseRetryDelaySeconds(5) × 2^99 遠超過 MaxRetryDelaySeconds(300)，應該封頂。
+        // 暫時性失敗永遠重試（見 OutboxOptions 說明），這裡要測的純粹是退避時間的封頂算法
         await SeedEntryAsync(SampleEnvelope("evt-1"), attempts: 99);
         _sink.ThrowOnNextSubmit = new InvalidOperationException("still down");
         var forwarder = CreateForwarder(new OutboxOptions
         {
-            BatchSize = 50, BaseRetryDelaySeconds = 5, MaxRetryDelaySeconds = 300, MaxAttempts = 1000
+            BatchSize = 50, BaseRetryDelaySeconds = 5, MaxRetryDelaySeconds = 300
         });
 
         var before = DateTimeOffset.UtcNow;
@@ -238,6 +236,26 @@ public class OutboxForwarderServiceTests : IDisposable
         var remaining = Assert.Single(await GetRemainingEntriesAsync());
         var delay = remaining.NextAttemptAt!.Value - before;
         Assert.True(delay.TotalSeconds <= 300 + 2, $"延遲應該被封頂在約 300 秒，實際 {delay.TotalSeconds}");
+    }
+
+    [Fact]
+    public async Task ProcessBatchAsync_RetryDelay_GrowsExponentially()
+    {
+        // 第 3 次嘗試：BaseRetryDelaySeconds(5) × 2^(3-1) = 20 秒，遠低於封頂值，驗證真的是指數成長
+        // 而不是線性成長（線性算法會給 15 秒，指數給 20 秒）
+        await SeedEntryAsync(SampleEnvelope("evt-1"), attempts: 2);
+        _sink.ThrowOnNextSubmit = new InvalidOperationException("still down");
+        var forwarder = CreateForwarder(new OutboxOptions
+        {
+            BatchSize = 50, BaseRetryDelaySeconds = 5, MaxRetryDelaySeconds = 300
+        });
+
+        var before = DateTimeOffset.UtcNow;
+        await forwarder.ProcessBatchAsync(CancellationToken.None);
+
+        var remaining = Assert.Single(await GetRemainingEntriesAsync());
+        var delay = remaining.NextAttemptAt!.Value - before;
+        Assert.InRange(delay.TotalSeconds, 18, 22);
     }
 
     // ==== 死信：HTTP 帶進了 Stage 1 沒有的永久性失敗（例如 400＝payload 格式不合，
@@ -265,38 +283,18 @@ public class OutboxForwarderServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task ProcessBatchAsync_TransientFailureReachesMaxAttempts_DeadLetters()
+    public async Task ProcessBatchAsync_TransientFailure_AlwaysSchedulesRetry_NeverDeadLetters()
     {
-        // attempts 從 (MaxAttempts-1) 再失敗一次 = 達到 MaxAttempts，應該死信而不是再排一次重試
-        await SeedEntryAsync(SampleEnvelope("evt-exhausted"), attempts: 2);
+        // 決策：暫時性失敗永遠重試，不再有 MaxAttempts 門檻——即使已經失敗了很多次
+        // （模擬長時間停機後持續重試），也只會排下一次重試，不會被標記死信
+        await SeedEntryAsync(SampleEnvelope("evt-persistent"), attempts: 500);
         _sink.ThrowOnNextSubmit = new InvalidOperationException("still down");
-        var forwarder = CreateForwarder(new OutboxOptions
-        {
-            BatchSize = 50, BaseRetryDelaySeconds = 5, MaxRetryDelaySeconds = 300, MaxAttempts = 3
-        });
+        var forwarder = CreateForwarder();
 
         await forwarder.ProcessBatchAsync(CancellationToken.None);
 
         var remaining = Assert.Single(await GetRemainingEntriesAsync());
-        Assert.Equal(3, remaining.Attempts);
-        Assert.NotNull(remaining.DeadLetteredAt);
-        Assert.Null(remaining.NextAttemptAt);
-    }
-
-    [Fact]
-    public async Task ProcessBatchAsync_TransientFailureBelowMaxAttempts_StillSchedulesRetry_NotDeadLettered()
-    {
-        await SeedEntryAsync(SampleEnvelope("evt-1"), attempts: 1);
-        _sink.ThrowOnNextSubmit = new InvalidOperationException("still down");
-        var forwarder = CreateForwarder(new OutboxOptions
-        {
-            BatchSize = 50, BaseRetryDelaySeconds = 5, MaxRetryDelaySeconds = 300, MaxAttempts = 3
-        });
-
-        await forwarder.ProcessBatchAsync(CancellationToken.None);
-
-        var remaining = Assert.Single(await GetRemainingEntriesAsync());
-        Assert.Equal(2, remaining.Attempts);
+        Assert.Equal(501, remaining.Attempts);
         Assert.Null(remaining.DeadLetteredAt);
         Assert.NotNull(remaining.NextAttemptAt);
     }
@@ -319,5 +317,36 @@ public class OutboxForwarderServiceTests : IDisposable
         Assert.False(processedAny);
         Assert.Empty(_sink.Submitted);
         Assert.Single(await GetRemainingEntriesAsync()); // 還在（沒被刪），但沒被送去 sink
+    }
+
+    // ==== 死信計數檢查：搬進 forwarder 迴圈每小時報一次，不再只在啟動時報一次 ====
+
+    [Fact]
+    public async Task LogDeadLetterCountAsync_NoDeadLetters_DoesNotThrow()
+    {
+        await SeedEntryAsync(SampleEnvelope("evt-1"));
+        var forwarder = CreateForwarder();
+
+        var ex = await Record.ExceptionAsync(() => forwarder.LogDeadLetterCountAsync(CancellationToken.None));
+
+        Assert.Null(ex);
+    }
+
+    [Fact]
+    public async Task LogDeadLetterCountAsync_HasDeadLetters_DoesNotThrow()
+    {
+        var entry = await SeedEntryAsync(SampleEnvelope("evt-dead"));
+        using (var scope = _provider.CreateScope())
+        {
+            var dbContext = scope.ServiceProvider.GetRequiredService<OutboxDbContext>();
+            var tracked = await dbContext.Entries.SingleAsync(e => e.Id == entry.Id);
+            tracked.DeadLetteredAt = DateTimeOffset.UtcNow;
+            await dbContext.SaveChangesAsync();
+        }
+        var forwarder = CreateForwarder();
+
+        var ex = await Record.ExceptionAsync(() => forwarder.LogDeadLetterCountAsync(CancellationToken.None));
+
+        Assert.Null(ex);
     }
 }
