@@ -23,6 +23,7 @@ public class ProfileRefreshServiceTests : IDisposable
 
         var services = new ServiceCollection();
         services.AddDbContext<MessageDbContext>(o => o.UseSqlite(_connection));
+        services.AddScoped<IProfileStore, DbProfileStore>();
         services.AddSingleton<ILineProfileClient>(_profileClient);
         _provider = services.BuildServiceProvider();
 

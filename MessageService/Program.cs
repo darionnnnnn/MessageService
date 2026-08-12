@@ -26,6 +26,13 @@ var ingestOptionsRaw = builder.Configuration.GetSection(IngestOptions.SectionNam
     ?? new IngestOptions();
 var ingestApiEnabled = !string.IsNullOrWhiteSpace(ingestOptionsRaw.ApiKey);
 
+// 這台主機要不要對外呼叫 LINE API（媒體下載＋頭貼快取）。Stage 3 之前這兩件事直接綁在
+// hasDatabaseAccess 上（等同「有資料庫就順便做」），現在改成獨立看這個設定——
+// 拆機後 Line 端也可能是負責連 LINE 的那一端
+var lineOptionsRaw = builder.Configuration.GetSection(LineOptions.SectionName).Get<LineOptions>()
+    ?? new LineOptions();
+var outboundHere = lineOptionsRaw.OutboundHere;
+
 // Add services to the container.
 
 builder.Services.AddControllers(options =>
@@ -44,8 +51,9 @@ builder.Services.Configure<OutboxOptions>(builder.Configuration.GetSection(Outbo
 
 var databaseProvider = builder.Configuration["Database:Provider"] ?? "Sqlite";
 
-// 直連資料庫（Full／Db 模式）才需要的一切：主資料庫本身、內容下載／頭貼快取用到的佇列與
-// LINE 用戶端、三個背景服務、把 outbox 落地用的 DirectIngestSink
+// 直連資料庫（Full／Db 模式）才需要的一切：主資料庫本身、把 outbox 落地用的
+// DirectIngestSink、保留期清除。媒體下載／頭貼快取的背景服務不在這裡——它們現在跟著
+// Line:OutboundHere 走（見下面），拆機後 Line 端也可能是負責連 LINE 的那一端
 if (hasDatabaseAccess)
 {
     builder.Services.AddDbContext<MessageDbContext>(options =>
@@ -60,8 +68,61 @@ if (hasDatabaseAccess)
         }
     });
 
+    builder.Services.AddScoped<IIngestSink, DirectIngestSink>();
+    builder.Services.AddHostedService<RetentionCleanupService>();
+}
+
+// 媒體下載／頭貼快取的資料來源：有資料庫就直接查（Full／Db，包含 Db:OutboundHere=true
+// 這種「Db 端自己也連 LINE」的少見拓撲），沒有資料庫就打 ingest API（純 Line 模式）。
+// 這裡刻意不看 outboundHere 或 ingestApiEnabled——IngestController（服務 Line 端請求）
+// 與 ContentDownloadService／ProfileRefreshService（本機真的要下載）兩種消費者，
+// 只要 hasDatabaseAccess 相同就永遠會選到同一種實作，見 docs/DEPLOYMENT-MODES.md 的推導。
+if (hasDatabaseAccess)
+{
+    builder.Services.AddScoped<IContentWorkSource, DbContentWorkSource>();
+    builder.Services.AddScoped<IProfileStore, DbProfileStore>();
+}
+else
+{
+    builder.Services.AddScoped<IContentWorkSource, ApiContentWorkSource>();
+    builder.Services.AddScoped<IProfileStore, ApiProfileStore>();
+
+    // 只有純 Line 模式（沒有本機資料庫）才需要打這兩支具名 HttpClient；Db 端就算日後
+    // Db:OutboundHere=true，走的也是上面的 DbContentWorkSource，不會用到它們。
+    // X-Ingest-Key 在這裡當預設標頭設一次，而不是要求 ApiContentWorkSource／ApiProfileStore
+    // 每個方法自己記得加——這是 Stage 3 端到端演練實際踩到的 bug：一開始沒設，兩個類別的
+    // 所有請求都被 IngestApiKeyMiddleware 擋成 401，只有真的起兩個行程互打才測得出來
+    // （單元測試都是用 FakeHttpMessageHandler 或直接呼叫 controller，沒有一個會經過這段
+    // HttpClient 建置邏輯本身）。
+    var ingestApiKeyForClient = ingestOptionsRaw.ApiKey ?? "";
+    builder.Services.AddHttpClient("ingest", client =>
+    {
+        var baseUrl = ingestOptionsRaw.BaseUrl
+            ?? throw new InvalidOperationException("Ingest:BaseUrl must be set when Deployment:Mode=Line.");
+        client.BaseAddress = new Uri(baseUrl);
+        client.Timeout = TimeSpan.FromSeconds(30);
+        client.DefaultRequestHeaders.Add("X-Ingest-Key", ingestApiKeyForClient);
+    });
+    builder.Services.AddHttpClient("ingest-content", client =>
+    {
+        var baseUrl = ingestOptionsRaw.BaseUrl
+            ?? throw new InvalidOperationException("Ingest:BaseUrl must be set when Deployment:Mode=Line.");
+        client.BaseAddress = new Uri(baseUrl);
+        // blob 上傳可達數百 MB，比照 LineContentClient 對大檔放寬 timeout 的理由
+        client.Timeout = TimeSpan.FromMinutes(10);
+        client.DefaultRequestHeaders.Add("X-Ingest-Key", ingestApiKeyForClient);
+    });
+}
+
+// 媒體下載／頭貼刷新的入列佇列：這台主機要不要真的做這兩件事只看 Line:OutboundHere，
+// 跟模式或資料庫存取權無關（Db 端也可能 OutboundHere=true）。沒有消費者時换成 Null 實作，
+// 不然 ContentDownloadQueue 的 Channel.CreateUnbounded 會在沒人消費的情況下無上限累積
+// （見 NullContentDownloadQueue／NullProfileRefreshQueue 說明）
+if (outboundHere)
+{
     builder.Services.AddSingleton<IContentDownloadQueue, ContentDownloadQueue>();
     builder.Services.AddSingleton<IProfileRefreshQueue, ProfileRefreshQueue>();
+
     builder.Services.AddScoped<ILineContentClient, LineContentClient>();
     builder.Services.AddScoped<ILineProfileClient, LineProfileClient>();
     // 影片/檔案原檔可達數百 MB，預設 100 秒 timeout 不夠
@@ -69,11 +130,13 @@ if (hasDatabaseAccess)
         client => client.Timeout = TimeSpan.FromMinutes(10));
     builder.Services.AddHttpClient(LineProfileClient.HttpClientName);
 
-    builder.Services.AddScoped<IIngestSink, DirectIngestSink>();
-
     builder.Services.AddHostedService<ContentDownloadService>();
-    builder.Services.AddHostedService<RetentionCleanupService>();
     builder.Services.AddHostedService<ProfileRefreshService>();
+}
+else
+{
+    builder.Services.AddSingleton<IContentDownloadQueue, NullContentDownloadQueue>();
+    builder.Services.AddSingleton<IProfileRefreshQueue, NullProfileRefreshQueue>();
 }
 
 // Line 模式：把 outbox 排出的事件推去 Db 端主機的 ingest API，取代上面 hasDatabaseAccess

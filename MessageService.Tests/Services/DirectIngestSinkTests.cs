@@ -10,12 +10,14 @@ namespace MessageService.Tests.Services;
 
 // 這份測試接手了原本 WebhookEventHandlerTests 對資料庫落地行為的斷言（WebhookEventHandler
 // 改成只組 envelope 之後，這部分邏輯全部搬進 DirectIngestSink）。
+//
+// Stage 3：DirectIngestSink 不再持有 IContentDownloadQueue／IProfileRefreshQueue（入列責任
+// 移到呼叫端的 IngestSideEffects，理由見 DirectIngestSink 類別註解），這裡改成斷言
+// SubmitAsync 的回傳值（IngestResult.ContentId）——入列行為本身的測試搬到 IngestSideEffectsTests。
 public class DirectIngestSinkTests : IDisposable
 {
     private readonly SqliteConnection _connection;
     private readonly MessageDbContext _dbContext;
-    private readonly FakeContentDownloadQueue _queue = new();
-    private readonly FakeProfileRefreshQueue _profileRefreshQueue = new();
     private readonly DirectIngestSink _sink;
 
     public DirectIngestSinkTests()
@@ -24,7 +26,7 @@ public class DirectIngestSinkTests : IDisposable
         var options = new DbContextOptionsBuilder<MessageDbContext>().UseSqlite(_connection).Options;
         _dbContext = new MessageDbContext(options);
         _dbContext.Database.EnsureCreated();
-        _sink = new DirectIngestSink(_dbContext, _queue, _profileRefreshQueue, NullLogger<DirectIngestSink>.Instance);
+        _sink = new DirectIngestSink(_dbContext, NullLogger<DirectIngestSink>.Instance);
     }
 
     public void Dispose()
@@ -50,7 +52,7 @@ public class DirectIngestSinkTests : IDisposable
     [Fact]
     public async Task TextMessage_IsSaved()
     {
-        await _sink.SubmitAsync(Envelope(), CancellationToken.None);
+        var result = await _sink.SubmitAsync(Envelope(), CancellationToken.None);
 
         var saved = Assert.Single(_dbContext.GroupMessages);
         Assert.Equal("text", saved.MessageType);
@@ -58,17 +60,7 @@ public class DirectIngestSinkTests : IDisposable
         Assert.Equal("G1", saved.GroupId);
         Assert.Equal("U1", saved.UserId);
         Assert.Empty(_dbContext.MessageContents);
-        Assert.Empty(_queue.Enqueued);
-    }
-
-    [Fact]
-    public async Task SavedMessage_EnqueuesProfileRefreshForGroupAndUser()
-    {
-        await _sink.SubmitAsync(Envelope(groupId: "G1", userId: "U1"), CancellationToken.None);
-
-        var task = Assert.Single(_profileRefreshQueue.Enqueued);
-        Assert.Equal("G1", task.GroupId);
-        Assert.Equal("U1", task.UserId);
+        Assert.Null(result.ContentId);
     }
 
     [Fact]
@@ -87,29 +79,29 @@ public class DirectIngestSinkTests : IDisposable
     [InlineData("image")]
     [InlineData("video")]
     [InlineData("audio")]
-    public async Task ImageOrVideoOrAudioMessage_CreatesPendingContentAndEnqueues(string messageType)
+    public async Task ImageOrVideoOrAudioMessage_CreatesPendingContentAndReturnsContentId(string messageType)
     {
-        await _sink.SubmitAsync(Envelope(messageType: messageType, text: null, hasContent: true), CancellationToken.None);
+        var result = await _sink.SubmitAsync(Envelope(messageType: messageType, text: null, hasContent: true), CancellationToken.None);
 
         var savedMessage = Assert.Single(_dbContext.GroupMessages);
         Assert.Null(savedMessage.Text);
         var content = Assert.Single(_dbContext.MessageContents);
         Assert.Equal(DownloadStatus.Pending, content.DownloadStatus);
         Assert.Equal(savedMessage.Id, content.GroupMessageId);
-        Assert.Equal(content.Id, Assert.Single(_queue.Enqueued));
+        Assert.Equal(content.Id, result.ContentId);
     }
 
     [Fact]
-    public async Task FileMessage_StoresFileNameAndEnqueues()
+    public async Task FileMessage_StoresFileNameAndReturnsContentId()
     {
-        await _sink.SubmitAsync(
+        var result = await _sink.SubmitAsync(
             Envelope(messageType: "file", text: null, hasContent: true, contentFileName: "report.pdf"),
             CancellationToken.None);
 
         var content = Assert.Single(_dbContext.MessageContents);
         Assert.Equal("report.pdf", content.FileName);
         Assert.Equal(DownloadStatus.Pending, content.DownloadStatus);
-        Assert.Single(_queue.Enqueued);
+        Assert.Equal(content.Id, result.ContentId);
     }
 
     [Fact]
@@ -124,12 +116,29 @@ public class DirectIngestSinkTests : IDisposable
     }
 
     [Fact]
-    public async Task DuplicateWebhookEventId_DoesNotEnqueueProfileRefreshTwice()
+    public async Task DuplicateWebhookEventId_TextMessage_ReturnsNullContentId()
     {
         await _sink.SubmitAsync(Envelope(webhookEventId: "evt-1"), CancellationToken.None);
-        await _sink.SubmitAsync(Envelope(webhookEventId: "evt-1"), CancellationToken.None);
+        var result = await _sink.SubmitAsync(Envelope(webhookEventId: "evt-1"), CancellationToken.None);
 
-        Assert.Single(_profileRefreshQueue.Enqueued);
+        Assert.Null(result.ContentId);
+    }
+
+    [Fact]
+    public async Task DuplicateWebhookEventId_MediaMessage_ReturnsExistingContentId()
+    {
+        // 這是 Stage 3 加 ContentId 回傳之後才有意義的情境：outbox 重試（代表前一次的回應
+        // 可能遺失了）若在這裡回 null，拆機模式的那筆媒體就要等到下次服務重啟才會被撿回
+        var first = await _sink.SubmitAsync(
+            Envelope(webhookEventId: "evt-dup-media", messageType: "image", text: null, hasContent: true),
+            CancellationToken.None);
+        var second = await _sink.SubmitAsync(
+            Envelope(webhookEventId: "evt-dup-media", messageType: "image", text: null, hasContent: true),
+            CancellationToken.None);
+
+        Assert.NotNull(first.ContentId);
+        Assert.Equal(first.ContentId, second.ContentId);
+        Assert.Single(_dbContext.MessageContents); // 沒有因為第二次呼叫多插一筆
     }
 
     // ==== DbUpdateException 的雙面性：撞鍵（重複）要當成功、暫時性失敗要往外拋讓 outbox 重試 ====
@@ -143,7 +152,7 @@ public class DirectIngestSinkTests : IDisposable
             .AddInterceptors(interceptor)
             .Options;
         var dbContext = new MessageDbContext(options);
-        var sink = new DirectIngestSink(dbContext, _queue, _profileRefreshQueue, NullLogger<DirectIngestSink>.Instance);
+        var sink = new DirectIngestSink(dbContext, NullLogger<DirectIngestSink>.Instance);
         return (sink, dbContext, interceptor);
     }
 
@@ -160,7 +169,6 @@ public class DirectIngestSinkTests : IDisposable
             () => sink.SubmitAsync(Envelope(webhookEventId: "evt-transient"), CancellationToken.None));
 
         Assert.False(await dbContext.GroupMessages.AnyAsync(m => m.WebhookEventId == "evt-transient"));
-        Assert.Empty(_profileRefreshQueue.Enqueued);
     }
 
     [Fact]
@@ -206,9 +214,44 @@ public class DirectIngestSinkTests : IDisposable
         };
 
         // 不應該拋——回查會發現資料已存在
-        await sink.SubmitAsync(Envelope(webhookEventId: "evt-race"), CancellationToken.None);
+        var result = await sink.SubmitAsync(Envelope(webhookEventId: "evt-race"), CancellationToken.None);
 
         var saved = Assert.Single(await dbContext.GroupMessages.AsNoTracking().ToListAsync());
         Assert.Equal("m-rival", saved.LineMessageId);
+        Assert.Null(result.ContentId); // rival 是文字訊息，沒有媒體內容
+    }
+
+    [Fact]
+    public async Task UniqueConstraintViolationDuringSave_RivalHasContent_ReturnsRivalContentId()
+    {
+        // 同上，但 rival 這次帶媒體內容——驗證回查那段投影（new { m.Id, ContentId = ... }）
+        // 真的把既有內容的 Id 撈出來，不是永遠回 null
+        var (sink, dbContext, interceptor) = CreateSinkWithInterceptor();
+        using var _ = dbContext;
+        long rivalContentId = 0;
+        interceptor.BeforeSaveOnce = async () =>
+        {
+            var rivalOptions = new DbContextOptionsBuilder<MessageDbContext>().UseSqlite(_connection).Options;
+            using var rival = new MessageDbContext(rivalOptions);
+            var rivalMessage = new GroupMessage
+            {
+                WebhookEventId = "evt-race-media",
+                LineMessageId = "m-rival-media",
+                GroupId = "G1",
+                MessageType = "image",
+                Content = new MessageContent { DownloadStatus = DownloadStatus.Pending },
+                EventTimestamp = DateTimeOffset.UtcNow,
+                ReceivedAt = DateTimeOffset.UtcNow
+            };
+            rival.GroupMessages.Add(rivalMessage);
+            await rival.SaveChangesAsync();
+            rivalContentId = rivalMessage.Content.Id;
+        };
+
+        var result = await sink.SubmitAsync(
+            Envelope(webhookEventId: "evt-race-media", messageType: "image", text: null, hasContent: true),
+            CancellationToken.None);
+
+        Assert.Equal(rivalContentId, result.ContentId);
     }
 }

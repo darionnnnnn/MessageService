@@ -18,13 +18,18 @@ public class HttpIngestSink(HttpClient httpClient, IOptions<IngestOptions> optio
 {
     private const string HeaderName = "X-Ingest-Key";
 
-    public async Task SubmitAsync(IngestEnvelope envelope, CancellationToken cancellationToken)
+    public async Task<IngestResult> SubmitAsync(IngestEnvelope envelope, CancellationToken cancellationToken)
     {
         using var response = await SendAsync(envelope, cancellationToken);
 
         if (response.IsSuccessStatusCode)
         {
-            return;
+            // 回應 body 解析失敗（畸形 JSON）就讓例外往外拋，交給 outbox 照一般失敗流程重試——
+            // 事件其實已經在對方落地了，重送一次不會產生重複（WebhookEventId 唯一索引撐著），
+            // 下次會走到「重複」分支正常拿到 ContentId。這比刻意吞掉解析錯誤、把 ContentId
+            // 留空等下次服務重啟才補回來得快，也不需要為了這個邊角案例另外處理
+            var payload = await response.Content.ReadFromJsonAsync<IngestEventResponse>(cancellationToken);
+            return new IngestResult(payload?.ContentId);
         }
 
         if (response.StatusCode == HttpStatusCode.BadRequest)

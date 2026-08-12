@@ -20,7 +20,7 @@ public static class DeploymentValidator
         if (deployment.Mode == DeploymentMode.Db && string.IsNullOrWhiteSpace(ingest.ApiKey))
         {
             throw new InvalidOperationException(
-                "Deployment:Mode=Db 需要設定 Ingest:ApiKey 以驗證進來的請求（規劃中的 Stage 2 端點會用它）。");
+                "Deployment:Mode=Db 需要設定 Ingest:ApiKey 以驗證 /api/ingest/* 進來的請求。");
         }
 
         if (deployment.Mode is DeploymentMode.Full or DeploymentMode.Line && string.IsNullOrWhiteSpace(line.ChannelSecret))
@@ -29,8 +29,24 @@ public static class DeploymentValidator
                 "這個模式會收 LINE webhook（Deployment:Mode=Full 或 Line），需要設定 Line:ChannelSecret 才能驗證簽章。");
         }
 
-        // Line:OutboundHere 目前（Stage 1）還沒有任何註冊邏輯依據它做決定——它要等 Stage 3
-        // 的 IContentWorkSource 落地才會真正生效，所以這裡刻意不要求 ChannelAccessToken，
-        // 避免對還沒用到這個設定的部署造成不必要的啟動失敗。見 docs/DEPLOYMENT-MODES.md。
+        // Stage 3：Line:OutboundHere 現在真的決定 ContentDownloadService／ProfileRefreshService
+        // 會不會在這台主機跑（見 Program.cs 的註冊矩陣）——OutboundHere=true 卻沒有
+        // ChannelAccessToken，這兩個背景服務會直接對 LINE profile／content API 打 401，
+        // 而且不是啟動就爆炸、是跑起來後才悄悄一直失敗，所以要擋在啟動關卡
+        if (line.OutboundHere && string.IsNullOrWhiteSpace(line.ChannelAccessToken))
+        {
+            throw new InvalidOperationException(
+                "Line:OutboundHere=true 時需要設定 Line:ChannelAccessToken，" +
+                "否則媒體下載與頭貼快取會在背景服務啟動後持續打 401。");
+        }
+
+        // Full 模式關掉媒體下載／頭貼快取是可疑的設定組合（單機部署通常沒有理由要這樣做），
+        // 但不是錯誤——只記警告，不擋啟動
+        if (deployment.Mode == DeploymentMode.Full && !line.OutboundHere)
+        {
+            logger.LogWarning(
+                "Deployment:Mode=Full 但 Line:OutboundHere=false：媒體下載與頭貼快取不會執行，" +
+                "所有訊息內容會停在 Pending。如果這不是刻意的，請檢查設定。");
+        }
     }
 }
