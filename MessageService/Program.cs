@@ -1,4 +1,5 @@
 using MessageService.Data;
+using MessageService.Data.Crypto;
 using MessageService.Middleware;
 using MessageService.Options;
 using MessageService.Outbox;
@@ -48,6 +49,10 @@ builder.Services.Configure<ProfileCacheOptions>(builder.Configuration.GetSection
 builder.Services.Configure<DeploymentOptions>(builder.Configuration.GetSection(DeploymentOptions.SectionName));
 builder.Services.Configure<IngestOptions>(builder.Configuration.GetSection(IngestOptions.SectionName));
 builder.Services.Configure<OutboxOptions>(builder.Configuration.GetSection(OutboxOptions.SectionName));
+builder.Services.Configure<EncryptionOptions>(builder.Configuration.GetSection(EncryptionOptions.SectionName));
+// 單例：金鑰是固定設定值，跟請求無關；MessageDbContext 的建構子也靠 DI 注入同一份實例，
+// 見 MessageDbContextModelCacheKeyFactory 對「模型依 cipher 狀態分開快取」的說明
+builder.Services.AddSingleton<FieldCipher>();
 
 var databaseProvider = builder.Configuration["Database:Provider"] ?? "Sqlite";
 
@@ -178,6 +183,11 @@ using (var validationScope = app.Services.CreateScope())
     var lineOptions = validationScope.ServiceProvider.GetRequiredService<IOptions<LineOptions>>().Value;
     var ingestOptions = validationScope.ServiceProvider.GetRequiredService<IOptions<IngestOptions>>().Value;
     DeploymentValidator.Validate(deploymentOptions, lineOptions, ingestOptions, validationLogger);
+
+    // FieldCipher 是單例，第一次被解析時才會驗證 Encryption:Key（Enabled=true 但金鑰缺漏／
+    // 格式錯誤會在建構子裡丟例外）——這裡強制在啟動當下就解析一次，壞設定要讓服務直接
+    // 啟動失敗，不要等到第一則訊息進來才在背景任務裡炸開
+    validationScope.ServiceProvider.GetRequiredService<FieldCipher>();
 }
 
 if (hasDatabaseAccess && databaseProvider == "Sqlite")

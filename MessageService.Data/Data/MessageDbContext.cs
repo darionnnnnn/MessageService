@@ -1,11 +1,31 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
+using MessageService.Data.Crypto;
 using MessageService.Models;
 
 namespace MessageService.Data;
 
-public class MessageDbContext(DbContextOptions<MessageDbContext> options) : DbContext(options)
+/// <summary>EF Core 預設的模型快取只用 DbContext 的 CLR 型別當鍵，不會管建構子額外收到的
+/// cipher 是誰——同一個型別的第一個實例決定了「有沒有套加密轉換器」，之後不管後續實例
+/// 傳進來的 cipher 是什麼都沿用那份快取的模型，加密就悄悄失效或誤套用。要讓模型依
+/// EncryptionEnabled 分開快取，必須自訂 IModelCacheKeyFactory，見官方文件對「模型仰賴
+/// 外部設定建構」情境的說明，透過 MessageDbContext.OnConfiguring 套用。</summary>
+internal class MessageDbContextModelCacheKeyFactory : IModelCacheKeyFactory
 {
+    public object Create(DbContext context, bool designTime) =>
+        context is MessageDbContext db
+            ? (context.GetType(), db.EncryptionEnabled, designTime)
+            : (context.GetType(), designTime);
+}
+
+/// <summary>cipher 預設 null（未加密）——刻意用預設參數而非必要參數，讓既有直接
+/// `new MessageDbContext(options)` 的測試不必逐一改動；正式環境透過 DI 由
+/// AddDbContext 自動解析已註冊的 FieldCipher 單例注入。</summary>
+public class MessageDbContext(DbContextOptions<MessageDbContext> options, FieldCipher? cipher = null) : DbContext(options)
+{
+    internal bool EncryptionEnabled => cipher is { Enabled: true };
+
     public DbSet<GroupMessage> GroupMessages => Set<GroupMessage>();
     public DbSet<MessageContent> MessageContents => Set<MessageContent>();
     public DbSet<Group> Groups => Set<Group>();
@@ -15,6 +35,9 @@ public class MessageDbContext(DbContextOptions<MessageDbContext> options) : DbCo
     public DbSet<MaskKeywordGroup> MaskKeywordGroups => Set<MaskKeywordGroup>();
     public DbSet<UserAlias> UserAliases => Set<UserAlias>();
     public DbSet<AnonymousIdentity> AnonymousIdentities => Set<AnonymousIdentity>();
+
+    protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder) =>
+        optionsBuilder.ReplaceService<IModelCacheKeyFactory, MessageDbContextModelCacheKeyFactory>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -86,5 +109,32 @@ public class MessageDbContext(DbContextOptions<MessageDbContext> options) : DbCo
                 .Property(c => c.LastAttemptAt)
                 .HasConversion(new DateTimeOffsetToBinaryConverter());
         }
+
+        // GroupId／UserId 保持明文——它們是隨機識別碼、不含個資，索引與 GroupBy 需要它們留在
+        // 明文才能運作（見上面的索引與批次 A 的收斂）。這裡加密的都是實際承載個資的欄位；
+        // blob（MessageContents.Content）不走這裡，需要保留 Range 拖進度能力，改在
+        // DbContentWorkSource／ContentStreamService 用分塊加解密，見 ChunkedBlobCipher。
+        if (cipher is { Enabled: true })
+        {
+            ApplyFieldEncryption(modelBuilder, cipher);
+        }
+    }
+
+    private static void ApplyFieldEncryption(ModelBuilder modelBuilder, FieldCipher cipher)
+    {
+        var nullableConverter = new ValueConverter<string?, string?>(
+            v => v == null ? null : cipher.Encrypt(v),
+            v => v == null ? null : cipher.Decrypt(v));
+        var requiredConverter = new ValueConverter<string, string>(
+            v => cipher.Encrypt(v),
+            v => cipher.Decrypt(v));
+
+        modelBuilder.Entity<GroupMessage>().Property(m => m.Text).HasConversion(nullableConverter);
+        modelBuilder.Entity<MessageContent>().Property(c => c.FileName).HasConversion(nullableConverter);
+        modelBuilder.Entity<Group>().Property(g => g.GroupName).HasConversion(nullableConverter);
+        modelBuilder.Entity<Group>().Property(g => g.PictureUrl).HasConversion(nullableConverter);
+        modelBuilder.Entity<GroupMember>().Property(m => m.DisplayName).HasConversion(nullableConverter);
+        modelBuilder.Entity<GroupMember>().Property(m => m.PictureUrl).HasConversion(nullableConverter);
+        modelBuilder.Entity<UserAlias>().Property(a => a.Alias).HasConversion(requiredConverter);
     }
 }

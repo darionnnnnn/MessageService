@@ -1,4 +1,5 @@
 using MessageService.Data;
+using MessageService.Data.Crypto;
 using MessageService.Web.Middleware;
 using MessageService.Web.Services;
 using Microsoft.AspNetCore.HttpOverrides;
@@ -26,11 +27,23 @@ builder.Services.AddDbContext<MessageDbContext>(options =>
     }
 });
 
+builder.Services.Configure<EncryptionOptions>(builder.Configuration.GetSection(EncryptionOptions.SectionName));
+// 單例：金鑰是固定設定值，跟請求無關；必須跟收錄端 appsettings 的 Encryption:Key 完全一致，
+// 否則其中一端寫入的密文另一端解不開，見 docs/ENCRYPTION.md
+builder.Services.AddSingleton<FieldCipher>();
+
 builder.Services.AddScoped<ContentStreamService>();
 builder.Services.AddScoped<IMaskingService, MaskingService>();
 builder.Services.AddScoped<IAnonymousIdentityService, AnonymousIdentityService>();
 
 var app = builder.Build();
+
+// FieldCipher 是單例，第一次被解析時才會驗證 Encryption:Key（Enabled=true 但金鑰缺漏／格式
+// 錯誤會在建構子裡丟例外）——這裡強制在啟動當下就解析一次，壞設定要讓服務直接啟動失敗
+using (var validationScope = app.Services.CreateScope())
+{
+    validationScope.ServiceProvider.GetRequiredService<FieldCipher>();
+}
 
 // 部署在反向代理後面時才需要開啟，讓 IpAllowlistMiddleware 看到的是真實來源 IP 而非代理 IP
 if (builder.Configuration.GetValue<bool>("UseForwardedHeaders"))

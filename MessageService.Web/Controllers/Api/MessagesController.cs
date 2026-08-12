@@ -1,9 +1,11 @@
 using MessageService.Data;
+using MessageService.Data.Crypto;
 using MessageService.Models;
 using MessageService.Web.Dtos;
 using MessageService.Web.Services;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 
 namespace MessageService.Web.Controllers.Api;
 
@@ -12,7 +14,8 @@ public class MessagesController(
     MessageDbContext dbContext,
     ContentStreamService contentStreamService,
     IMaskingService maskingService,
-    IAnonymousIdentityService anonymousIdentityService) : ControllerBase
+    IAnonymousIdentityService anonymousIdentityService,
+    IOptions<EncryptionOptions> encryptionOptions) : ControllerBase
 {
     public const int MaxDays = 3650;
 
@@ -262,17 +265,31 @@ public class MessagesController(
         }
 
         // === 內容比對：SQL 端用原文 LIKE 撈候選，之後用遮蔽後文字複驗，避免搜尋變成遮蔽的後門 ===
+        // 加密模式例外：Text 欄位在 SQL 端存的是密文，LIKE 對密文做子字串比對沒有意義（GCM
+        // 加密後同樣的明文子字串在密文裡不會有任何對應關係），SQL LIKE 下推完全失效。改成只在
+        // 最近 Encryption:SearchWindowDays 天內的文字訊息解密後在記憶體比對——EventTimestamp
+        // 不是加密欄位，範圍過濾正常下推到 SQL；Text 透過 ValueConverter 在投影時自動解密。
         IQueryable<GroupMessage> baseQuery = dbContext.GroupMessages.AsNoTracking();
         if (groupId is not null)
         {
             baseQuery = baseQuery.Where(m => m.GroupId == groupId);
         }
 
-        var likePattern = $"%{EscapeLikePattern(q)}%";
-        var textCandidates = await baseQuery
-            .Where(m => m.MessageType == "text" && m.Text != null && EF.Functions.Like(m.Text, likePattern, "\\"))
-            .OrderByDescending(m => m.Id)
-            .Take(SearchCandidateLimit)
+        IQueryable<GroupMessage> textQuery = baseQuery.Where(m => m.MessageType == "text" && m.Text != null);
+        if (encryptionOptions.Value.Enabled)
+        {
+            var cutoff = DateTimeOffset.UtcNow.AddDays(-encryptionOptions.Value.SearchWindowDays);
+            textQuery = textQuery.Where(m => m.EventTimestamp >= cutoff).OrderByDescending(m => m.Id);
+        }
+        else
+        {
+            var likePattern = $"%{EscapeLikePattern(q)}%";
+            textQuery = textQuery.Where(m => EF.Functions.Like(m.Text, likePattern, "\\"))
+                .OrderByDescending(m => m.Id)
+                .Take(SearchCandidateLimit);
+        }
+
+        var textCandidates = await textQuery
             .Select(m => new { m.Id, m.GroupId, m.UserId, m.MessageType, m.Text, m.EventTimestamp })
             .ToListAsync(cancellationToken);
 
