@@ -36,27 +36,33 @@ public class DbContentWorkSource(MessageDbContext dbContext, IOptions<ContentDow
         // 格式儲存，現在才加轉換會讓既有 messages.db 的既有資料被讀成亂碼）。Failed 筆數本來
         // 就是小量（下載失敗的內容），先用 FailedAttempts 門檻縮小範圍後在記憶體篩 cutoff
         // 划算得多，不值得為此冒風險改儲存格式。
+        // 只投影 Id 與 ReceivedAt，絕對不要用 Include + ToListAsync 把整個 MessageContent
+        // 實體撈回來——那會連 Content（varbinary(max)）一起載進記憶體。而且「Failed 的列不會
+        // 有內容」這個假設並不成立：SQLite 的 zeroblob(N) 是先 commit 才開始串流填入，中途
+        // 失敗會留下一顆 N bytes 的 blob，重試耗盡後那列就變成「Failed 且帶著一顆大 blob」。
+        // 一支 300MB 的影片失敗幾次，每次重新入列都會把幾百 MB 載進記憶體，正好違反本批次
+        // 串流化要達成的目的。
         var cutoff = DateTimeOffset.UtcNow.AddDays(-_options.FailedRetryWindowDays);
         var failedCandidates = await dbContext.MessageContents
-            .Include(c => c.GroupMessage)
-            .Where(c => c.DownloadStatus == DownloadStatus.Failed && c.FailedAttempts < _options.MaxFailedRetries)
+            .Where(c => c.DownloadStatus == DownloadStatus.Failed
+                && c.FailedAttempts < _options.MaxFailedRetries
+                && c.GroupMessage != null)
+            .Select(c => new { c.Id, c.GroupMessage!.ReceivedAt })
             .ToListAsync(cancellationToken);
 
-        var retryableFailed = failedCandidates
-            .Where(c => c.GroupMessage is not null && c.GroupMessage.ReceivedAt >= cutoff)
+        var retryableIds = failedCandidates
+            .Where(c => c.ReceivedAt >= cutoff)
+            .Select(c => c.Id)
             .ToList();
 
-        foreach (var content in retryableFailed)
+        if (retryableIds.Count > 0)
         {
-            content.DownloadStatus = DownloadStatus.Pending;
+            await dbContext.MessageContents
+                .Where(c => retryableIds.Contains(c.Id))
+                .ExecuteUpdateAsync(s => s.SetProperty(c => c.DownloadStatus, DownloadStatus.Pending), cancellationToken);
         }
 
-        if (retryableFailed.Count > 0)
-        {
-            await dbContext.SaveChangesAsync(cancellationToken);
-        }
-
-        return pendingIds.Concat(retryableFailed.Select(c => c.Id)).ToList();
+        return pendingIds.Concat(retryableIds).ToList();
     }
 
     public async Task<ContentWorkItem?> GetAsync(long contentId, CancellationToken cancellationToken)
@@ -75,7 +81,7 @@ public class DbContentWorkSource(MessageDbContext dbContext, IOptions<ContentDow
 
     /// <summary>blob 寫入先於中繼資料更新：中斷時（例如服務被殺）DownloadStatus 維持原狀，
     /// 下次啟動的 RequeuePendingAsync 會整個重跑，不會留下「狀態是 Completed 但內容是半截」
-    /// 的資料。SQL Server 用 SqlParameter 的串流參數（直接把 Stream 指派給 Value，провider
+    /// 的資料。SQL Server 用 SqlParameter 的串流參數（直接把 Stream 指派給 Value，provider
     /// 端會邊讀邊送，不整份進記憶體）；SQLite 沒有這個機制，改用 zeroblob() 先配置定長空間，
     /// 再用 SqliteBlob（Stream 子類別）增量寫入。</summary>
     public async Task CompleteAsync(long contentId, Stream content, long contentLength, string? contentType, CancellationToken cancellationToken)
@@ -95,13 +101,30 @@ public class DbContentWorkSource(MessageDbContext dbContext, IOptions<ContentDow
             var effectiveStream = cipher.CreateEncryptingStream(content, contentLength);
             var effectiveLength = cipher.Enabled ? ChunkedBlobCipher.ComputeEncryptedLength(contentLength) : contentLength;
 
+            // 包一層計數器來核對「實際寫進去的位元組數」是否等於宣稱的長度。這不是防禦性
+            // 潔癖：SQLite 是先 zeroblob(N) 配置好 N bytes 再往裡面填，Stream.CopyToAsync 在
+            // 來源提早結束時「不會」拋例外，於是尾巴那段零就留在資料庫裡，接著下面照樣把狀態
+            // 標成 Completed——結果是一個補零的半截檔案，讀取端還會照 LENGTH(Content) 把整包
+            // 送給瀏覽器，而且因為狀態是 Completed，重試機制永遠不會再撿它回來。
+            // contentLength 來自 LINE 回應的 Content-Length 標頭，本來就不是可以無條件相信的值。
+            var countingStream = new ByteCountingStream(effectiveStream);
+
             if (dbContext.Database.IsSqlite())
             {
-                await WriteContentSqliteAsync((SqliteConnection)connection, contentId, effectiveStream, effectiveLength, cancellationToken);
+                await WriteContentSqliteAsync((SqliteConnection)connection, contentId, countingStream, effectiveLength, cancellationToken);
             }
             else
             {
-                await WriteContentSqlServerAsync(connection, contentId, effectiveStream, cancellationToken);
+                await WriteContentSqlServerAsync(connection, contentId, countingStream, cancellationToken);
+            }
+
+            if (countingStream.BytesRead != effectiveLength)
+            {
+                // 往外拋而不是標成 Failed：這是一次性的傳輸問題，交給 ContentDownloadService
+                // 既有的重試迴圈處理；DownloadStatus 維持 Pending，下次重跑會整個重寫這顆 blob
+                throw new InvalidOperationException(
+                    $"Content stream for message content {contentId} produced {countingStream.BytesRead} bytes "
+                    + $"but {effectiveLength} were declared; refusing to mark it as completed.");
             }
         }
         finally
@@ -121,6 +144,9 @@ public class DbContentWorkSource(MessageDbContext dbContext, IOptions<ContentDow
         entity.ContentType = contentType;
         entity.DownloadStatus = DownloadStatus.Completed;
         entity.CompletedAt = DateTimeOffset.UtcNow;
+        // 歸零，不然「失敗 9 次後終於成功」的內容會永遠帶著 FailedAttempts=9，
+        // 日後若加上「重新下載」之類的功能會從 9 起跳、一次就撞到 MaxFailedRetries
+        entity.FailedAttempts = 0;
         await dbContext.SaveChangesAsync(cancellationToken);
     }
 
@@ -173,4 +199,53 @@ public class DbContentWorkSource(MessageDbContext dbContext, IOptions<ContentDow
         entity.LastAttemptAt = DateTimeOffset.UtcNow;
         await dbContext.SaveChangesAsync(cancellationToken);
     }
+}
+
+/// <summary>唯讀的直通包裝，只多做一件事：累計實際被讀走的位元組數，讓 CompleteAsync 能在
+/// 寫入結束後核對「宣稱的長度」與「真的寫進去多少」。兩個 provider 的寫入路徑對短讀的反應
+/// 不一致（SQLite 的 zeroblob 會靜默補零、SQL Server 是有多少寫多少），統一在這裡把關比在
+/// 兩條路徑各自處理可靠。</summary>
+internal sealed class ByteCountingStream(Stream inner) : Stream
+{
+    public long BytesRead { get; private set; }
+
+    public override bool CanRead => true;
+    public override bool CanSeek => false;
+    public override bool CanWrite => false;
+    public override long Length => throw new NotSupportedException();
+
+    public override long Position
+    {
+        get => throw new NotSupportedException();
+        set => throw new NotSupportedException();
+    }
+
+    public override void Flush()
+    {
+    }
+
+    public override int Read(byte[] buffer, int offset, int count)
+    {
+        var read = inner.Read(buffer, offset, count);
+        BytesRead += read;
+        return read;
+    }
+
+    public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+    {
+        var read = await inner.ReadAsync(buffer, cancellationToken);
+        BytesRead += read;
+        return read;
+    }
+
+    public override async Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
+    {
+        var read = await inner.ReadAsync(buffer.AsMemory(offset, count), cancellationToken);
+        BytesRead += read;
+        return read;
+    }
+
+    public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+    public override void SetLength(long value) => throw new NotSupportedException();
+    public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
 }

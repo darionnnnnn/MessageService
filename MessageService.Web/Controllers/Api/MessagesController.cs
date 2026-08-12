@@ -278,8 +278,15 @@ public class MessagesController(
         IQueryable<GroupMessage> textQuery = baseQuery.Where(m => m.MessageType == "text" && m.Text != null);
         if (encryptionOptions.Value.Enabled)
         {
-            var cutoff = DateTimeOffset.UtcNow.AddDays(-encryptionOptions.Value.SearchWindowDays);
-            textQuery = textQuery.Where(m => m.EventTimestamp >= cutoff).OrderByDescending(m => m.Id);
+            // 密文沒辦法用 LIKE 做子字串比對，只能撈回來解密後在記憶體比對——所以除了天數視窗
+            // 之外一定還要有筆數上限：沒有 groupId 時這個查詢涵蓋「所有群組最近 N 天的全部文字
+            // 訊息」，忙碌群組隨便就是幾萬則，每一則還會在具現化時跑一次 AES-GCM 解密。少了
+            // Take，任何進得來的人（本站只有 IP 白名單、沒有登入）連打幾次搜尋就能把記憶體與
+            // CPU 吃光。下面配額的 break 是在具現化之後才發生的，救不了這件事。
+            var cutoff = DateTimeOffset.UtcNow.AddDays(-encryptionOptions.Value.EffectiveSearchWindowDays);
+            textQuery = textQuery.Where(m => m.EventTimestamp >= cutoff)
+                .OrderByDescending(m => m.Id)
+                .Take(SearchCandidateLimit);
         }
         else
         {

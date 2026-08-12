@@ -255,7 +255,13 @@
         els.piiNhiToggle.checked = settings.maskNhiCard;
     }
 
-    async function handlePiiMaskingChange() {
+    // 失敗時一定要把該開關轉回原狀。這個 PUT 送的是四個旗標的完整快照，所以「畫面狀態」與
+    // 「DB 狀態」一旦分岔就會被下一次成功的存檔固化下來：使用者關掉身分證但 PUT 失敗（畫面
+    // 已經是未勾、DB 仍是 true），接著關掉健保卡而這次成功，送出去的 payload 會把身分證一起
+    // 關掉——等於靜默關閉一個使用者從來沒成功關過的遮蔽開關，而且畫面上看不出任何異常。
+    // 這是隱私開關，寧可讓使用者看到「改不動」，也不能讓它在背後自己變動。
+    async function handlePiiMaskingChange(event) {
+        const toggle = event?.target ?? null;
         try {
             await fetchJson('/api/settings/pii-masking', {
                 method: 'PUT',
@@ -270,7 +276,10 @@
             settingsDirty = true;
             showToast('個資遮蔽設定已更新');
         } catch {
-            showToast('更新失敗', true);
+            if (toggle) {
+                toggle.checked = !toggle.checked;
+            }
+            showToast('更新失敗，設定未變更', true);
         }
     }
 

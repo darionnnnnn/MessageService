@@ -161,7 +161,7 @@ dotnet user-secrets set "Line:ChannelAccessToken" "<你的 access token>"
 - 影片/語音的 Range 請求（拖拉進度）不能靠 ADO.NET 的 blob stream 做 `Seek`——SQL Server 與 SQLite 的 blob stream 都是 forward-only，不支援真正的隨機存取。因此 Range 切片直接在 SQL 端用 `SUBSTRING`/`substr` 完成（未加密時），每個 Range 請求只讀取實際要傳送的位元組，不會把整個檔案載進應用程式記憶體；沒有帶 Range 的請求（多數圖片/檔案下載）直接單次 SELECT，不繞經 Range 切片邏輯。
 - **XSS 白名單**：只有白名單內的圖片/影片/音訊 MIME type 會用原始 `Content-Type` 內嵌顯示，其餘一律強制 `Content-Type: application/octet-stream` 並加 `X-Content-Type-Options: nosniff`，防止惡意檔名/內容偽裝成 `text/html` 造成儲存型 XSS。
 - **檔名編碼**：`Content-Disposition` 同時輸出 ASCII fallback（`filename=`）與 RFC 5987 UTF-8 版本（`filename*=UTF-8''...`），中文檔名在新舊瀏覽器都能正確下載存檔。
-- **快取**：以內容雜湊當 `ETag`、`Cache-Control: private, immutable`，命中 `If-None-Match` 回 304，同一則訊息的媒體重複載入（如捲動回上方）不用整包重傳。
+- **快取**：`ETag` 直接用內容的 Id 推算（`"mc-{id}"`，不必為了算雜湊把整包內容讀出來）——內容一旦 `Completed` 就不會再被改寫，Id 相同即位元組相同，所以這是有效的 strong ETag，也才敢搭配 `Cache-Control: private, max-age=31536000, immutable`。命中 `If-None-Match` 回 304，同一則訊息的媒體重複載入（如捲動回上方）不用整包重傳。
 - 應用層加密開啟時（見 [docs/ENCRYPTION.md](docs/ENCRYPTION.md)），blob 以 1MB 為單位分塊加密，Range 請求換算成塊邊界後只解密涵蓋範圍內的塊，一樣不需要整檔載入記憶體。
 
 實作見 `MessageService.Web/Services/ContentStreamService.cs`。
@@ -171,6 +171,7 @@ dotnet user-secrets set "Line:ChannelAccessToken" "<你的 access token>"
 `IMaskingService.LoadRulesAsync()` 每個請求只呼叫一次，把當下的名稱顯示模式、關鍵字規則、別名對照載成一份 `IMaskingRuleSet` 快照，套用到該次回應的每則訊息時全是同步運算，避免每則訊息各打一次 DB。
 
 - **關鍵字遮蔽**：不分大小寫的純字串比對（不用 regex），可設定全部群組或指定群組套用；預設遮蔽為與關鍵字等長的 `*`，也可設定自訂替換字串
+- **台灣個資自動遮蔽**：跟關鍵字規則互補的第二層——不需要事先知道要輸入什麼關鍵字，只要「長得像」就遮。身分證／統一證號、手機、市話、健保卡四種格式各有獨立開關（存 `ViewerSettings`，預設全開，設定頁可關），命中的字串一律套用跟名稱遮蔽同一套「首尾保留、中間 `*`」。實作在 `MaskingRuleSet.MaskText`，四組 regex 的邊界處理見下方「設計決策備忘」；搜尋端因為是拿遮蔽後的文字重新驗證，所以個資遮蔽自動也是搜尋的過濾條件，不會變成後門
 - **名稱顯示四模式**：
   - `Original`：顯示原始快取的 LINE 顯示名稱，沒有快取則顯示 UserId；唯一會回傳真實頭貼 URL 的模式
   - `MaskMiddle`：首尾字保留、中間 `*`（1 字全遮；2 字只留首字，如「小明」→「小*」；3 字以上首尾各留一字，如「王小明」→「王*明」）
@@ -185,7 +186,8 @@ dotnet user-secrets set "Line:ChannelAccessToken" "<你的 access token>"
 
 - **內容比對**：SQL 端先用原文 `LIKE`（`EF.Functions.Like` 帶 `ESCAPE`，`%`/`_`/`\` 會被跳脫成字面）撈候選，於記憶體用 `MaskingRuleSet.MaskText` 套用後的文字**重新驗證**仍含關鍵字才算命中——被關鍵字規則遮掉的詞（如「密碼」）搜不到，摘要也只顯示遮蔽後的文字，不會洩漏原文。
 - **名稱比對**：走當下顯示模式**解析後**的名稱（`Original` 比對原名、`MaskMiddle`/`CustomAlias` 比對遮蔽後名稱或別名、`Anonymous` 比對動植物代號），符合的成員底下所有訊息都算命中（不限訊息內容本身有沒有關鍵字）。`Anonymous` 模式下只讀 `AnonymousIdentities`、**不觸發指派**——沒被指派過代號的成員姓名比對就是找不到，指派只應該發生在使用者實際開啟訊息視窗時。
-- **範圍與限制**：`groupId` 省略即搜尋全部群組；只搜文字訊息的 `Text` 欄（媒體訊息無文字可搜，檔名未經遮蔽管線、不搜）；結果上限 100 筆、依 `EventTimestamp` 新到舊排序，不做分頁；`Text` 欄無索引，全掃在目前資料量級（單機、萬則內）可接受，量大再評估 FTS。
+- **範圍與限制**：`groupId` 省略即搜尋全部群組；只搜文字訊息的 `Text` 欄（媒體訊息無文字可搜，檔名未經遮蔽管線、不搜）；文字命中與姓名命中**各有 50 筆獨立配額**（合併後上限 100 筆），依 `EventTimestamp` 新到舊排序，不做分頁；`Text` 欄無索引，全掃在目前資料量級（單機、萬則內）可接受，量大再評估 FTS。
+- **應用層加密啟用時，內容搜尋走另一條路**：密文沒辦法用 `LIKE` 做子字串比對，改成只在最近 `Encryption:SearchWindowDays`（預設 14、上限 90）天內的文字訊息解密後於記憶體比對，更早的訊息內容搜不到（姓名搜尋不受影響，因為姓名是另外從 `GroupMembers` 解出來比對的）。這條路徑同樣受候選筆數上限保護——少了上限的話，「撈回來逐筆解密」會變成任何人都能觸發的記憶體／CPU 消耗管道。見 [docs/ENCRYPTION.md](docs/ENCRYPTION.md)。
 - **跳轉上下文**：搜尋結果可用 `GET /api/groups/{groupId}/messages?aroundId={messageId}&days=` 取得以該訊息為錨點、前後各 `days` 天的視窗（含該訊息本身），供前端捲動並高亮；此模式回應不含 `latestId`（跳轉後屬歷史檢視，前端會暫停新訊息輪詢，不需要輪詢基準）。
 
 ### IP 白名單（沒有登入機制）
@@ -214,7 +216,8 @@ dotnet user-secrets set "Line:ChannelAccessToken" "<你的 access token>"
 |---|---|
 | `Database:Provider` / `ConnectionStrings:*` | 與收錄端指向同一顆資料庫 |
 | `AllowedClientIps` | IP 白名單，見上 |
-| `UseForwardedHeaders` | 反向代理後方時開啟 |
+| `UseForwardedHeaders` | 反向代理後方時開啟；IIS in-process（預設部署方式）不要開，見上 |
+| `Encryption:Enabled` / `Key` / `SearchWindowDays` | **必須與收錄端完全一致**，否則訊息會顯示成 `ENC1:` 密文、媒體一律回 404，見 [docs/ENCRYPTION.md](docs/ENCRYPTION.md) |
 
 ---
 
@@ -262,7 +265,9 @@ dotnet user-secrets set "Line:ChannelAccessToken" "<你的 access token>"
 
 Migrations 統一放在 `MessageService.Data`，用 `MessageService` 當 startup project：
 
-- **SQLite（開發）**：兩個專案啟動時都各自 `EnsureCreated()`，免手動（收錄端在 `Program.cs`；檢視端目前假設 schema 已由收錄端建立）。**注意**：`EnsureCreated()` 只在資料庫檔案完全不存在時依目前模型建表，對已存在的 SQLite 檔案不會補新表/新欄位——加了新表（例如 `AnonymousIdentities`）後，既有的本機 `messages.db` 要手動刪除讓它重建，或改走 migration。收錄端另外會在 `EnsureCreated()` 之後執行 `MessageDbSchemaUpgrader.EnsureSchema()`，用 `ALTER TABLE`/`CREATE INDEX IF NOT EXISTS` 的方式把既有 SQLite 檔案追加同步到最新欄位/索引（不需要整檔重建）；**這支只掛在收錄端啟動流程**，只跑檢視端（不啟動收錄端）的舊 `messages.db` 檔案不會被升級，直接連線會因缺欄位噴 SQL 錯誤——本機開發若只想跑 Web 端，記得先讓收錄端啟動過一次。
+- **SQLite（開發）**：**只有收錄端**啟動時會 `EnsureCreated()` 建表（`MessageService/Program.cs`），檢視端完全不建 schema、假設收錄端已經建好。**注意**：`EnsureCreated()` 只在資料庫檔案完全不存在時依目前模型建表，對已存在的 SQLite 檔案不會補新表/新欄位——加了新表（例如 `AnonymousIdentities`）後，既有的本機 `messages.db` 要手動刪除讓它重建，或改走 migration。收錄端另外會在 `EnsureCreated()` 之後執行 `MessageDbSchemaUpgrader.EnsureSchema()`，用 `ALTER TABLE`/`CREATE INDEX IF NOT EXISTS` 的方式把既有 SQLite 檔案追加同步到最新欄位/索引（不需要整檔重建）；**這支只掛在收錄端啟動流程**，只跑檢視端（不啟動收錄端）的舊 `messages.db` 檔案不會被升級，直接連線會因缺欄位噴 SQL 錯誤。
+
+  > **升級順序（SQLite 環境的部署約束，不只是本機開發的注意事項）**：一定要**先重啟收錄端、再重啟檢視端**。反過來的話，檢視端會連上還沒補欄位的 `messages.db`，而 `ViewerSettings` 的新欄位是每個訊息／群組／設定請求都會讀到的——結果不是漸進劣化，是對話頁、側欄、搜尋、設定全部 500，直到有人想起要去把收錄端重啟一次。SQL Server 環境同理：忘了跑 `dotnet ef database update` 就會是同樣的結果。
 - **SQL Server（正式）**：
 
 ```bash
@@ -274,7 +279,7 @@ ASPNETCORE_ENVIRONMENT=Production dotnet ef database update --project MessageSer
 ## 設計決策備忘
 
 - **圖片/影片/語音/檔案存 DB（varbinary）而非磁碟**：檢視端只要連 DB 就能讀到；保留期清除靠 CASCADE 一次帶走，不會產生孤兒檔案。代價是 DB 容量成長快，若量大屆時再評估 FILESTREAM 或磁碟存放（內容獨立一表已為搬遷留好最小改動面）
-- **webhook 一律回 200**（簽章合法後）：回非 2xx 會讓 LINE 重送並可能判定 webhook 失效；個別事件失敗只記 log
+- **webhook 除了「outbox 寫不進去」以外一律回 200**（簽章合法後）：回非 2xx 會讓 LINE 重送並可能判定 webhook 失效，所以 JSON 解析失敗、個別事件處理失敗都只記 log 並回 200（畸形 payload 重送也不會變好）。唯一的例外是寫本機 outbox 本身失敗（磁碟滿、檔案鎖住、DB 損毀）——那是唯一會真的把訊息弄丟的情況，改回 500 讓 LINE 的 redelivery 接手，重送造成的重複由 `WebhookEventId` 唯一索引擋掉。**前提是 LINE Developers Console 要開啟 webhook redelivery**（預設關閉，見 [docs/LINE-BOT-SETUP.md](docs/LINE-BOT-SETUP.md)）；沒開的話回 500 等於直接放棄那則事件
 - **webhook 收進來後只寫本機 outbox，不直接碰資料庫**：落地（含防重送）延後到背景排空時才做，webhook 回應時間因此跟資料庫是否可用完全脫鉤，短暫斷線不會掉訊息；這也是收錄端支援網段分離部署（`Deployment:Mode`）的基礎，詳見 [docs/DEPLOYMENT-MODES.md](docs/DEPLOYMENT-MODES.md)
 - **下載走背景佇列**：影片/語音要等 LINE 轉檔、檔案可達數百 MB，不能在 webhook 請求內同步處理；服務重啟會自動撈回殘留的 Pending 接續下載
 - **群組/成員名稱背景快取**：同樣不在 webhook 請求內同步呼叫 LINE profile API，避免拖慢 webhook 回應
@@ -302,7 +307,7 @@ ASPNETCORE_ENVIRONMENT=Production dotnet ef database update --project MessageSer
 dotnet test
 ```
 
-- `MessageService.Tests`：webhook 事件解析（五種型別分流含 audio、過濾規則）、outbox 落地（`DirectIngestSink` 的防重送——`WebhookEventId` 唯一索引、撞鍵與暫時性儲存失敗以回查分辨〔前者當重複成功、後者拋回 outbox 重試不掉訊息〕、change tracker 不污染同批後續、各型別存檔行為、重複情境也正確回傳既有 ContentId）、outbox 排空（到期判斷、批次上限、指數退避與封頂、單筆失敗不影響同批其他筆、暫時性失敗永遠重試不死信、僅 `PermanentIngestException` 立即死信且死信項目不再被撿起、成功後依 IngestSideEffects 決定要不要入列本機佇列、每小時死信計數記錄）、outbox schema 升級（既有 outbox.db 補欄位不動既有資料、啟用 WAL、新舊 schema 皆冪等）、部署模式（convention 單元行為＋真實 host 整合驗證：三模式路由閘門、Line／Db 啟動驗證缺漏擋下、OutboundHere 與 ChannelAccessToken 的啟動驗證、ingest API 認證〔缺金鑰 404／錯金鑰 401／IP 不在白名單 403／正確金鑰經真實 DirectIngestSink 寫入並確認去重〕、content-work 與 profiles 端點的真實 HTTP 生命週期）、`HttpIngestSink`（狀態碼分流：2xx 成功並解析回應帶出 ContentId、400 永久失敗、其餘與連線層錯誤皆可重試）、`IContentWorkSource`／`IProfileStore` 兩套實作、Null 佇列（入列後 ReadAllAsync 永不產出）、`IngestSideEffects`（依 ContentId 有無決定要不要入列、Null 佇列搭配無錯誤）、**兩套 IIngestSink 落地路徑的等價性測試**（同一 envelope 分別走 DirectIngestSink 與 HttpIngestSink→真實 Db 模式 host，斷言產生的 GroupMessages／MessageContents 完全相同，含重複送出時兩邊都回傳同一個 ContentId）、背景下載（成功/轉檔輪詢/轉檔失敗/重試耗盡/啟動接續/**多 worker 並行下載**〔gate 機制證明同時有多筆在下載〕/**Failed 重試視窗**〔超過 `FailedRetryWindowDays` 或 `MaxFailedRetries` 不再撿回〕）、`LineContentClient`（`ResponseHeadersRead` 不預先緩衝整包內容）、`DbContentWorkSource`（SQL Server 串流寫入、SQLite `zeroblob`/`SqliteBlob` 分塊寫入兩套路徑各自驗證）、群組/成員名稱快取（新增/過期更新/API 失敗 fallback/失敗冷卻期內不重複呼叫）、保留期清除（DB 讀取保留天數、分批刪除、含 CASCADE 驗證）、`MessageDbSchemaUpgrader`（既有 SQLite 檔案追加欄位/索引冪等）、Controller 整合測試（401/200/畸形 body 仍 200 但 outbox 寫入失敗回 500、webhook 經真實 outbox＋背景排空落地資料庫）、加密（`FieldCipher` 整值加解密/`ENC1:` 前綴/舊明文混讀、`ChunkedBlobCipher`/`ChunkedEncryptingStream` 分塊格式與邊界情況、`MessageDbContext` 不同 `FieldCipher` 狀態間的模型快取隔離）
+- `MessageService.Tests`：webhook 事件解析（五種型別分流含 audio、過濾規則）、outbox 落地（`DirectIngestSink` 的防重送——`WebhookEventId` 唯一索引、撞鍵與暫時性儲存失敗以回查分辨〔前者當重複成功、後者拋回 outbox 重試不掉訊息〕、change tracker 不污染同批後續、各型別存檔行為、重複情境也正確回傳既有 ContentId）、outbox 排空（到期判斷、批次上限、指數退避與封頂、單筆失敗不影響同批其他筆、暫時性失敗永遠重試不死信、僅 `PermanentIngestException` 立即死信且死信項目不再被撿起、成功後依 IngestSideEffects 決定要不要入列本機佇列、每小時死信計數記錄）、outbox schema 升級（既有 outbox.db 補欄位不動既有資料、啟用 WAL、新舊 schema 皆冪等）、部署模式（convention 單元行為＋真實 host 整合驗證：三模式路由閘門、Line／Db 啟動驗證缺漏擋下、OutboundHere 與 ChannelAccessToken 的啟動驗證、ingest API 認證〔缺金鑰 404／錯金鑰 401／IP 不在白名單 403／正確金鑰經真實 DirectIngestSink 寫入並確認去重〕、content-work 與 profiles 端點的真實 HTTP 生命週期）、`HttpIngestSink`（狀態碼分流：2xx 成功並解析回應帶出 ContentId、400 永久失敗、其餘與連線層錯誤皆可重試）、`IContentWorkSource`／`IProfileStore` 兩套實作、Null 佇列（入列後 ReadAllAsync 永不產出）、`IngestSideEffects`（依 ContentId 有無決定要不要入列、Null 佇列搭配無錯誤）、**兩套 IIngestSink 落地路徑的等價性測試**（同一 envelope 分別走 DirectIngestSink 與 HttpIngestSink→真實 Db 模式 host，斷言產生的 GroupMessages／MessageContents 完全相同，含重複送出時兩邊都回傳同一個 ContentId）、背景下載（成功/轉檔輪詢/轉檔失敗/重試耗盡/啟動接續/**多 worker 並行下載**〔gate 機制證明同時有多筆在下載〕/**Failed 重試視窗**〔超過 `FailedRetryWindowDays` 或 `MaxFailedRetries` 不再撿回〕）、`LineContentClient`（狀態碼分流、失敗時不洩漏連線；**「不預先緩衝整包內容」這件事本身沒有被測試釘住**——測試用的假 handler 回的是已經 buffer 完的內容，同樣的斷言在舊實作下也會通過）、`DbContentWorkSource`（SQLite 的 `zeroblob`/`SqliteBlob` 分塊寫入路徑、寫入長度與宣稱長度不符時拒絕標成 Completed；**SQL Server 的串流寫入路徑目前沒有自動化測試覆蓋**——測試一律跑 SQLite，那條路要靠實機驗證）、群組/成員名稱快取（新增/過期更新/API 失敗 fallback/失敗冷卻期內不重複呼叫）、保留期清除（DB 讀取保留天數、分批刪除、含 CASCADE 驗證）、`MessageDbSchemaUpgrader`（既有 SQLite 檔案追加欄位/索引冪等）、Controller 整合測試（401/200/畸形 body 仍 200 但 outbox 寫入失敗回 500、webhook 經真實 outbox＋背景排空落地資料庫）、加密（`FieldCipher` 整值加解密/`ENC1:` 前綴/舊明文混讀、`ChunkedBlobCipher`/`ChunkedEncryptingStream` 分塊格式與邊界情況、`MessageDbContext` 不同 `FieldCipher` 狀態間的模型快取隔離）
 - `MessageService.Web.Tests`：Groups/Messages API（分頁游標、hasMore、空視窗仍回 latestId、沉寂期長於視窗仍能翻頁、遮蔽套用、視窗上限 500 筆與 `Truncated` 旗標、側欄未讀數〔依 `?read=` 基準計數、上限 100、畸形參數容錯、未帶參數為 0〕）、訊息搜尋（文字/名稱各自 50 筆配額獨立生效）、內容串流（200/206/304/416/malformed Range、無 Range 直讀、XSS 白名單 MIME 判定、RFC5987 檔名編碼、ETag 產生與 `If-None-Match` 命中）、Settings API（CRUD、群組範圍替換、單列設定被刪後補建、保留天數驗證範圍、PII 遮蔽開關讀寫）、`/api/users`（Anonymous 模式回代號不觸發新指派、其他模式回真實姓名）、`MaskingService`/`MaskingRuleSet`（含名稱遮蔽邊界情況、四種台灣個資 regex 含 CJK 緊鄰英數字元的真實場景）、IP 白名單 middleware（允許/拒絕/空白名單/CIDR）、加密端到端（開啟加密後整個請求生命週期的文字與 blob 加解密、Range 請求跨分塊邊界）
 
 測試都使用 SQLite（in-memory 或暫存檔），Web 端整合測試用 `IStartupFilter` 在 TestServer 補一個固定來源 IP（TestServer 的請求沒有真正 TCP 連線，`Connection.RemoteIpAddress` 預設是 null）。

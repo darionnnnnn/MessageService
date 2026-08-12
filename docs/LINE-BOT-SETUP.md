@@ -305,7 +305,9 @@ channel secret 不正確。重新從 **Basic settings** 分頁複製（不要複
 
 - 資料表要先建立：`ASPNETCORE_ENVIRONMENT=Production dotnet ef database update --project MessageService.Data --startup-project MessageService`
 - Webhook URL 改成正式網域，一個 channel **只能設定一個** webhook URL（開發與正式不能共用同一個 channel，建議各自建立 channel）
-- 若部署在反向代理（IIS/nginx）後面，檢視端要開 `UseForwardedHeaders`，否則 IP 白名單看到的會是代理的 IP 而不是真實來源
+- 檢視端的 IP 白名單：本專案預設的 **IIS in-process 託管不要開** `UseForwardedHeaders`——那個模式下中介層看到的已經是真實來源 IP，開了反而會去信任偽造得了的標頭。只有 IIS 前面又疊了獨立反向代理（nginx／雲端 LB）或改用 out-of-process 託管時才需要開，而且必須同時設定 `KnownProxies`／`KnownNetworks`，否則上游送來的 `X-Forwarded-For` 會被忽略，等於白開。詳見 README 的「IP 白名單」段
+- **Webhook redelivery 建議開啟**（Messaging API 分頁，預設關閉）：收錄端只有在「本機 outbox 寫不進去」時才會回 500，靠 LINE 重送把那則事件補回來（重送造成的重複由 `WebhookEventId` 唯一索引擋掉）。沒開這個選項的話，那類失敗就等於直接掉那則訊息
+- 若啟用了應用層加密，收錄端與檢視端的 `Encryption:Key` 必須完全一致，見 [ENCRYPTION.md](ENCRYPTION.md)
 
 ---
 

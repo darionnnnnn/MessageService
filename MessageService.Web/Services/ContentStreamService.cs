@@ -15,30 +15,60 @@ namespace MessageService.Web.Services;
 ///
 /// 加密啟用時 blob 存的是分塊密文（格式見 ChunkedBlobCipher，DbContentWorkSource 寫入）——
 /// 讀取端一律先偷看前 16 bytes 表頭判斷是不是這個格式（不看 Encryption:Enabled 設定本身，
-/// 純粹看資料長什麼樣子），這樣新舊資料混存、甚至加密設定事後被關掉，既有的加密內容
-/// 還是讀得到。Range 請求只解密涵蓋所需區間的那幾個 chunk，一次只在記憶體放一個 chunk，
+/// 純粹看資料長什麼樣子），這樣新舊資料可以混存。注意反過來不成立：加密設定事後被關掉時，
+/// 既有的加密內容因為沒有金鑰可解，會直接回 404（不是顯示亂碼），見 docs/ENCRYPTION.md。
+/// Range 請求只解密涵蓋所需區間的那幾個 chunk，一次只在記憶體放一個 chunk，
 /// 不管請求範圍多大都不會整份解密進記憶體。
+///
+/// 「是不是密文」既然只看資料本身，那個表頭就是外部可控的輸入（加密關閉期間，任何人都
+/// 可以在群組裡傳一個開頭剛好是 MSE1 的檔案），所以表頭裡的數字在使用前一定要驗證，
+/// 見 StreamAsync 裡的說明。
 /// </summary>
-public class ContentStreamService(MessageDbContext dbContext, FieldCipher cipher)
+public class ContentStreamService(MessageDbContext dbContext, FieldCipher cipher, ILogger<ContentStreamService> logger)
 {
     private const int BufferSize = 81920;
 
-    /// <summary>inline 顯示的白名單：圖片／影片／語音在瀏覽器裡開啟本身就是預期用途。
-    /// image/svg+xml 明確排除——SVG 跟 HTML 一樣會被瀏覽器當成可執行文件解析、能跑 &lt;script&gt;，
-    /// 讓它 inline 等於允許任何丟進群組的 .svg 在檢視端同源執行任意腳本。</summary>
-    private static bool IsSafeToInline(string? contentType) =>
-        contentType is not null
-        && contentType != "image/svg+xml"
-        && (contentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase)
-            || contentType.StartsWith("video/", StringComparison.OrdinalIgnoreCase)
-            || contentType.StartsWith("audio/", StringComparison.OrdinalIgnoreCase));
+    /// <summary>可以 inline 顯示的 MIME type，真正的白名單（不是「前綴符合再扣掉黑名單」）。
+    /// 刻意不放 image/svg+xml——SVG 跟 HTML 一樣會被瀏覽器當成可執行文件解析、能跑 &lt;script&gt;，
+    /// 讓它 inline 等於允許任何丟進群組的 .svg 在檢視端同源執行任意腳本（本站沒有登入機制，
+    /// 腳本可以直接把整個對話撈出去外送）。用列舉而不是前綴比對，是因為前綴比對會讓未來任何
+    /// 新的、可執行的 image/* 型別自動獲得放行。</summary>
+    private static readonly HashSet<string> InlineSafeContentTypes = new(StringComparer.Ordinal)
+    {
+        "image/jpeg", "image/pjpeg", "image/png", "image/gif", "image/webp",
+        "image/bmp", "image/avif", "image/heic", "image/heif",
+        "video/mp4", "video/quicktime", "video/webm", "video/3gpp",
+        "audio/mpeg", "audio/mp4", "audio/aac", "audio/ogg", "audio/wav", "audio/x-m4a",
+    };
+
+    /// <summary>把資料庫存的 Content-Type 正規化成可以拿來比對的形式：去掉 `; charset=…` 這類
+    /// 參數、去空白、轉小寫。MIME type 依 RFC 2045 §5.1 本來就是大小寫不敏感，瀏覽器也一律
+    /// 當小寫處理——不正規化就比對的話，`IMAGE/SVG+XML` 或 `image/svg+xml; charset=utf-8`
+    /// 都能繞過黑名單再被前綴規則判成安全。收錄端兩條寫入路徑的值格式並不一致
+    /// （LineContentClient 取 MediaType 已剝參數，IngestController 是把 Request.ContentType
+    /// 原樣存下、會帶參數），所以正規化必須在這裡做。</summary>
+    private static string? NormalizeContentType(string? contentType)
+    {
+        if (string.IsNullOrWhiteSpace(contentType))
+        {
+            return null;
+        }
+
+        var separator = contentType.IndexOf(';');
+        var mediaType = separator >= 0 ? contentType[..separator] : contentType;
+        mediaType = mediaType.Trim().ToLowerInvariant();
+        return mediaType.Length == 0 ? null : mediaType;
+    }
+
+    private static bool IsSafeToInline(string? normalizedContentType) =>
+        normalizedContentType is not null && InlineSafeContentTypes.Contains(normalizedContentType);
 
     public async Task<ContentStreamResult> StreamAsync(
         long messageContentId, string? rangeHeader, string? ifNoneMatch, HttpResponse response, CancellationToken cancellationToken)
     {
         var meta = await dbContext.MessageContents
             .Where(c => c.Id == messageContentId)
-            .Select(c => new { c.DownloadStatus, c.ContentType, c.FileName })
+            .Select(c => new { c.DownloadStatus, c.ContentType, c.FileName, c.CompletedAt })
             .FirstOrDefaultAsync(cancellationToken);
 
         if (meta is null || meta.DownloadStatus != DownloadStatus.Completed)
@@ -72,6 +102,24 @@ public class ContentStreamService(MessageDbContext dbContext, FieldCipher cipher
 
                 totalLength = ChunkedBlobCipher.ReadPlaintextLength(header);
                 chunkSize = ChunkedBlobCipher.ReadChunkSize(header);
+
+                // 表頭本身沒有被任何認證標籤保護，而「這是不是密文」純粹看前 4 bytes 是不是
+                // MSE1——也就是說這兩個數字是可以被餵進來的：加密關閉期間，任何人只要在群組
+                // 傳一個開頭剛好是 MSE1 的檔案，之後管理者一打開加密，這裡就會照著檔案內容
+                // 去配置陣列、去做除法。chunkSize 極大會直接配置到 OOM、為 0 會 DivideByZero。
+                // 寫入端永遠只會寫 ChunkedBlobCipher.ChunkSize 這個編譯期常數，所以任何其他值
+                // 都不是本格式；長度也必須跟實際 blob 大小對得起來，順帶擋掉截斷與一般資料損毀。
+                var storedLength = await GetContentLengthAsync(connection, isSqlite, messageContentId, cancellationToken);
+                if (chunkSize != ChunkedBlobCipher.ChunkSize
+                    || totalLength < 0
+                    || ChunkedBlobCipher.ComputeEncryptedLength(totalLength) != storedLength)
+                {
+                    logger.LogWarning(
+                        "Message content {MessageContentId} looks like an encrypted blob but its header failed validation "
+                        + "(chunkSize={ChunkSize}, plaintextLength={PlaintextLength}, storedLength={StoredLength}); treating as unavailable",
+                        messageContentId, chunkSize, totalLength, storedLength);
+                    return ContentStreamResult.NotFound;
+                }
             }
             else
             {
@@ -87,9 +135,13 @@ public class ContentStreamService(MessageDbContext dbContext, FieldCipher cipher
                 return ContentStreamResult.Handled;
             }
 
-            // 內容一旦 Completed 就不會再變（見 DbContentWorkSource），ETag 純粹用 Id 推算即可，
-            // 不需要算內容雜湊；可以放心用 immutable 快取，重複瀏覽同一段對話不用再打資料庫拉圖
-            var etag = $"\"mc-{messageContentId}\"";
+            // 內容一旦 Completed 就不會再變（見 DbContentWorkSource），所以不需要為了 ETag 把整包
+            // 內容讀出來算雜湊——但也不能只用 Id：SQLite 的 Id 是 rowid 別名、沒有 AUTOINCREMENT，
+            // 整張表被保留期清除清空之後新資料會從 1 重新發號。搭配 immutable + 一年 max-age，
+            // 使用者的瀏覽器會把「舊的 id 1」永久快取成「新的 id 1」，看到已經被刪掉的舊圖而且
+            // 連 revalidate 都不做。把 CompletedAt 一起折進去（已在上面同一次投影撈回來，零額外查詢），
+            // 順帶也讓還原備份、換資料庫這類情境不會撞快取。
+            var etag = $"\"mc-{messageContentId}-{meta.CompletedAt?.UtcTicks ?? 0:x}\"";
             response.Headers.CacheControl = "private, max-age=31536000, immutable";
             response.Headers.ETag = etag;
 
@@ -102,8 +154,11 @@ public class ContentStreamService(MessageDbContext dbContext, FieldCipher cipher
             response.Headers.XContentTypeOptions = "nosniff";
             response.Headers.AcceptRanges = "bytes";
 
-            var safe = IsSafeToInline(meta.ContentType);
-            response.ContentType = safe ? meta.ContentType! : "application/octet-stream";
+            // 送出去的是正規化後的值，不是資料庫原值——原值可能帶著 `; charset=…` 之類的參數，
+            // 或大小寫混雜，直接回給瀏覽器等於把未經整理的上游輸入放進回應標頭
+            var normalizedContentType = NormalizeContentType(meta.ContentType);
+            var safe = IsSafeToInline(normalizedContentType);
+            response.ContentType = safe ? normalizedContentType! : "application/octet-stream";
             if (meta.FileName is not null)
             {
                 var disposition = safe ? "inline" : "attachment";
@@ -173,6 +228,14 @@ public class ContentStreamService(MessageDbContext dbContext, FieldCipher cipher
         long start, long length, int chunkSize, long totalPlaintextLength,
         HttpResponse response, CancellationToken cancellationToken)
     {
+        // 空內容（0 bytes）的加密 blob 只有 16 bytes 表頭、零個 chunk。ChunksCovering(0, 0, C)
+        // 因為 lastByte = -1 而算出「第 0 塊」，接著就會去讀一個不存在的 chunk 然後拋例外——
+        // 未加密路徑同情境是正常的 200 + Content-Length: 0，這裡不擋就變成加密專屬的 500。
+        if (length <= 0)
+        {
+            return;
+        }
+
         var (firstChunk, lastChunk) = ChunkedBlobCipher.ChunksCovering(start, length, chunkSize);
         var (spanStart, _) = ChunkedBlobCipher.ChunkByteRangeOnDisk(firstChunk, totalPlaintextLength, chunkSize);
         var (lastChunkOffset, lastChunkOnDiskLength) = ChunkedBlobCipher.ChunkByteRangeOnDisk(lastChunk, totalPlaintextLength, chunkSize);

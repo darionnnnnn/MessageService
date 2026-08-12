@@ -38,16 +38,40 @@ public class ContentDownloadService(
 
     private async Task RunWorkerAsync(CancellationToken stoppingToken)
     {
-        await foreach (var contentId in queue.ReadAllAsync(stoppingToken))
+        try
         {
-            try
+            await foreach (var contentId in queue.ReadAllAsync(stoppingToken))
             {
-                await ProcessAsync(contentId, stoppingToken);
+                try
+                {
+                    await ProcessAsync(contentId, stoppingToken);
+                }
+                // 只有「真的在停機」才讓例外往外走結束這個 worker。HttpClient 逾時丟的是
+                // TaskCanceledException（OperationCanceledException 的子類別）但 stoppingToken
+                // 並沒有被取消——早期版本用 `when (ex is not OperationCanceledException)` 過濾，
+                // 那種逾時會直接穿過 catch 讓 worker 靜默結束、再也不讀 Channel：單 worker 時代
+                // 會立刻炸掉 host（吵但看得見），改成多 worker 之後卻變成並行度默默從 3 掉到 2，
+                // 維運端完全看不出徵兆。判斷依據因此改看 stoppingToken 本身，不看例外型別。
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    logger.LogError(ex, "Unexpected error processing message content {MessageContentId}", contentId);
+                }
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                logger.LogError(ex, "Unexpected error processing message content {MessageContentId}", contentId);
-            }
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            // 正常停機
+        }
+        catch (Exception ex)
+        {
+            // 走到這裡代表 Channel 本身壞了（而不是單筆內容失敗），這個 worker 收攤了；
+            // 一定要留下紀錄，不然並行度悄悄下降沒有人會發現
+            logger.LogCritical(ex, "Content download worker exited unexpectedly and will no longer process downloads");
+            throw;
         }
     }
 

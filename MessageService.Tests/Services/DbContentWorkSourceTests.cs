@@ -82,7 +82,11 @@ public class DbContentWorkSourceTests : IDisposable
         var ids = await source.GetPendingIdsAsync(CancellationToken.None);
 
         Assert.Equal(contentId, Assert.Single(ids));
-        var reloaded = await dbContext.MessageContents.SingleAsync(c => c.Id == contentId);
+        // AsNoTracking 是必要的：狀態是用 ExecuteUpdateAsync 直接下 SQL 改的（刻意不載入實體，
+        // 否則會把 Failed 列的整顆 blob 一起撈進記憶體），這種批次更新不會同步既有的 change
+        // tracker 快照，追蹤查詢會回傳過期的 Failed。正式流程不受影響——RequeuePendingAsync
+        // 用完就把 scope 丟掉，後續的 ProcessAsync 各自開新的 scope 與新的 DbContext。
+        var reloaded = await dbContext.MessageContents.AsNoTracking().SingleAsync(c => c.Id == contentId);
         Assert.Equal(DownloadStatus.Pending, reloaded.DownloadStatus);
     }
 

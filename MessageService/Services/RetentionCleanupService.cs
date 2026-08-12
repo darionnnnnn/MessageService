@@ -63,7 +63,23 @@ public class RetentionCleanupService(
         using var scope = scopeFactory.CreateScope();
         var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
 
-        var retentionDays = await GetRetentionDaysAsync(dbContext, cancellationToken);
+        var storedRetentionDays = await GetRetentionDaysAsync(dbContext, cancellationToken);
+
+        // 這是不可逆的硬刪除，所以不能無條件相信資料庫讀回來的值：0 會讓 cutoff 等於現在、
+        // 負數會讓 cutoff 落在未來——兩者都等於「把整個資料庫清空」。目前所有第一方寫入路徑
+        // 都會帶合法值（API 端有範圍驗證、EF 種子與屬性初始設定式都是 1095），但 SQL Server
+        // migration 上這個欄位的 DB-level DEFAULT 是 0，只要有任何一次非 EF 的 insert
+        // （手動 SQL、還原舊備份後補欄位、日後新增的寫入點）就會踩到。夾擠的成本是一行，
+        // 換掉的是「資料全刪且無法復原」。
+        var retentionDays = Math.Clamp(storedRetentionDays, 1, ViewerSettings.MaxRetentionDays);
+        if (retentionDays != storedRetentionDays)
+        {
+            logger.LogWarning(
+                "ViewerSettings.RetentionDays is {Stored}, which is outside the allowed range 1..{Max}; "
+                + "clamped to {Clamped} days for this run",
+                storedRetentionDays, ViewerSettings.MaxRetentionDays, retentionDays);
+        }
+
         var cutoff = DateTimeOffset.UtcNow.AddDays(-retentionDays);
 
         var totalDeleted = 0;

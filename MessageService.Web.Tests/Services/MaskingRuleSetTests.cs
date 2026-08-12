@@ -155,13 +155,44 @@ public class MaskingRuleSetTests
 
     [Theory]
     [InlineData("我的身分證是A123456789啦", "A123456789")]
-    [InlineData("居留證號碼B287654321", "B287654321")] // 目前規則只認 [1|2] 第二碼，B2 開頭符合
+    [InlineData("女性身分證A223456789", "A223456789")]
+    // 小寫：真實聊天訊息不會有人特地按 Shift 打大寫，只認 [A-Z] 等於在最常見的輸入上完全失效
+    [InlineData("我的身分證是a123456789啦", "a123456789")]
+    // 2021 年起的新式外來人口統一證號：第二碼是 8（男）／9（女）
+    [InlineData("統一證號A812345678", "A812345678")]
+    [InlineData("統一證號A912345678", "A912345678")]
+    // 舊式居留證統一證號：第二碼是 A~D 的英文字母
+    [InlineData("居留證AB12345678", "AB12345678")]
     public void MaskText_NationalId_MasksMiddleKeepingFirstAndLastChar(string input, string matched)
     {
         var rules = CreateRuleSet(pii: PiiMaskingSettings.AllEnabled);
         var expected = input.Replace(matched, MaskMiddleExpected(matched));
 
         Assert.Equal(expected, rules.MaskText("G1", input));
+    }
+
+    /// <summary>「兩個字母 + 8 碼數字」的單號很常見，第二碼限定在真的會出現的性別／證件
+    /// 類別碼（1/2/8/9/A-D）才不會把訂單編號整串誤遮。</summary>
+    [Theory]
+    [InlineData("訂單編號PO12345678")]
+    [InlineData("料號XY87654321")]
+    public void MaskText_NationalId_DoesNotMaskLookalikeReferenceNumbers(string input)
+    {
+        var rules = CreateRuleSet(pii: PiiMaskingSettings.AllEnabled);
+
+        Assert.Equal(input, rules.MaskText("G1", input));
+    }
+
+    /// <summary>前後邊界要擋掉英文字母而不只是數字，否則英數混合的單號會被咬掉一段，
+    /// 變成「ORD0********8」這種既沒保護到什麼、又破壞正常內容的結果。</summary>
+    [Theory]
+    [InlineData("ORD0912345678")]
+    [InlineData("X123456789012")]
+    public void MaskText_AlphanumericTokens_AreNotPartiallyMasked(string input)
+    {
+        var rules = CreateRuleSet(pii: PiiMaskingSettings.AllEnabled);
+
+        Assert.Equal(input, rules.MaskText("G1", input));
     }
 
     [Fact]
@@ -195,6 +226,8 @@ public class MaskingRuleSetTests
     [Theory]
     [InlineData("公司電話02-12345678", "02-12345678")]
     [InlineData("市話049-1234567", "049-1234567")]
+    // 台北市話最普遍的寫法，只認單一連字號會整個漏掉
+    [InlineData("公司02-2345-6789分機12", "02-2345-6789")]
     public void MaskText_Landline_RequiresHyphen_MasksMatchingFormats(string input, string matched)
     {
         var rules = CreateRuleSet(pii: PiiMaskingSettings.AllEnabled);

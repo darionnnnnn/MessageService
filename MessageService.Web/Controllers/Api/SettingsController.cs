@@ -61,9 +61,11 @@ public class SettingsController(MessageDbContext dbContext) : ControllerBase
     public async Task<IActionResult> UpdateRetentionSettings(
         [FromBody] RetentionSettingsDto dto, CancellationToken cancellationToken)
     {
-        if (dto.RetentionDays is < 1 or > MessagesController.MaxDays)
+        // 用 ViewerSettings.MaxRetentionDays 而不是借 MessagesController.MaxDays——後者的語意是
+        // 「查詢視窗最大天數」，跟保留期上限只是剛好同值，將來要能各自調整
+        if (dto.RetentionDays is < 1 or > ViewerSettings.MaxRetentionDays)
         {
-            return BadRequest($"RetentionDays must be between 1 and {MessagesController.MaxDays}.");
+            return BadRequest($"RetentionDays must be between 1 and {ViewerSettings.MaxRetentionDays}.");
         }
 
         var settings = await dbContext.ViewerSettings

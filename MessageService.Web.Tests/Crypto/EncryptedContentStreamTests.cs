@@ -167,7 +167,8 @@ public class EncryptedContentStreamTests : IDisposable
 
         var response = await _fixture.Client.GetAsync($"/api/messages/{contentId}/content");
 
-        Assert.Equal($"\"mc-{contentId}\"", response.Headers.ETag?.Tag);
+        // ETag 格式是 "mc-{id}-{CompletedAt ticks}"，見 ContentStreamTests 對 Id 重用的說明
+        Assert.StartsWith($"\"mc-{contentId}-", response.Headers.ETag?.Tag);
         Assert.True(response.Headers.CacheControl?.Private);
     }
 

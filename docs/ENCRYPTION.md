@@ -21,11 +21,26 @@
 產生金鑰（PowerShell）：
 
 ```powershell
-[Convert]::ToBase64String((1..32 | ForEach-Object { Get-Random -Maximum 256 }))
+$bytes = New-Object byte[] 32
+[System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+[Convert]::ToBase64String($bytes)
 ```
+
+> **絕對不要用 `Get-Random` 產生金鑰。** 它底層是 `System.Random`——一個以 32-bit 種子驅動的
+> 一般用途 PRNG，不是密碼學安全亂數源。用它產生的 32 bytes 完全由那個種子決定，實際強度
+> 只有 2^32 而不是 2^256：拿到資料庫備份的人只要窮舉種子、各重算一次金鑰，再用任何一筆
+> `ENC1:` 值的 GCM 認證標籤驗證是否命中即可，普通機器數小時內就能還原金鑰，本文件開頭
+> 「即使拿到資料庫或備份也看不到明文」的保證會完全失效。若既有環境是用 `Get-Random`
+> 產生的金鑰，請視同金鑰已外洩，換一把新金鑰並重新加密既有資料。
 
 `Key` 缺漏或格式不對（不是合法 base64、解碼後不是 32 bytes）時，兩邊的服務都會在啟動當下
 直接失敗（`FieldCipher` 建構子拋例外），不會等到第一則訊息進來才在背景任務裡出錯。
+
+> **拆機部署（`Deployment:Mode=Line`）的例外**：加解密只發生在**碰得到資料庫的那一端**
+> （`Full`／`Db` 模式的收錄端，以及檢視端）。`Line` 模式的主機沒有 `MessageDbContext`
+> 也沒有 `DbContentWorkSource`，金鑰對它毫無用途——**請維持 `Encryption:Enabled=false`，
+> 不要把金鑰放到這台直接對 LINE 曝露的最外緣主機上**，那只是白白多一個外洩面。反過來說，
+> 在 `Line` 端誤設 `Enabled=true` 卻沒給合法金鑰，服務會在啟動時直接失敗。
 
 ## 加密範圍
 
@@ -39,6 +54,9 @@
 | `UserAliases.Alias` | ✓ |
 | `GroupMessages.GroupId` / `UserId` | ✗（刻意不加密，見下） |
 | `MessageContents.ContentType`（如 `image/jpeg`） | ✗ |
+| `MaskKeywords.Keyword` / `Replacement` | ✗（**注意**：遮蔽關鍵字往往就是人名、案號這類敏感字串，等於一份敏感字典以明文留在 DB 裡。功能上要加密沒有障礙——`MaskingRuleSet` 是整批載進記憶體比對、沒有下推到 SQL——只是目前尚未納入範圍） |
+| `AnonymousIdentities.Label`（如「小熊」） | ✗（代號本身不含個資） |
+| `ViewerSettings` 的各項設定 | ✗ |
 
 `GroupId`／`UserId` 保持明文：它們是 LINE 配發的隨機識別碼、本身不含個資，而檢視端幾乎
 每一種查詢（側欄、未讀數、訊息視窗、搜尋）都要用它們做索引查詢或 `GROUP BY`。如果連這兩個
@@ -60,8 +78,14 @@
 「先啟用加密、之後又關掉」是不建議的操作路徑，真的要做的話得先手動把舊資料解密回明文
 再關閉設定。
 
-解密失敗（金鑰不對、內容損毀，或極端情況下有人真的在訊息裡打了 `ENC1:` 開頭的文字）不會
-讓請求 500，只會原樣顯示該欄位並記一行 warning log。
+**媒體的情況比文字更嚴重**：已加密的 blob 在關掉金鑰後不是顯示成亂碼，而是被
+`ContentStreamService` 判定為「內容不可用」直接回 **404**——圖片、影片、檔案會整個從
+畫面上消失，不是變成看不懂的內容而已。
+
+文字欄位的解密失敗（金鑰不對、內容損毀，或極端情況下有人真的在訊息裡打了 `ENC1:` 開頭的
+文字）不會讓請求 500，只會原樣顯示該欄位並記一行 warning log。**blob 的解密失敗則是回
+404**（見上），兩者行為不同——同一個成因（例如兩端金鑰不一致）在畫面上會同時表現成
+「訊息變 `ENC1:` 亂碼」與「媒體全部不見」，排查時記得把這兩個症狀串在一起看。
 
 ## 內容 blob：分塊加密，保留 Range 拖進度能力
 
