@@ -34,9 +34,24 @@ public class RetentionCleanupServiceTests : IDisposable
         _connection.Dispose();
     }
 
-    [Fact]
-    public async Task RunCleanupAsync_RemovesMessagesOlderThanRetentionPeriod_AndCascadesContent()
+    private RetentionCleanupService CreateService() => new(
+        _provider.GetRequiredService<IServiceScopeFactory>(),
+        OptionsFactory.Create(new RetentionOptions()),
+        NullLogger<RetentionCleanupService>.Instance);
+
+    private async Task SetRetentionDaysAsync(int days)
     {
+        using var scope = _provider.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+        var settings = await dbContext.ViewerSettings.SingleAsync(v => v.Id == ViewerSettings.SingletonId);
+        settings.RetentionDays = days;
+        await dbContext.SaveChangesAsync();
+    }
+
+    [Fact]
+    public async Task RunCleanupAsync_RemovesMessagesOlderThanRetentionDays_AndCascadesContent()
+    {
+        await SetRetentionDaysAsync(1095); // 3 年，跟改版前的預設值對齊
         using (var scope = _provider.CreateScope())
         {
             var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
@@ -47,8 +62,8 @@ public class RetentionCleanupServiceTests : IDisposable
                     LineMessageId = "m-old",
                     GroupId = "G1",
                     MessageType = "image",
-                    EventTimestamp = DateTimeOffset.UtcNow.AddYears(-3).AddDays(-1),
-                    ReceivedAt = DateTimeOffset.UtcNow.AddYears(-3).AddDays(-1),
+                    EventTimestamp = DateTimeOffset.UtcNow.AddDays(-1096),
+                    ReceivedAt = DateTimeOffset.UtcNow.AddDays(-1096),
                     Content = new MessageContent
                     {
                         DownloadStatus = DownloadStatus.Completed,
@@ -69,12 +84,7 @@ public class RetentionCleanupServiceTests : IDisposable
             await dbContext.SaveChangesAsync();
         }
 
-        var service = new RetentionCleanupService(
-            _provider.GetRequiredService<IServiceScopeFactory>(),
-            OptionsFactory.Create(new RetentionOptions { Years = 3 }),
-            NullLogger<RetentionCleanupService>.Instance);
-
-        await service.RunCleanupAsync(CancellationToken.None);
+        await CreateService().RunCleanupAsync(CancellationToken.None);
 
         using var verifyScope = _provider.CreateScope();
         var verifyContext = verifyScope.ServiceProvider.GetRequiredService<MessageDbContext>();
@@ -84,5 +94,93 @@ public class RetentionCleanupServiceTests : IDisposable
         var remainingMessage = Assert.Single(remaining);
         Assert.Equal("recent", remainingMessage.WebhookEventId);
         Assert.Empty(remainingContents);
+    }
+
+    [Fact]
+    public async Task RunCleanupAsync_NoViewerSettingsRow_FallsBackToDefaultRetentionDays()
+    {
+        // EnsureCreated() 的 HasData 一定會種好單列設定，這裡模擬萬一那筆不存在的防禦性情境
+        using (var scope = _provider.CreateScope())
+        {
+            var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+            dbContext.ViewerSettings.RemoveRange(dbContext.ViewerSettings);
+            await dbContext.SaveChangesAsync();
+
+            dbContext.GroupMessages.Add(new GroupMessage
+            {
+                WebhookEventId = "very-old", LineMessageId = "m1", GroupId = "G1", MessageType = "text", Text = "x",
+                EventTimestamp = DateTimeOffset.UtcNow.AddDays(-(ViewerSettings.DefaultRetentionDays + 1)),
+                ReceivedAt = DateTimeOffset.UtcNow.AddDays(-(ViewerSettings.DefaultRetentionDays + 1))
+            });
+            await dbContext.SaveChangesAsync();
+        }
+
+        await CreateService().RunCleanupAsync(CancellationToken.None);
+
+        using var verifyScope = _provider.CreateScope();
+        var verifyContext = verifyScope.ServiceProvider.GetRequiredService<MessageDbContext>();
+        Assert.Empty(await verifyContext.GroupMessages.ToListAsync());
+    }
+
+    [Fact]
+    public async Task RunCleanupAsync_UsesConfiguredRetentionDays_ShortWindow()
+    {
+        await SetRetentionDaysAsync(7);
+        using (var scope = _provider.CreateScope())
+        {
+            var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+            dbContext.GroupMessages.AddRange(
+                new GroupMessage
+                {
+                    WebhookEventId = "e1", LineMessageId = "m1", GroupId = "G1", MessageType = "text", Text = "old",
+                    EventTimestamp = DateTimeOffset.UtcNow.AddDays(-8), ReceivedAt = DateTimeOffset.UtcNow.AddDays(-8)
+                },
+                new GroupMessage
+                {
+                    WebhookEventId = "e2", LineMessageId = "m2", GroupId = "G1", MessageType = "text", Text = "kept",
+                    EventTimestamp = DateTimeOffset.UtcNow.AddDays(-6), ReceivedAt = DateTimeOffset.UtcNow.AddDays(-6)
+                });
+            await dbContext.SaveChangesAsync();
+        }
+
+        await CreateService().RunCleanupAsync(CancellationToken.None);
+
+        using var verifyScope = _provider.CreateScope();
+        var verifyContext = verifyScope.ServiceProvider.GetRequiredService<MessageDbContext>();
+        var remaining = Assert.Single(await verifyContext.GroupMessages.ToListAsync());
+        Assert.Equal("e2", remaining.WebhookEventId);
+    }
+
+    [Fact]
+    public async Task RunCleanupAsync_MoreRowsThanBatchSize_DeletesAllAcrossMultipleBatches()
+    {
+        // BatchSize=1000，塞 1005 筆要被刪的舊訊息，驗證分批迴圈真的會跑到全部清完，
+        // 不會在第一批之後就停下來
+        await SetRetentionDaysAsync(1);
+        using (var scope = _provider.CreateScope())
+        {
+            var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+            for (var i = 0; i < 1005; i++)
+            {
+                dbContext.GroupMessages.Add(new GroupMessage
+                {
+                    WebhookEventId = $"old-{i}", LineMessageId = $"m{i}", GroupId = "G1", MessageType = "text", Text = "x",
+                    EventTimestamp = DateTimeOffset.UtcNow.AddDays(-2), ReceivedAt = DateTimeOffset.UtcNow.AddDays(-2)
+                });
+            }
+            dbContext.GroupMessages.Add(new GroupMessage
+            {
+                WebhookEventId = "kept", LineMessageId = "m-kept", GroupId = "G1", MessageType = "text", Text = "kept",
+                EventTimestamp = DateTimeOffset.UtcNow, ReceivedAt = DateTimeOffset.UtcNow
+            });
+            await dbContext.SaveChangesAsync();
+        }
+
+        await CreateService().RunCleanupAsync(CancellationToken.None);
+
+        using var verifyScope = _provider.CreateScope();
+        var verifyContext = verifyScope.ServiceProvider.GetRequiredService<MessageDbContext>();
+        var remaining = Assert.Single(await verifyContext.GroupMessages.ToListAsync());
+        Assert.Equal("kept", remaining.WebhookEventId);
     }
 }

@@ -45,6 +45,86 @@ public class SettingsController(MessageDbContext dbContext) : ControllerBase
         return NoContent();
     }
 
+    [HttpGet("retention")]
+    public async Task<ActionResult<RetentionSettingsDto>> GetRetentionSettings(CancellationToken cancellationToken)
+    {
+        var settings = await dbContext.ViewerSettings
+            .AsNoTracking()
+            .FirstOrDefaultAsync(v => v.Id == ViewerSettings.SingletonId, cancellationToken);
+
+        return Ok(new RetentionSettingsDto(settings?.RetentionDays ?? ViewerSettings.DefaultRetentionDays));
+    }
+
+    /// <summary>不可逆：改小這個值之後，下次每日清除排程一到就會永久刪除超過這個天數的訊息，
+    /// 沒有復原機制。前端要在送出前跟使用者二次確認，見 settings.js。</summary>
+    [HttpPut("retention")]
+    public async Task<IActionResult> UpdateRetentionSettings(
+        [FromBody] RetentionSettingsDto dto, CancellationToken cancellationToken)
+    {
+        // 用 ViewerSettings.MaxRetentionDays 而不是借 MessagesController.MaxDays——後者的語意是
+        // 「查詢視窗最大天數」，跟保留期上限只是剛好同值，將來要能各自調整
+        if (dto.RetentionDays is < 1 or > ViewerSettings.MaxRetentionDays)
+        {
+            return BadRequest($"RetentionDays must be between 1 and {ViewerSettings.MaxRetentionDays}.");
+        }
+
+        var settings = await dbContext.ViewerSettings
+            .FirstOrDefaultAsync(v => v.Id == ViewerSettings.SingletonId, cancellationToken);
+
+        if (settings is null)
+        {
+            dbContext.ViewerSettings.Add(new ViewerSettings { RetentionDays = dto.RetentionDays });
+        }
+        else
+        {
+            settings.RetentionDays = dto.RetentionDays;
+        }
+
+        await dbContext.SaveChangesAsync(cancellationToken);
+        return NoContent();
+    }
+
+    [HttpGet("pii-masking")]
+    public async Task<ActionResult<PiiMaskingSettingsDto>> GetPiiMaskingSettings(CancellationToken cancellationToken)
+    {
+        var settings = await dbContext.ViewerSettings
+            .AsNoTracking()
+            .FirstOrDefaultAsync(v => v.Id == ViewerSettings.SingletonId, cancellationToken);
+
+        return Ok(settings is null
+            ? new PiiMaskingSettingsDto(true, true, true, true)
+            : new PiiMaskingSettingsDto(settings.MaskNationalId, settings.MaskMobilePhone, settings.MaskLandline, settings.MaskNhiCard));
+    }
+
+    [HttpPut("pii-masking")]
+    public async Task<IActionResult> UpdatePiiMaskingSettings(
+        [FromBody] PiiMaskingSettingsDto dto, CancellationToken cancellationToken)
+    {
+        var settings = await dbContext.ViewerSettings
+            .FirstOrDefaultAsync(v => v.Id == ViewerSettings.SingletonId, cancellationToken);
+
+        if (settings is null)
+        {
+            dbContext.ViewerSettings.Add(new ViewerSettings
+            {
+                MaskNationalId = dto.MaskNationalId,
+                MaskMobilePhone = dto.MaskMobilePhone,
+                MaskLandline = dto.MaskLandline,
+                MaskNhiCard = dto.MaskNhiCard
+            });
+        }
+        else
+        {
+            settings.MaskNationalId = dto.MaskNationalId;
+            settings.MaskMobilePhone = dto.MaskMobilePhone;
+            settings.MaskLandline = dto.MaskLandline;
+            settings.MaskNhiCard = dto.MaskNhiCard;
+        }
+
+        await dbContext.SaveChangesAsync(cancellationToken);
+        return NoContent();
+    }
+
     [HttpGet("keywords")]
     public async Task<ActionResult<IReadOnlyList<MaskKeywordDto>>> GetKeywords(CancellationToken cancellationToken)
     {

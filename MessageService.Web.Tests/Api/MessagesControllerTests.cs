@@ -1,5 +1,6 @@
 using System.Net.Http.Json;
 using MessageService.Models;
+using MessageService.Web.Controllers.Api;
 using MessageService.Web.Dtos;
 using MessageService.Web.Tests.TestSupport;
 using Microsoft.EntityFrameworkCore;
@@ -397,5 +398,138 @@ public class MessagesControllerTests : IDisposable
 
         Assert.Equal(firstMessage.DisplayName, secondMessage.DisplayName);
         Assert.Equal(firstMessage.AvatarIcon, secondMessage.AvatarIcon);
+    }
+
+    // === MessageWindowLimit 硬上限：忙碌群組單次回應不該無上限膨脹，見 MessagesController ===
+
+    [Fact]
+    public async Task GetMessages_InitialLoad_WithinWindowLimit_TruncatedIsFalse()
+    {
+        var now = DateTimeOffset.UtcNow;
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            dbContext.GroupMessages.Add(TextMessage("e1", "U1", now, "hi"));
+            await Task.CompletedTask;
+        });
+
+        var page = await _fixture.Client.GetFromJsonAsync<MessagesPageDto>($"/api/groups/{GroupId}/messages?days=3");
+
+        Assert.False(page!.Truncated);
+    }
+
+    [Fact]
+    public async Task GetMessages_InitialLoad_ExceedsWindowLimit_ReturnsMostRecentAndSetsTruncated()
+    {
+        var now = DateTimeOffset.UtcNow;
+        const int total = MessagesController.MessageWindowLimit + 2;
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            // Id 遞增＝時間遞增：i 越大越晚到達（越新）
+            for (var i = 0; i < total; i++)
+            {
+                dbContext.GroupMessages.Add(TextMessage($"e{i}", "U1", now.AddSeconds(-(total - i)), $"msg-{i}"));
+            }
+            await Task.CompletedTask;
+        });
+
+        var page = await _fixture.Client.GetFromJsonAsync<MessagesPageDto>($"/api/groups/{GroupId}/messages?days=3");
+
+        Assert.Equal(MessagesController.MessageWindowLimit, page!.Messages.Count);
+        Assert.True(page.Truncated);
+        // 截斷保留的是「最近」那批：最舊的兩則（msg-0/msg-1）被丟棄
+        Assert.Equal($"msg-{total - MessagesController.MessageWindowLimit}", page.Messages[0].Text);
+        Assert.Equal($"msg-{total - 1}", page.Messages[^1].Text);
+        // 被丟棄的兩則比目前顯示範圍更舊，hasMore 要能偵測到
+        Assert.True(page.HasMore);
+    }
+
+    [Fact]
+    public async Task GetMessages_BeforeId_ExceedsWindowLimit_KeepsMessagesClosestToCursor()
+    {
+        var now = DateTimeOffset.UtcNow;
+        const int total = MessagesController.MessageWindowLimit + 2;
+        long cursorId = 0;
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            for (var i = 0; i < total; i++)
+            {
+                dbContext.GroupMessages.Add(TextMessage($"e{i}", "U1", now.AddSeconds(-(total + 1 - i)), $"msg-{i}"));
+            }
+            var cursor = TextMessage("cursor", "U1", now, "cursor-message");
+            dbContext.GroupMessages.Add(cursor);
+            await dbContext.SaveChangesAsync();
+            cursorId = cursor.Id;
+        });
+
+        var page = await _fixture.Client.GetFromJsonAsync<MessagesPageDto>(
+            $"/api/groups/{GroupId}/messages?beforeId={cursorId}&days={MessagesController.MaxDays}");
+
+        Assert.Equal(MessagesController.MessageWindowLimit, page!.Messages.Count);
+        Assert.True(page.Truncated);
+        // 離游標最近的保留：最舊的兩則（msg-0/msg-1）被丟棄，不是離游標最遠的那批
+        Assert.Equal($"msg-{total - MessagesController.MessageWindowLimit}", page.Messages[0].Text);
+        Assert.Equal($"msg-{total - 1}", page.Messages[^1].Text);
+    }
+
+    [Fact]
+    public async Task GetMessages_AfterId_ExceedsWindowLimit_KeepsOldestFirstAndSetsTruncated()
+    {
+        var now = DateTimeOffset.UtcNow;
+        const int total = MessagesController.MessageWindowLimit + 2;
+        long baselineId = 0;
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            var baseline = TextMessage("baseline", "U1", now.AddSeconds(-(total + 1)), "baseline");
+            dbContext.GroupMessages.Add(baseline);
+            await dbContext.SaveChangesAsync();
+            baselineId = baseline.Id;
+
+            for (var i = 0; i < total; i++)
+            {
+                dbContext.GroupMessages.Add(TextMessage($"e{i}", "U1", now.AddSeconds(-(total - i)), $"msg-{i}"));
+            }
+            await Task.CompletedTask;
+        });
+
+        var page = await _fixture.Client.GetFromJsonAsync<MessagesPageDto>(
+            $"/api/groups/{GroupId}/messages?afterId={baselineId}");
+
+        Assert.Equal(MessagesController.MessageWindowLimit, page!.Messages.Count);
+        Assert.True(page.Truncated);
+        // afterId 保留離游標最近、時間最早的那批，讓輪詢下一輪能從這裡接續，不會跳過中間的訊息
+        Assert.Equal("msg-0", page.Messages[0].Text);
+        Assert.Equal($"msg-{MessagesController.MessageWindowLimit - 1}", page.Messages[^1].Text);
+    }
+
+    [Fact]
+    public async Task GetMessages_AroundId_ExceedsWindowLimit_KeepsMessagesClosestToAnchorAndSetsTruncated()
+    {
+        var now = DateTimeOffset.UtcNow;
+        const int perSide = MessagesController.MessageWindowLimit;
+        long anchorId = 0;
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            for (var i = 0; i < perSide; i++)
+            {
+                dbContext.GroupMessages.Add(TextMessage($"before-{i}", "U1", now.AddSeconds(-(perSide - i)), $"before-{i}"));
+            }
+            var anchor = TextMessage("anchor", "U1", now, "anchor");
+            dbContext.GroupMessages.Add(anchor);
+            await dbContext.SaveChangesAsync();
+            anchorId = anchor.Id;
+
+            for (var i = 0; i < perSide; i++)
+            {
+                dbContext.GroupMessages.Add(TextMessage($"after-{i}", "U1", now.AddSeconds(i + 1), $"after-{i}"));
+            }
+            await dbContext.SaveChangesAsync();
+        });
+
+        var page = await _fixture.Client.GetFromJsonAsync<MessagesPageDto>(
+            $"/api/groups/{GroupId}/messages?aroundId={anchorId}&days={MessagesController.MaxDays}");
+
+        Assert.Equal(MessagesController.MessageWindowLimit, page!.Messages.Count);
+        Assert.True(page.Truncated);
+        Assert.Contains(page.Messages, m => m.Text == "anchor");
     }
 }

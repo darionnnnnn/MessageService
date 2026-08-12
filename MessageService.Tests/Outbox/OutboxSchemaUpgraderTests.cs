@@ -94,6 +94,21 @@ public class OutboxSchemaUpgraderTests : IDisposable
     }
 
     [Fact]
+    public void EnableWalMode_SwitchesJournalModeToWal()
+    {
+        CreateLegacySchemaWithOneRow();
+
+        OutboxSchemaUpgrader.EnableWalMode(ConnectionString);
+
+        using var connection = new SqliteConnection(ConnectionString);
+        connection.Open();
+        using var query = connection.CreateCommand();
+        query.CommandText = "PRAGMA journal_mode;";
+        var mode = (string)query.ExecuteScalar()!;
+        Assert.Equal("wal", mode, ignoreCase: true);
+    }
+
+    [Fact]
     public void EnsureDeadLetterColumn_FreshTableAlreadyHasColumn_IsNoOp()
     {
         // 模擬 EnsureCreated() 剛建好的全新資料庫：Entries 表一開始就含 DeadLetteredAt

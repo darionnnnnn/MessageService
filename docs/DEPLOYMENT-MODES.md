@@ -7,8 +7,9 @@
 > 對等**，差別只在資料流經過幾台機器。訊息收送＋媒體下載＋頭貼快取的完整拆機拓撲都已用
 > 真實雙行程端到端驗證過（webhook 進 Line 端、轉送到 Db 端、含斷線期間 outbox 累積＋恢復後
 > 自動排空且無重複、Line 端背景服務透過 ingest API 撿媒體工作並回報結果，見「端到端驗證
-> 紀錄」）。唯一還沒做的是把 blob 傳輸改成端到端串流（目前仍是整包 `byte[]` 進記憶體，
-> 跟單機模式今天的記憶體行為完全一樣，不惡化也不改善，見下方「目前限制」）。
+> 紀錄」）。Stage 4 原本規劃的「blob 端到端串流」已在另一輪媒體管線改善（收錄端安全體檢
+> 回饋輪）中，作為 `IContentWorkSource` 共用介面的一部分順帶完成——`ApiContentWorkSource`
+> 現在用 `StreamContent` 邊讀邊送，不再整包 `byte[]` 進記憶體，見下方「目前限制」的更新說明。
 
 ## 三種模式
 
@@ -40,8 +41,8 @@ LINE ──▶ LineWebhookController ──▶ WebhookEventHandler
                               outbox.db（本機 SQLite，跟主資料庫完全獨立）
                                         ▲ 立即回 200
                                         │
-                              OutboxForwarderService（背景排空，失敗按退避重試，
-                                        │              死信門檻 MaxAttempts 或永久性失敗）
+                              OutboxForwarderService（背景排空，暫時性失敗指數退避永遠重試，
+                                        │              僅永久性失敗（PermanentIngestException）死信）
                                         ▼
                                    IIngestSink
                           ┌─────────────┴─────────────┐
@@ -94,8 +95,7 @@ webhook 回應時間因此跟資料庫或遠端 API 是否可用完全脫鉤：�
 | `AllowedClientIps` | `/api/ingest/*` 的 IP 白名單（跟 `MessageService.Web` 的同名設定是獨立的兩份，各自只保護各自的端點），只在 `Full`／`Db` 模式生效；空白名單視為全拒 |
 | `Outbox:PollIntervalSeconds` | outbox 空的時候的保底輪詢間隔（寫入會立刻叫醒，這只是撿回到期重試項目用），預設 5 |
 | `Outbox:BatchSize` | 一輪最多處理幾筆，預設 50 |
-| `Outbox:BaseRetryDelaySeconds` / `MaxRetryDelaySeconds` | 重試退避：第 N 次失敗延遲約 `Base × N`，封頂 `Max`，預設 5／300 |
-| `Outbox:MaxAttempts` | 累計失敗達到這個次數就標記死信、不再重試（見下方「死信」），預設 20 |
+| `Outbox:BaseRetryDelaySeconds` / `MaxRetryDelaySeconds` | 指數退避：第 N 次失敗延遲 `Base × 2^(N-1)`，封頂 `Max`，預設 5／300。**沒有累計次數上限**——暫時性失敗永遠重試，只有 `PermanentIngestException`（payload 格式本身不合，重試也不會成功）第一次遇到就直接標記死信（見下方「目前限制」） |
 
 ## 設計決策
 
@@ -247,17 +247,20 @@ webhook 回應時間因此跟資料庫或遠端 API 是否可用完全脫鉤：�
 
 ## 目前限制（誠實記錄，別誤以為做完了）
 
-- **blob 傳輸仍是整包 `byte[]`，沒有端到端串流**：`ILineContentClient.GetContentAsync`
-  回傳 `byte[]`，Db 端寫 EF 也需要完整陣列；`ApiContentWorkSource.CompleteAsync` 因此
-  是「整包下載到記憶體 → 整包 PUT 上傳」。跟單機模式今天的記憶體行為完全一樣（單機
-  也是整包讀進來才寫 DB），**不是 Stage 3 造成的退化**，只是移到 Line 模式下會多一趟
-  網路傳輸。改成串流要同時動 LINE 用戶端與寫入端（EF 寫 blob 無法串流，得走原生 SQL，
-  比照 `MessageService.Web` 的 `ContentStreamService` 讀取端的作法），數百 MB 檔案在
-  拆機情境下的實際記憶體峰值建議部署前實測。
-- **outbox 死信沒有專用的重送介面**：達到 `MaxAttempts` 或收到 `PermanentIngestException`
-  的項目會被標記 `DeadLetteredAt`、停止自動重試，但資料留在 `outbox.db` 裡不會自動消失，
-  只能手動查 `LastError` 欄位後決定怎麼處理。啟動時若偵測到死信筆數 >0 會印一行
-  Warning log 提醒，量大時要考慮補一個管理介面。
+- **blob 傳輸已改為端到端串流**（原 Stage 4 規劃項目，已在另一輪媒體管線改善中順帶完成）：
+  `ILineContentClient.GetContentAsync` 現在回傳未緩衝的 `Stream`（`HttpCompletionOption.ResponseHeadersRead`），
+  `IContentWorkSource.CompleteAsync` 的兩套實作都改成串流——`DbContentWorkSource` 對 SQL Server
+  用 `SqlParameter.Value = Stream` 邊讀邊寫、對 SQLite 用 `zeroblob`＋`SqliteBlob` 分塊寫入；
+  `ApiContentWorkSource.CompleteAsync`（Line 模式打 Db 端 ingest API 的路徑）改用
+  `StreamContent` 邊讀邊送，不再整包 `byte[]` 進記憶體。唯一的例外是 LINE 回應沒帶
+  `Content-Length` 的少數情況——這時會先落一個會自動刪除的暫存檔量出實際長度，量完
+  再從暫存檔串流寫入，只佔用磁碟不佔用記憶體（`ContentDownloadService.CompleteFromResultAsync`）。
+  數百 MB 檔案在拆機情境下的實際吞吐量仍建議部署前實測，但記憶體峰值已不再跟檔案大小
+  成正比。
+- **outbox 死信沒有專用的重送介面**：收到 `PermanentIngestException` 的項目會被標記
+  `DeadLetteredAt`、停止自動重試（暫時性失敗則永遠退避重試、不會死信），但資料留在
+  `outbox.db` 裡不會自動消失，只能手動查 `LastError` 欄位後決定怎麼處理。
+  `OutboxForwarderService` 每小時記一次目前死信筆數，量大時要考慮補一個管理介面。
 - **`Line:OutboundHere` 設錯無法跨主機驗證**：一對拆機主機理論上恰好一台要設 `true`，
   但啟動驗證只能看到自己這台的設定，兩台都 `true`（重複下載，浪費 LINE 配額，但有
   唯一約束擋著不會產生髒資料）或兩台都 `false`（媒體永遠 `Pending`）都不會啟動失敗，
@@ -271,4 +274,4 @@ webhook 回應時間因此跟資料庫或遠端 API 是否可用完全脫鉤：�
 | 1 | outbox＋forwarder＋`IIngestSink`／`DirectIngestSink` | ✅ 已完成 |
 | 2 | ingest API controller＋`HttpIngestSink`＋死信 | ✅ 已完成，端到端驗證通過 |
 | 3 | `IContentWorkSource`／`IProfileStore` 的 API 實作＋入列責任重構 | ✅ 已完成，端到端驗證通過（含抓到並修復真 bug） |
-| 4 | blob 端到端串流、部署檢查表、設定樣板 | 未開始（見「目前限制」） |
+| 4 | blob 端到端串流、部署檢查表、設定樣板 | blob 串流已在另一輪媒體管線改善中完成；部署檢查表、設定樣板未開始 |

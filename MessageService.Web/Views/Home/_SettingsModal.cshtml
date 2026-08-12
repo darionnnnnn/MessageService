@@ -83,6 +83,42 @@
                                     </table>
                                 </div>
                             </section>
+
+                            <section class="settings-card">
+                                <h6 class="settings-card-title">個資自動遮蔽</h6>
+                                <p class="form-text">偵測到符合下列格式的文字會自動用星號遮蔽（保留首尾字元），不需要另外設定關鍵字規則。</p>
+                                <div class="form-check">
+                                    <input class="form-check-input" type="checkbox" id="pii-national-id-toggle">
+                                    <label class="form-check-label" for="pii-national-id-toggle">身分證字號</label>
+                                </div>
+                                <div class="form-check">
+                                    <input class="form-check-input" type="checkbox" id="pii-mobile-toggle">
+                                    <label class="form-check-label" for="pii-mobile-toggle">手機號碼</label>
+                                </div>
+                                <div class="form-check">
+                                    <input class="form-check-input" type="checkbox" id="pii-landline-toggle">
+                                    <label class="form-check-label" for="pii-landline-toggle">市內電話</label>
+                                </div>
+                                <div class="form-check">
+                                    <input class="form-check-input" type="checkbox" id="pii-nhi-toggle">
+                                    <label class="form-check-label" for="pii-nhi-toggle">健保卡號</label>
+                                </div>
+                            </section>
+
+                            <section class="settings-card">
+                                <h6 class="settings-card-title">訊息保留天數</h6>
+                                <p class="form-text">超過這個天數的訊息會在每日排程清除時永久刪除，無法復原。</p>
+                                <div class="row g-3 align-items-end">
+                                    <div class="col-auto">
+                                        <label for="retention-days-input" class="form-label">保留天數</label>
+                                        <input type="number" class="form-control form-control-sm" id="retention-days-input"
+                                               min="1" max="3650" step="1" style="width:8rem">
+                                    </div>
+                                    <div class="col-auto">
+                                        <button type="button" class="btn btn-primary btn-sm" id="retention-save-btn">儲存</button>
+                                    </div>
+                                </div>
+                            </section>
                         </div>
 
                         <div class="tab-pane fade" id="tab-keywords" role="tabpanel" aria-labelledby="tab-keywords-btn">

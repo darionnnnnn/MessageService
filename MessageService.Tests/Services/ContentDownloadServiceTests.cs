@@ -1,4 +1,5 @@
 using MessageService.Data;
+using MessageService.Data.Crypto;
 using MessageService.Models;
 using MessageService.Options;
 using MessageService.Services;
@@ -25,6 +26,8 @@ public class ContentDownloadServiceTests : IDisposable
         services.AddDbContext<MessageDbContext>(o => o.UseSqlite(_connection));
         services.AddScoped<IContentWorkSource, DbContentWorkSource>();
         services.AddSingleton<ILineContentClient>(_contentClient);
+        services.AddSingleton(OptionsFactory.Create(new ContentDownloadOptions()));
+        services.AddSingleton(FieldCipher.Disabled);
         _provider = services.BuildServiceProvider();
 
         using var scope = _provider.CreateScope();
@@ -81,7 +84,7 @@ public class ContentDownloadServiceTests : IDisposable
     public async Task ProcessAsync_ImageDownloadSucceeds_MarksCompleted()
     {
         var contentId = await SeedPendingContentAsync("image");
-        _contentClient.OnGetContent = _ => Task.FromResult(new LineContentResult([1, 2, 3, 4], "image/jpeg"));
+        _contentClient.OnGetContent = _ => Task.FromResult(new LineContentResult(new MemoryStream([1, 2, 3, 4]), "image/jpeg", 4));
 
         var service = CreateService();
         await service.ProcessAsync(contentId, CancellationToken.None);

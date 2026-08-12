@@ -15,8 +15,9 @@ public class WebAppFactoryFixture : IDisposable
 
     public WebApplicationFactory<Program> Factory { get; }
     public HttpClient Client { get; }
+    public string DbConnectionString => $"Data Source={_dbPath}";
 
-    public WebAppFactoryFixture(IReadOnlyList<string>? allowedClientIps = null)
+    public WebAppFactoryFixture(IReadOnlyList<string>? allowedClientIps = null, string? encryptionKey = null)
     {
         var ips = allowedClientIps ?? ["127.0.0.1", "::1"];
         _dbPath = Path.Combine(Path.GetTempPath(), $"messageservice-web-test-{Guid.NewGuid():N}.db");
@@ -32,6 +33,12 @@ public class WebAppFactoryFixture : IDisposable
             for (var i = 0; i < ips.Count; i++)
             {
                 builder.UseSetting($"AllowedClientIps:{i}", ips[i]);
+            }
+
+            if (encryptionKey is not null)
+            {
+                builder.UseSetting("Encryption:Enabled", "true");
+                builder.UseSetting("Encryption:Key", encryptionKey);
             }
 
             // TestServer 的請求沒有真正的 TCP 連線，Connection.RemoteIpAddress 預設是 null，

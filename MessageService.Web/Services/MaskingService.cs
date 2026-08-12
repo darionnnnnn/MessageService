@@ -21,6 +21,10 @@ public class MaskingService(MessageDbContext dbContext) : IMaskingService
             .AsNoTracking()
             .ToDictionaryAsync(a => a.UserId, a => a.Alias, cancellationToken);
 
-        return new MaskingRuleSet(settings?.NameDisplayMode ?? NameDisplayMode.MaskMiddle, keywords, aliases);
+        var pii = settings is null
+            ? PiiMaskingSettings.AllEnabled
+            : new PiiMaskingSettings(settings.MaskNationalId, settings.MaskMobilePhone, settings.MaskLandline, settings.MaskNhiCard);
+
+        return new MaskingRuleSet(settings?.NameDisplayMode ?? NameDisplayMode.MaskMiddle, keywords, aliases, pii);
     }
 }

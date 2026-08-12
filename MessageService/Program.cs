@@ -1,4 +1,5 @@
 using MessageService.Data;
+using MessageService.Data.Crypto;
 using MessageService.Middleware;
 using MessageService.Options;
 using MessageService.Outbox;
@@ -48,6 +49,10 @@ builder.Services.Configure<ProfileCacheOptions>(builder.Configuration.GetSection
 builder.Services.Configure<DeploymentOptions>(builder.Configuration.GetSection(DeploymentOptions.SectionName));
 builder.Services.Configure<IngestOptions>(builder.Configuration.GetSection(IngestOptions.SectionName));
 builder.Services.Configure<OutboxOptions>(builder.Configuration.GetSection(OutboxOptions.SectionName));
+builder.Services.Configure<EncryptionOptions>(builder.Configuration.GetSection(EncryptionOptions.SectionName));
+// 單例：金鑰是固定設定值，跟請求無關；MessageDbContext 的建構子也靠 DI 注入同一份實例，
+// 見 MessageDbContextModelCacheKeyFactory 對「模型依 cipher 狀態分開快取」的說明
+builder.Services.AddSingleton<FieldCipher>();
 
 var databaseProvider = builder.Configuration["Database:Provider"] ?? "Sqlite";
 
@@ -178,6 +183,11 @@ using (var validationScope = app.Services.CreateScope())
     var lineOptions = validationScope.ServiceProvider.GetRequiredService<IOptions<LineOptions>>().Value;
     var ingestOptions = validationScope.ServiceProvider.GetRequiredService<IOptions<IngestOptions>>().Value;
     DeploymentValidator.Validate(deploymentOptions, lineOptions, ingestOptions, validationLogger);
+
+    // FieldCipher 是單例，第一次被解析時才會驗證 Encryption:Key（Enabled=true 但金鑰缺漏／
+    // 格式錯誤會在建構子裡丟例外）——這裡強制在啟動當下就解析一次，壞設定要讓服務直接
+    // 啟動失敗，不要等到第一則訊息進來才在背景任務裡炸開
+    validationScope.ServiceProvider.GetRequiredService<FieldCipher>();
 }
 
 if (hasDatabaseAccess && databaseProvider == "Sqlite")
@@ -185,6 +195,11 @@ if (hasDatabaseAccess && databaseProvider == "Sqlite")
     using var scope = app.Services.CreateScope();
     var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
     dbContext.Database.EnsureCreated();
+
+    // EnsureCreated() 只在資料庫檔案完全不存在時建表——既有的 messages.db 補上本輪新增的
+    // 欄位／索引要在這裡另外處理，見 MessageDbSchemaUpgrader 的說明
+    var messageDbConnectionString = builder.Configuration.GetConnectionString("Sqlite") ?? "Data Source=messages.db";
+    MessageDbSchemaUpgrader.EnsureSchema(messageDbConnectionString);
 }
 
 if (receivesWebhook)
@@ -198,16 +213,12 @@ if (receivesWebhook)
     var outboxConnectionString = builder.Configuration.GetConnectionString("Outbox") ?? "Data Source=outbox.db";
     OutboxSchemaUpgrader.EnsureDeadLetterColumn(outboxConnectionString);
 
-    // 死信不會自動消失，只會在這裡的啟動 log 被看到——沒有專用的重送介面，量大時要靠這行
-    // log 提醒維運人員去查，避免累積到某天才被發現有一批訊息早就不再重試了
-    var deadLetterCount = outboxDbContext.Entries.Count(e => e.DeadLetteredAt != null);
-    if (deadLetterCount > 0)
-    {
-        var startupLogger = scope.ServiceProvider.GetRequiredService<ILogger<Program>>();
-        startupLogger.LogWarning(
-            "Outbox has {Count} dead-lettered entries awaiting manual review (see LastError column in outbox.db)",
-            deadLetterCount);
-    }
+    // webhook 執行緒寫、forwarder 執行緒讀刪；rollback journal 模式下兩邊會互相 block
+    // （busy_timeout 預設 30 秒，遠超 LINE 的 webhook 逾時），WAL 讓讀寫不互相阻塞
+    OutboxSchemaUpgrader.EnableWalMode(outboxConnectionString);
+
+    // 死信不會自動消失，只會在 OutboxForwarderService 的 log 被看到（啟動時先報一次、
+    // 之後每小時再報一次）——沒有專用的重送介面，量大時要靠那行 log 提醒維運人員去查
 }
 
 // Configure the HTTP request pipeline.

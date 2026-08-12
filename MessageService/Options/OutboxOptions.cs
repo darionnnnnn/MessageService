@@ -11,13 +11,13 @@ public class OutboxOptions
     /// <summary>一次最多處理幾筆，避免單輪把整個 outbox 掃進記憶體。</summary>
     public int BatchSize { get; set; } = 50;
 
-    /// <summary>重試退避的基準秒數，第 N 次失敗延遲約 BaseRetryDelaySeconds × N（封頂 MaxRetryDelaySeconds）。</summary>
+    /// <summary>重試退避的基準秒數，第 N 次失敗延遲約 BaseRetryDelaySeconds × 2^(N-1)（封頂
+    /// MaxRetryDelaySeconds）。暫時性失敗永遠重試、不會死信——短暫斷線與長時間停機（資料庫
+    /// 維護、網段切換）都不該讓事件遺失，代價只是死信 log 沒有機會出現（見
+    /// OutboxForwarderService 每小時的死信計數檢查）。只有 PermanentIngestException（例如
+    /// ingest API 判定 payload 格式不合，重試不會改變結果）第一次遇到就直接死信，
+    /// 見 OutboxEntry.DeadLetteredAt。</summary>
     public int BaseRetryDelaySeconds { get; set; } = 5;
 
     public int MaxRetryDelaySeconds { get; set; } = 300;
-
-    /// <summary>累計失敗次數達到這個門檻就標記死信、不再重試（見 OutboxEntry.DeadLetteredAt）。
-    /// 只保護「暫時性失敗重試了也沒用」的情況；PermanentIngestException（例如 ingest API
-    /// 判定 payload 格式不合）不管次數，第一次遇到就直接死信。</summary>
-    public int MaxAttempts { get; set; } = 20;
 }

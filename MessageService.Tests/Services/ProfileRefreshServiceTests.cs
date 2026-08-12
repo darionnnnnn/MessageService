@@ -134,4 +134,103 @@ public class ProfileRefreshServiceTests : IDisposable
         Assert.Single(_profileClient.GroupSummaryCalls);
         Assert.Empty(_profileClient.MemberProfileCalls);
     }
+
+    // === 失敗冷卻：LINE profile API 失敗（暫時性故障／bot 已被踢出群組）後，同一個群組／成員
+    // 在冷卻時間內不該每一則訊息都再打一次 API，見 ProfileCacheOptions.FailureRetryAfter ===
+
+    [Fact]
+    public async Task ProcessAsync_GroupApiFails_SecondCallWithinCooldown_SkipsApiCall()
+    {
+        _profileClient.OnGetGroupSummary = _ => null;
+        var service = CreateService(new ProfileCacheOptions
+        {
+            RefreshAfter = TimeSpan.FromDays(7), FailureRetryAfter = TimeSpan.FromMinutes(10)
+        });
+
+        await service.ProcessAsync(new ProfileRefreshTask("G1", null), CancellationToken.None);
+        await service.ProcessAsync(new ProfileRefreshTask("G1", null), CancellationToken.None);
+
+        Assert.Single(_profileClient.GroupSummaryCalls);
+    }
+
+    [Fact]
+    public async Task ProcessAsync_GroupApiFails_AfterCooldownExpires_RetriesApiCall()
+    {
+        _profileClient.OnGetGroupSummary = _ => null;
+        var service = CreateService(new ProfileCacheOptions
+        {
+            RefreshAfter = TimeSpan.FromDays(7), FailureRetryAfter = TimeSpan.FromMilliseconds(20)
+        });
+
+        await service.ProcessAsync(new ProfileRefreshTask("G1", null), CancellationToken.None);
+        await Task.Delay(100);
+        await service.ProcessAsync(new ProfileRefreshTask("G1", null), CancellationToken.None);
+
+        Assert.Equal(2, _profileClient.GroupSummaryCalls.Count);
+    }
+
+    [Fact]
+    public async Task ProcessAsync_GroupApiSucceedsAfterPriorFailure_ClearsCooldown()
+    {
+        var succeed = false;
+        _profileClient.OnGetGroupSummary = groupId => succeed ? new GroupSummary(groupId, "Recovered", null) : null;
+        var service = CreateService(new ProfileCacheOptions
+        {
+            RefreshAfter = TimeSpan.FromDays(7), FailureRetryAfter = TimeSpan.FromMilliseconds(20)
+        });
+
+        await service.ProcessAsync(new ProfileRefreshTask("G1", null), CancellationToken.None);
+        await Task.Delay(100);
+        succeed = true;
+        await service.ProcessAsync(new ProfileRefreshTask("G1", null), CancellationToken.None);
+
+        var group = await GetGroupAsync("G1");
+        Assert.Equal("Recovered", group!.GroupName);
+    }
+
+    [Fact]
+    public async Task ProcessAsync_MemberApiFails_SecondCallWithinCooldown_SkipsApiCall()
+    {
+        // Group 快取先設成新鮮，這裡只想單獨看 member 冷卻的行為，不想連 group 也一起打 API
+        using (var scope = _provider.CreateScope())
+        {
+            var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+            dbContext.Groups.Add(new Group { GroupId = "G1", GroupName = "Cached", UpdatedAt = DateTimeOffset.UtcNow });
+            await dbContext.SaveChangesAsync();
+        }
+        _profileClient.OnGetGroupMemberProfile = (_, _) => null;
+        var service = CreateService(new ProfileCacheOptions
+        {
+            RefreshAfter = TimeSpan.FromDays(7), FailureRetryAfter = TimeSpan.FromMinutes(10)
+        });
+
+        await service.ProcessAsync(new ProfileRefreshTask("G1", "U1"), CancellationToken.None);
+        await service.ProcessAsync(new ProfileRefreshTask("G1", "U1"), CancellationToken.None);
+
+        Assert.Single(_profileClient.MemberProfileCalls);
+        Assert.Empty(_profileClient.GroupSummaryCalls);
+    }
+
+    [Fact]
+    public async Task ProcessAsync_MemberApiFails_DifferentGroupSameUser_IsNotAffectedByOtherGroupsCooldown()
+    {
+        using (var scope = _provider.CreateScope())
+        {
+            var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+            dbContext.Groups.Add(new Group { GroupId = "G1", GroupName = "Cached", UpdatedAt = DateTimeOffset.UtcNow });
+            dbContext.Groups.Add(new Group { GroupId = "G2", GroupName = "Cached", UpdatedAt = DateTimeOffset.UtcNow });
+            await dbContext.SaveChangesAsync();
+        }
+        _profileClient.OnGetGroupMemberProfile = (_, _) => null;
+        var service = CreateService(new ProfileCacheOptions
+        {
+            RefreshAfter = TimeSpan.FromDays(7), FailureRetryAfter = TimeSpan.FromMinutes(10)
+        });
+
+        await service.ProcessAsync(new ProfileRefreshTask("G1", "U1"), CancellationToken.None);
+        await service.ProcessAsync(new ProfileRefreshTask("G2", "U1"), CancellationToken.None);
+
+        // 冷卻鍵含 GroupId，不同群組的同一個 UserId 不該互相影響
+        Assert.Equal(2, _profileClient.MemberProfileCalls.Count);
+    }
 }

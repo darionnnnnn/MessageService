@@ -100,7 +100,8 @@ namespace MessageService.Data.Migrations
 
                     b.Property<string>("GroupId")
                         .IsRequired()
-                        .HasColumnType("nvarchar(max)");
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)");
 
                     b.Property<string>("LineMessageId")
                         .IsRequired()
@@ -108,7 +109,8 @@ namespace MessageService.Data.Migrations
 
                     b.Property<string>("MessageType")
                         .IsRequired()
-                        .HasColumnType("nvarchar(max)");
+                        .HasMaxLength(20)
+                        .HasColumnType("nvarchar(20)");
 
                     b.Property<string>("PackageId")
                         .HasColumnType("nvarchar(max)");
@@ -123,7 +125,8 @@ namespace MessageService.Data.Migrations
                         .HasColumnType("nvarchar(max)");
 
                     b.Property<string>("UserId")
-                        .HasColumnType("nvarchar(max)");
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)");
 
                     b.Property<string>("WebhookEventId")
                         .IsRequired()
@@ -133,6 +136,10 @@ namespace MessageService.Data.Migrations
 
                     b.HasIndex("WebhookEventId")
                         .IsUnique();
+
+                    b.HasIndex("GroupId", "EventTimestamp");
+
+                    b.HasIndex("GroupId", "Id");
 
                     b.ToTable("GroupMessages");
                 });
@@ -192,13 +199,20 @@ namespace MessageService.Data.Migrations
 
                     b.Property<string>("DownloadStatus")
                         .IsRequired()
-                        .HasColumnType("nvarchar(max)");
+                        .HasMaxLength(20)
+                        .HasColumnType("nvarchar(20)");
+
+                    b.Property<int>("FailedAttempts")
+                        .HasColumnType("int");
 
                     b.Property<string>("FileName")
                         .HasColumnType("nvarchar(max)");
 
                     b.Property<long>("GroupMessageId")
                         .HasColumnType("bigint");
+
+                    b.Property<DateTimeOffset?>("LastAttemptAt")
+                        .HasColumnType("datetimeoffset");
 
                     b.HasKey("Id");
 
@@ -227,9 +241,24 @@ namespace MessageService.Data.Migrations
                     b.Property<int>("Id")
                         .HasColumnType("int");
 
+                    b.Property<bool>("MaskLandline")
+                        .HasColumnType("bit");
+
+                    b.Property<bool>("MaskMobilePhone")
+                        .HasColumnType("bit");
+
+                    b.Property<bool>("MaskNationalId")
+                        .HasColumnType("bit");
+
+                    b.Property<bool>("MaskNhiCard")
+                        .HasColumnType("bit");
+
                     b.Property<string>("NameDisplayMode")
                         .IsRequired()
                         .HasColumnType("nvarchar(max)");
+
+                    b.Property<int>("RetentionDays")
+                        .HasColumnType("int");
 
                     b.HasKey("Id");
 
@@ -239,7 +268,12 @@ namespace MessageService.Data.Migrations
                         new
                         {
                             Id = 1,
-                            NameDisplayMode = "MaskMiddle"
+                            MaskLandline = true,
+                            MaskMobilePhone = true,
+                            MaskNationalId = true,
+                            MaskNhiCard = true,
+                            NameDisplayMode = "MaskMiddle",
+                            RetentionDays = 1095
                         });
                 });
 

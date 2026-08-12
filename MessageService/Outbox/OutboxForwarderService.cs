@@ -19,10 +19,16 @@ public class OutboxForwarderService(
     IOptions<OutboxOptions> options,
     ILogger<OutboxForwarderService> logger) : BackgroundService
 {
+    private static readonly TimeSpan DeadLetterCheckInterval = TimeSpan.FromHours(1);
+
     private readonly OutboxOptions _options = options.Value;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        // 啟動時先報一次（比照舊的 Program.cs 啟動 log），之後每小時再報一次——死信不會自動
+        // 消失，只會在這裡的 log 被看到，沒有專用的重送介面，量大時要靠這行提醒維運人員去查
+        var nextDeadLetterCheck = DateTimeOffset.UtcNow;
+
         while (!stoppingToken.IsCancellationRequested)
         {
             var processedAny = false;
@@ -33,6 +39,19 @@ public class OutboxForwarderService(
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 logger.LogError(ex, "Unexpected error while forwarding outbox entries");
+            }
+
+            if (DateTimeOffset.UtcNow >= nextDeadLetterCheck)
+            {
+                try
+                {
+                    await LogDeadLetterCountAsync(stoppingToken);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    logger.LogError(ex, "Failed to check outbox dead-letter count");
+                }
+                nextDeadLetterCheck = DateTimeOffset.UtcNow + DeadLetterCheckInterval;
             }
 
             // 這輪有處理到東西時，outbox 可能還有剩（一次最多 BatchSize 筆），
@@ -48,6 +67,20 @@ public class OutboxForwarderService(
                     // 停機中，讓 while 迴圈條件收尾
                 }
             }
+        }
+    }
+
+    public async Task LogDeadLetterCountAsync(CancellationToken cancellationToken)
+    {
+        using var scope = scopeFactory.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<OutboxDbContext>();
+
+        var deadLetterCount = await dbContext.Entries.CountAsync(e => e.DeadLetteredAt != null, cancellationToken);
+        if (deadLetterCount > 0)
+        {
+            logger.LogWarning(
+                "Outbox has {Count} dead-lettered entries awaiting manual review (see LastError column in outbox.db)",
+                deadLetterCount);
         }
     }
 
@@ -103,20 +136,10 @@ public class OutboxForwarderService(
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
+                // 暫時性失敗永遠重試、不死信——短暫斷線與長時間停機都不該讓事件遺失，
+                // 見 OutboxOptions 的說明
                 entry.Attempts++;
                 entry.LastError = ex.Message;
-
-                if (entry.Attempts >= _options.MaxAttempts)
-                {
-                    entry.DeadLetteredAt = now;
-                    await dbContext.SaveChangesAsync(cancellationToken);
-
-                    logger.LogError(ex,
-                        "Outbox entry {Id} (WebhookEventId {WebhookEventId}) exceeded MaxAttempts ({MaxAttempts}), dead-lettering",
-                        entry.Id, entry.WebhookEventId, _options.MaxAttempts);
-                    continue;
-                }
-
                 entry.NextAttemptAt = now + ComputeBackoff(entry.Attempts);
                 await dbContext.SaveChangesAsync(cancellationToken);
 
@@ -131,7 +154,11 @@ public class OutboxForwarderService(
 
     private TimeSpan ComputeBackoff(int attempts)
     {
-        var seconds = Math.Min(_options.BaseRetryDelaySeconds * attempts, _options.MaxRetryDelaySeconds);
+        // 指數退避：第 N 次失敗延遲 BaseRetryDelaySeconds × 2^(N-1)，封頂 MaxRetryDelaySeconds。
+        // attempts 很大時 Math.Pow 會趨近 double.PositiveInfinity，Math.Min 仍會正確封頂，
+        // 不需要額外的溢位保護。
+        var exponentialSeconds = _options.BaseRetryDelaySeconds * Math.Pow(2, attempts - 1);
+        var seconds = Math.Min(exponentialSeconds, _options.MaxRetryDelaySeconds);
         return TimeSpan.FromSeconds(seconds);
     }
 }

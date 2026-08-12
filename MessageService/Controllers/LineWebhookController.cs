@@ -30,19 +30,34 @@ public class LineWebhookController(
             return Unauthorized();
         }
 
-        // 簽章合法後一律回 200：回非 2xx 會讓 LINE 重送並可能判定 webhook 失效，
-        // 個別事件處理失敗只記 log（訊息遺失風險由 LINE redelivery + WebhookEventId 去重把關）
+        WebhookRequest? webhookRequest;
         try
         {
-            var webhookRequest = JsonSerializer.Deserialize<WebhookRequest>(rawBody);
-            if (webhookRequest is not null)
-            {
-                await eventHandler.HandleAsync(webhookRequest, cancellationToken);
-            }
+            webhookRequest = JsonSerializer.Deserialize<WebhookRequest>(rawBody);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            logger.LogError(ex, "Failed to process webhook request body");
+            // 格式不合的 payload 重送也不會變好，回 200 避免 LINE 判定 webhook 失效而無限重試
+            logger.LogError(ex, "Failed to parse webhook request body");
+            return Ok();
+        }
+
+        if (webhookRequest is null)
+        {
+            return Ok();
+        }
+
+        try
+        {
+            await eventHandler.HandleAsync(webhookRequest, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // 這是唯一會讓事件真的遺失的失敗（本機 outbox 寫不進去：磁碟滿／DB 鎖住／損毀）——
+            // 回 500 讓 LINE redelivery 接手重試；重送造成的重複由落地端 WebhookEventId
+            // 唯一索引擋掉，見 DirectIngestSink，安全
+            logger.LogError(ex, "Failed to enqueue webhook events to outbox");
+            return Problem(statusCode: StatusCodes.Status500InternalServerError);
         }
 
         return Ok();
