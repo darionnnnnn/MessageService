@@ -159,4 +159,111 @@ public class ContentStreamTests : IDisposable
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.Equal(bytes, await response.Content.ReadAsByteArrayAsync());
     }
+
+    // === XSS 白名單：image/video/audio 才給 inline，SVG 跟其他型別一律降級成 attachment+octet-stream ===
+
+    [Theory]
+    [InlineData("image/jpeg")]
+    [InlineData("video/mp4")]
+    [InlineData("audio/mp4")]
+    public async Task GetContent_SafeContentType_ServesInlineWithOriginalContentType(string contentType)
+    {
+        var contentId = await SeedCompletedContentAsync([1, 2, 3], contentType, "file.bin");
+
+        var response = await _fixture.Client.GetAsync($"/api/messages/{contentId}/content");
+
+        Assert.Equal(contentType, response.Content.Headers.ContentType?.MediaType);
+        Assert.Equal("inline", response.Content.Headers.ContentDisposition?.DispositionType);
+    }
+
+    [Theory]
+    [InlineData("image/svg+xml")]
+    [InlineData("text/html")]
+    [InlineData("application/pdf")]
+    public async Task GetContent_UnsafeContentType_DowngradesToAttachmentOctetStream(string contentType)
+    {
+        var contentId = await SeedCompletedContentAsync([1, 2, 3], contentType, "file.bin");
+
+        var response = await _fixture.Client.GetAsync($"/api/messages/{contentId}/content");
+
+        Assert.Equal("application/octet-stream", response.Content.Headers.ContentType?.MediaType);
+        Assert.Equal("attachment", response.Content.Headers.ContentDisposition?.DispositionType);
+    }
+
+    [Fact]
+    public async Task GetContent_AlwaysSetsNosniffHeader()
+    {
+        var contentId = await SeedCompletedContentAsync([1, 2, 3]);
+
+        var response = await _fixture.Client.GetAsync($"/api/messages/{contentId}/content");
+
+        Assert.Equal("nosniff", response.Headers.GetValues("X-Content-Type-Options").Single());
+    }
+
+    // === RFC 5987 檔名：中文檔名要能用 filename*=UTF-8'' 正確帶出來，不是 %E6%AA%94 那種原封不動字串 ===
+
+    [Fact]
+    public async Task GetContent_NonAsciiFileName_SetsRfc5987EncodedFileNameStar()
+    {
+        var contentId = await SeedCompletedContentAsync([1, 2, 3], "application/pdf", "報告.pdf");
+
+        var response = await _fixture.Client.GetAsync($"/api/messages/{contentId}/content");
+
+        Assert.Equal("報告.pdf", response.Content.Headers.ContentDisposition?.FileNameStar);
+        // filename= 的 ASCII fallback 不該是原封不動的百分比編碼字串，退而求其次用副檔名兜一個
+        Assert.Equal("file.pdf", response.Content.Headers.ContentDisposition?.FileName);
+    }
+
+    [Fact]
+    public async Task GetContent_AsciiFileName_KeepsExactNameInBothParameters()
+    {
+        var contentId = await SeedCompletedContentAsync([1, 2, 3], "application/pdf", "report.pdf");
+
+        var response = await _fixture.Client.GetAsync($"/api/messages/{contentId}/content");
+
+        Assert.Equal("report.pdf", response.Content.Headers.ContentDisposition?.FileName);
+        Assert.Equal("report.pdf", response.Content.Headers.ContentDisposition?.FileNameStar);
+    }
+
+    // === ETag / Cache-Control / 304：內容不可變，重複瀏覽同一段對話不用再打資料庫拉圖 ===
+
+    [Fact]
+    public async Task GetContent_SetsImmutableCacheControlAndETag()
+    {
+        var contentId = await SeedCompletedContentAsync([1, 2, 3]);
+
+        var response = await _fixture.Client.GetAsync($"/api/messages/{contentId}/content");
+
+        Assert.Equal($"\"mc-{contentId}\"", response.Headers.ETag?.Tag);
+        Assert.True(response.Headers.CacheControl?.Private);
+        Assert.Equal(TimeSpan.FromDays(365), response.Headers.CacheControl?.MaxAge);
+        Assert.Contains("immutable", response.Headers.CacheControl?.Extensions.Select(e => e.Name) ?? []);
+    }
+
+    [Fact]
+    public async Task GetContent_MatchingIfNoneMatch_Returns304WithoutBody()
+    {
+        var contentId = await SeedCompletedContentAsync([1, 2, 3]);
+
+        var request = new HttpRequestMessage(HttpMethod.Get, $"/api/messages/{contentId}/content");
+        request.Headers.TryAddWithoutValidation("If-None-Match", $"\"mc-{contentId}\"");
+        var response = await _fixture.Client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.NotModified, response.StatusCode);
+        Assert.Empty(await response.Content.ReadAsByteArrayAsync());
+    }
+
+    [Fact]
+    public async Task GetContent_NonMatchingIfNoneMatch_Returns200WithFullBody()
+    {
+        var bytes = new byte[] { 1, 2, 3 };
+        var contentId = await SeedCompletedContentAsync(bytes);
+
+        var request = new HttpRequestMessage(HttpMethod.Get, $"/api/messages/{contentId}/content");
+        request.Headers.TryAddWithoutValidation("If-None-Match", "\"mc-stale\"");
+        var response = await _fixture.Client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(bytes, await response.Content.ReadAsByteArrayAsync());
+    }
 }

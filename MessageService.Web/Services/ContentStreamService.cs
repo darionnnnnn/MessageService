@@ -16,8 +16,18 @@ public class ContentStreamService(MessageDbContext dbContext)
 {
     private const int BufferSize = 81920;
 
+    /// <summary>inline 顯示的白名單：圖片／影片／語音在瀏覽器裡開啟本身就是預期用途。
+    /// image/svg+xml 明確排除——SVG 跟 HTML 一樣會被瀏覽器當成可執行文件解析、能跑 &lt;script&gt;，
+    /// 讓它 inline 等於允許任何丟進群組的 .svg 在檢視端同源執行任意腳本。</summary>
+    private static bool IsSafeToInline(string? contentType) =>
+        contentType is not null
+        && contentType != "image/svg+xml"
+        && (contentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase)
+            || contentType.StartsWith("video/", StringComparison.OrdinalIgnoreCase)
+            || contentType.StartsWith("audio/", StringComparison.OrdinalIgnoreCase));
+
     public async Task<ContentStreamResult> StreamAsync(
-        long messageContentId, string? rangeHeader, HttpResponse response, CancellationToken cancellationToken)
+        long messageContentId, string? rangeHeader, string? ifNoneMatch, HttpResponse response, CancellationToken cancellationToken)
     {
         var meta = await dbContext.MessageContents
             .Where(c => c.Id == messageContentId)
@@ -27,6 +37,18 @@ public class ContentStreamService(MessageDbContext dbContext)
         if (meta is null || meta.DownloadStatus != DownloadStatus.Completed)
         {
             return ContentStreamResult.NotFound;
+        }
+
+        // 內容一旦 Completed 就不會再變（見 DbContentWorkSource），ETag 純粹用 Id 推算即可，
+        // 不需要算內容雜湊；可以放心用 immutable 快取，重複瀏覽同一段對話不用再打資料庫拉圖
+        var etag = $"\"mc-{messageContentId}\"";
+        response.Headers.CacheControl = "private, max-age=31536000, immutable";
+        response.Headers.ETag = etag;
+
+        if (MatchesIfNoneMatch(ifNoneMatch, etag))
+        {
+            response.StatusCode = StatusCodes.Status304NotModified;
+            return ContentStreamResult.Handled;
         }
 
         var isSqlite = dbContext.Database.IsSqlite();
@@ -49,11 +71,17 @@ public class ContentStreamService(MessageDbContext dbContext)
                 return ContentStreamResult.Handled;
             }
 
+            response.Headers.XContentTypeOptions = "nosniff";
             response.Headers.AcceptRanges = "bytes";
-            response.ContentType = meta.ContentType ?? "application/octet-stream";
+
+            var safe = IsSafeToInline(meta.ContentType);
+            response.ContentType = safe ? meta.ContentType! : "application/octet-stream";
             if (meta.FileName is not null)
             {
-                response.Headers.ContentDisposition = $"inline; filename=\"{Uri.EscapeDataString(meta.FileName)}\"";
+                var disposition = safe ? "inline" : "attachment";
+                var asciiFallback = BuildAsciiFallbackFileName(meta.FileName);
+                response.Headers.ContentDisposition =
+                    $"{disposition}; filename=\"{asciiFallback}\"; filename*=UTF-8''{Uri.EscapeDataString(meta.FileName)}";
             }
 
             if (isPartial)
@@ -65,12 +93,21 @@ public class ContentStreamService(MessageDbContext dbContext)
             response.ContentLength = length;
 
             await using var command = connection.CreateCommand();
-            command.CommandText = isSqlite
-                ? "SELECT substr(Content, @start, @length) FROM MessageContents WHERE Id = @id"
-                : "SELECT SUBSTRING(Content, @start, @length) FROM MessageContents WHERE Id = @id";
+            if (isPartial)
+            {
+                command.CommandText = isSqlite
+                    ? "SELECT substr(Content, @start, @length) FROM MessageContents WHERE Id = @id"
+                    : "SELECT SUBSTRING(Content, @start, @length) FROM MessageContents WHERE Id = @id";
+                AddParameter(command, "@start", start.Value + 1); // SUBSTRING/substr 都是 1-indexed
+                AddParameter(command, "@length", length);
+            }
+            else
+            {
+                // 沒有 Range 就是要整份——直接 SELECT 原始欄位，不必再繞去 SUBSTRING/substr 切出
+                // 「從頭到尾」這個等於整份的區間，省掉 SQL Server 端多一次的整份複製
+                command.CommandText = "SELECT Content FROM MessageContents WHERE Id = @id";
+            }
             AddParameter(command, "@id", messageContentId);
-            AddParameter(command, "@start", start.Value + 1); // SUBSTRING/substr 都是 1-indexed
-            AddParameter(command, "@length", length);
 
             await using var reader = await command.ExecuteReaderAsync(
                 CommandBehavior.SequentialAccess | CommandBehavior.SingleRow, cancellationToken);
@@ -89,6 +126,39 @@ public class ContentStreamService(MessageDbContext dbContext)
                 await connection.CloseAsync();
             }
         }
+    }
+
+    private static bool MatchesIfNoneMatch(string? ifNoneMatch, string etag)
+    {
+        if (string.IsNullOrEmpty(ifNoneMatch))
+        {
+            return false;
+        }
+
+        var trimmed = ifNoneMatch.Trim();
+        if (trimmed == "*")
+        {
+            return true;
+        }
+
+        return trimmed.Split(',').Select(s => s.Trim()).Any(s => s == etag);
+    }
+
+    /// <summary>filename= 參數（quoted-string，不支援 RFC 5987 編碼）的保守版本：ASCII 檔名原樣
+    /// 保留（不支援 filename* 的舊客戶端還是看得到真正的名字），非 ASCII（中文檔名幾乎必然）
+    /// 換成 file+副檔名——真正的檔名交給下面的 filename*=UTF-8''... 承載。順手濾掉會弄壞
+    /// 標頭語法或允許標頭注入的字元（引號、反斜線、CR/LF）——FileName 來源是 LINE 訊息，
+    /// 群組任何成員都能決定內容，不能當成可信輸入。</summary>
+    private static string BuildAsciiFallbackFileName(string fileName)
+    {
+        var candidate = fileName.All(c => c < 128) ? fileName : "file" + AsciiExtensionOrEmpty(fileName);
+        return new string(candidate.Where(c => c is not ('"' or '\\' or '\r' or '\n')).ToArray());
+    }
+
+    private static string AsciiExtensionOrEmpty(string fileName)
+    {
+        var ext = Path.GetExtension(fileName);
+        return ext.Length > 0 && ext.All(c => c < 128) ? ext : "";
     }
 
     private static async Task<long> GetContentLengthAsync(

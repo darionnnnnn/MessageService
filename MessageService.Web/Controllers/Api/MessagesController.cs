@@ -351,8 +351,12 @@ public class MessagesController(
     public async Task<IActionResult> GetContent(long id, CancellationToken cancellationToken)
     {
         var rangeHeader = Request.Headers.Range.ToString();
+        var ifNoneMatch = Request.Headers.IfNoneMatch.ToString();
         var result = await contentStreamService.StreamAsync(
-            id, string.IsNullOrEmpty(rangeHeader) ? null : rangeHeader, Response, cancellationToken);
+            id,
+            string.IsNullOrEmpty(rangeHeader) ? null : rangeHeader,
+            string.IsNullOrEmpty(ifNoneMatch) ? null : ifNoneMatch,
+            Response, cancellationToken);
 
         return result == ContentStreamResult.NotFound ? NotFound() : new EmptyResult();
     }
