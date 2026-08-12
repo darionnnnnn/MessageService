@@ -1,6 +1,7 @@
 using System.Data;
 using System.Data.Common;
 using MessageService.Data;
+using MessageService.Data.Crypto;
 using MessageService.Models;
 using Microsoft.EntityFrameworkCore;
 
@@ -11,8 +12,14 @@ namespace MessageService.Web.Services;
 /// 不用 EF 把整個 blob 讀進記憶體：Range 請求直接在 SQL 端用 SUBSTRING/substr 切出所需片段，
 /// 只讀取實際要傳送的位元組；ADO.NET 的 blob stream 是 forward-only，不支援 Seek，
 /// 所以「拖進度」是靠瀏覽器對同一個 URL 發出新的 Range 請求，而非在單一連線內做 Seek。
+///
+/// 加密啟用時 blob 存的是分塊密文（格式見 ChunkedBlobCipher，DbContentWorkSource 寫入）——
+/// 讀取端一律先偷看前 16 bytes 表頭判斷是不是這個格式（不看 Encryption:Enabled 設定本身，
+/// 純粹看資料長什麼樣子），這樣新舊資料混存、甚至加密設定事後被關掉，既有的加密內容
+/// 還是讀得到。Range 請求只解密涵蓋所需區間的那幾個 chunk，一次只在記憶體放一個 chunk，
+/// 不管請求範圍多大都不會整份解密進記憶體。
 /// </summary>
-public class ContentStreamService(MessageDbContext dbContext)
+public class ContentStreamService(MessageDbContext dbContext, FieldCipher cipher)
 {
     private const int BufferSize = 81920;
 
@@ -39,18 +46,6 @@ public class ContentStreamService(MessageDbContext dbContext)
             return ContentStreamResult.NotFound;
         }
 
-        // 內容一旦 Completed 就不會再變（見 DbContentWorkSource），ETag 純粹用 Id 推算即可，
-        // 不需要算內容雜湊；可以放心用 immutable 快取，重複瀏覽同一段對話不用再打資料庫拉圖
-        var etag = $"\"mc-{messageContentId}\"";
-        response.Headers.CacheControl = "private, max-age=31536000, immutable";
-        response.Headers.ETag = etag;
-
-        if (MatchesIfNoneMatch(ifNoneMatch, etag))
-        {
-            response.StatusCode = StatusCodes.Status304NotModified;
-            return ContentStreamResult.Handled;
-        }
-
         var isSqlite = dbContext.Database.IsSqlite();
         var connection = dbContext.Database.GetDbConnection();
         var wasClosed = connection.State != ConnectionState.Open;
@@ -61,13 +56,46 @@ public class ContentStreamService(MessageDbContext dbContext)
 
         try
         {
-            var totalLength = await GetContentLengthAsync(connection, isSqlite, messageContentId, cancellationToken);
+            var header = await ReadHeaderBytesAsync(connection, isSqlite, messageContentId, cancellationToken);
+            var isEncrypted = ChunkedBlobCipher.IsEncryptedHeader(header);
+            long totalLength;
+            var chunkSize = ChunkedBlobCipher.ChunkSize;
+
+            if (isEncrypted)
+            {
+                // 沒有金鑰解不開：視同內容不可用，不要在這裡才半途拋例外——回應還沒開始寫，
+                // 乾脆當作找不到，跟其他「內容不可用」情境一致
+                if (!cipher.Enabled)
+                {
+                    return ContentStreamResult.NotFound;
+                }
+
+                totalLength = ChunkedBlobCipher.ReadPlaintextLength(header);
+                chunkSize = ChunkedBlobCipher.ReadChunkSize(header);
+            }
+            else
+            {
+                totalLength = await GetContentLengthAsync(connection, isSqlite, messageContentId, cancellationToken);
+            }
+
             var (start, length, isPartial) = ParseRange(rangeHeader, totalLength);
 
             if (start is null)
             {
                 response.StatusCode = StatusCodes.Status416RangeNotSatisfiable;
                 response.Headers.ContentRange = $"bytes */{totalLength}";
+                return ContentStreamResult.Handled;
+            }
+
+            // 內容一旦 Completed 就不會再變（見 DbContentWorkSource），ETag 純粹用 Id 推算即可，
+            // 不需要算內容雜湊；可以放心用 immutable 快取，重複瀏覽同一段對話不用再打資料庫拉圖
+            var etag = $"\"mc-{messageContentId}\"";
+            response.Headers.CacheControl = "private, max-age=31536000, immutable";
+            response.Headers.ETag = etag;
+
+            if (MatchesIfNoneMatch(ifNoneMatch, etag))
+            {
+                response.StatusCode = StatusCodes.Status304NotModified;
                 return ContentStreamResult.Handled;
             }
 
@@ -91,6 +119,13 @@ public class ContentStreamService(MessageDbContext dbContext)
             }
 
             response.ContentLength = length;
+
+            if (isEncrypted)
+            {
+                await StreamEncryptedContentAsync(
+                    connection, isSqlite, messageContentId, start.Value, length, chunkSize, totalLength, response, cancellationToken);
+                return ContentStreamResult.Handled;
+            }
 
             await using var command = connection.CreateCommand();
             if (isPartial)
@@ -125,6 +160,78 @@ public class ContentStreamService(MessageDbContext dbContext)
             {
                 await connection.CloseAsync();
             }
+        }
+    }
+
+    /// <summary>只把使用者實際要的明文區間 [start, start+length) 涵蓋到的 chunk 解密、寫進
+    /// response——用一次 SUBSTRING/substr 把這些 chunk 的密文連續段一次撈回來（chunk 在磁碟上
+    /// 是緊接著排列的，見 ChunkedBlobCipher.ChunkByteRangeOnDisk），透過 SequentialAccess 的
+    /// DbDataReader 串流讀取，一次只解一個 chunk（至多 1MB）進記憶體，不管請求範圍多大都
+    /// 不會整份解密進記憶體。</summary>
+    private async Task StreamEncryptedContentAsync(
+        DbConnection connection, bool isSqlite, long messageContentId,
+        long start, long length, int chunkSize, long totalPlaintextLength,
+        HttpResponse response, CancellationToken cancellationToken)
+    {
+        var (firstChunk, lastChunk) = ChunkedBlobCipher.ChunksCovering(start, length, chunkSize);
+        var (spanStart, _) = ChunkedBlobCipher.ChunkByteRangeOnDisk(firstChunk, totalPlaintextLength, chunkSize);
+        var (lastChunkOffset, lastChunkOnDiskLength) = ChunkedBlobCipher.ChunkByteRangeOnDisk(lastChunk, totalPlaintextLength, chunkSize);
+        var spanLength = lastChunkOffset + lastChunkOnDiskLength - spanStart;
+
+        await using var command = connection.CreateCommand();
+        command.CommandText = isSqlite
+            ? "SELECT substr(Content, @start, @length) FROM MessageContents WHERE Id = @id"
+            : "SELECT SUBSTRING(Content, @start, @length) FROM MessageContents WHERE Id = @id";
+        AddParameter(command, "@id", messageContentId);
+        AddParameter(command, "@start", spanStart + 1); // SUBSTRING/substr 都是 1-indexed
+        AddParameter(command, "@length", spanLength);
+
+        await using var reader = await command.ExecuteReaderAsync(
+            CommandBehavior.SequentialAccess | CommandBehavior.SingleRow, cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return;
+        }
+
+        await using var onDiskStream = reader.GetStream(0);
+        var chunkBuffer = new byte[ChunkedBlobCipher.ChunkOnDiskOverhead + chunkSize];
+        var plaintextCursor = firstChunk * (long)chunkSize;
+
+        for (var chunkIndex = firstChunk; chunkIndex <= lastChunk; chunkIndex++)
+        {
+            var (_, onDiskChunkLength) = ChunkedBlobCipher.ChunkByteRangeOnDisk(chunkIndex, totalPlaintextLength, chunkSize);
+            await ReadExactlyAsync(onDiskStream, chunkBuffer.AsMemory(0, onDiskChunkLength), cancellationToken);
+            var plaintextChunk = cipher.DecryptChunk(chunkBuffer.AsSpan(0, onDiskChunkLength));
+
+            // 這塊明文對應到整份檔案的 [chunkStart, chunkEnd)，跟使用者實際要的
+            // [start, start+length) 取交集，只把交集部分寫進 response（頭尾兩塊通常只需要部分）
+            var chunkStart = plaintextCursor;
+            var chunkEnd = plaintextCursor + plaintextChunk.Length;
+            var wantStart = Math.Max(chunkStart, start);
+            var wantEnd = Math.Min(chunkEnd, start + length);
+            if (wantEnd > wantStart)
+            {
+                var sliceOffset = (int)(wantStart - chunkStart);
+                var sliceLength = (int)(wantEnd - wantStart);
+                await response.Body.WriteAsync(plaintextChunk.AsMemory(sliceOffset, sliceLength), cancellationToken);
+            }
+
+            plaintextCursor = chunkEnd;
+        }
+    }
+
+    private static async Task ReadExactlyAsync(Stream stream, Memory<byte> buffer, CancellationToken cancellationToken)
+    {
+        var totalRead = 0;
+        while (totalRead < buffer.Length)
+        {
+            var read = await stream.ReadAsync(buffer[totalRead..], cancellationToken);
+            if (read == 0)
+            {
+                throw new InvalidOperationException(
+                    $"Encrypted blob ended after {totalRead} bytes but {buffer.Length} were expected for this chunk.");
+            }
+            totalRead += read;
         }
     }
 
@@ -171,6 +278,19 @@ public class ContentStreamService(MessageDbContext dbContext)
         AddParameter(command, "@id", messageContentId);
         var result = await command.ExecuteScalarAsync(cancellationToken);
         return Convert.ToInt64(result);
+    }
+
+    private static async Task<byte[]> ReadHeaderBytesAsync(
+        DbConnection connection, bool isSqlite, long messageContentId, CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandText = isSqlite
+            ? "SELECT substr(Content, 1, @length) FROM MessageContents WHERE Id = @id"
+            : "SELECT SUBSTRING(Content, 1, @length) FROM MessageContents WHERE Id = @id";
+        AddParameter(command, "@id", messageContentId);
+        AddParameter(command, "@length", ChunkedBlobCipher.HeaderSize);
+        var result = await command.ExecuteScalarAsync(cancellationToken);
+        return result as byte[] ?? [];
     }
 
     /// <summary>只支援單一區間 "bytes=start-end" 或 "bytes=start-"，影片/語音播放器都只用這種格式。</summary>

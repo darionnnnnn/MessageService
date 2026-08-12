@@ -1,0 +1,102 @@
+# 應用層欄位加密
+
+`Encryption:Enabled=true` 時，訊息內容與可辨識個資欄位在寫入資料庫前先用 AES-256-GCM
+加密，即使拿到資料庫連線或備份檔案也看不到明文。這是應用層加密（金鑰在應用程式手上），
+跟 SQL Server TDE／磁碟加密是互補而非取代關係——TDE 防的是「檔案或備份被偷」，這裡防的是
+「連 DBA 直查資料表也看不到」。
+
+## 設定
+
+收錄端（`MessageService`）與檢視端（`MessageService.Web`）的 `appsettings.json` **必須設成
+完全一樣**：
+
+```json
+"Encryption": {
+  "Enabled": true,
+  "Key": "<base64 編碼的 32 bytes>",
+  "SearchWindowDays": 14
+}
+```
+
+產生金鑰（PowerShell）：
+
+```powershell
+[Convert]::ToBase64String((1..32 | ForEach-Object { Get-Random -Maximum 256 }))
+```
+
+`Key` 缺漏或格式不對（不是合法 base64、解碼後不是 32 bytes）時，兩邊的服務都會在啟動當下
+直接失敗（`FieldCipher` 建構子拋例外），不會等到第一則訊息進來才在背景任務裡出錯。
+
+## 加密範圍
+
+| 欄位 | 加密 |
+|---|---|
+| `GroupMessages.Text`（訊息內文） | ✓ |
+| `MessageContents.Content`（圖片/影片/語音/檔案本體） | ✓（分塊加密，見下） |
+| `MessageContents.FileName` | ✓ |
+| `Groups.GroupName` / `PictureUrl` | ✓ |
+| `GroupMembers.DisplayName` / `PictureUrl` | ✓ |
+| `UserAliases.Alias` | ✓ |
+| `GroupMessages.GroupId` / `UserId` | ✗（刻意不加密，見下） |
+| `MessageContents.ContentType`（如 `image/jpeg`） | ✗ |
+
+`GroupId`／`UserId` 保持明文：它們是 LINE 配發的隨機識別碼、本身不含個資，而檢視端幾乎
+每一種查詢（側欄、未讀數、訊息視窗、搜尋）都要用它們做索引查詢或 `GROUP BY`。如果連這兩個
+欄位都加密，AES-GCM 的隨機 nonce 會讓同一個 GroupId 每次加密結果都不同，索引與分組會
+整個失效。
+
+## 文字欄位：整值加密，透明讀寫
+
+文字欄位透過 EF Core 的 `ValueConverter` 套用，寫入時自動加密、讀取時自動解密——包含完整
+實體與 LINQ 投影（`Select(m => new { m.Text })` 這種只挑欄位的查詢一樣會自動解密），
+所有 controller 幾乎不需要改程式碼。
+
+存成 `ENC1:` 前綴 + base64(nonce + tag + ciphertext)。**加密啟用前寫入的舊資料（沒有這個
+前綴）會原樣顯示，不需要一次性轉換作業**——新舊資料混存完全無痛，可以隨時開啟加密而不用
+先跑資料遷移。
+
+反過來：**如果先加密過一段時間、之後又把 `Encryption:Enabled` 改回 `false`，已經加密的
+舊訊息會顯示成一串 `ENC1:...` 亂碼**（沒有金鑰可解），不會自動轉回明文。這是刻意的簡化——
+「先啟用加密、之後又關掉」是不建議的操作路徑，真的要做的話得先手動把舊資料解密回明文
+再關閉設定。
+
+解密失敗（金鑰不對、內容損毀，或極端情況下有人真的在訊息裡打了 `ENC1:` 開頭的文字）不會
+讓請求 500，只會原樣顯示該欄位並記一行 warning log。
+
+## 內容 blob：分塊加密，保留 Range 拖進度能力
+
+`MessageContents.Content` 不能像文字欄位那樣整值加密——影片／語音要支援瀏覽器的 Range
+請求（拖進度），解密必須能只處理使用者實際要的那一小段位元組，不能每次都把整個檔案
+解密一遍。格式：
+
+```
+[表頭 16 bytes：magic "MSE1"(4) + chunkSize(4) + 明文總長度(8)]
+[chunk 0：nonce(12) + tag(16) + ciphertext]
+[chunk 1：nonce(12) + tag(16) + ciphertext]
+...
+```
+
+固定 1MB 明文塊、最後一塊可能較短。寫入端（`DbContentWorkSource`）邊讀來源串流邊加密邊寫
+資料庫，一次只在記憶體放一個 chunk；讀取端（`ContentStreamService`）收到 Range 請求時，
+只把涵蓋該區間的 chunk 解密、串流寫進回應，同樣不會整份解密進記憶體。
+
+跟文字欄位一樣支援新舊資料混存：讀取端一律先偷看 blob 前 16 bytes 判斷是不是這個格式
+（看資料本身的 magic，不是看 `Encryption:Enabled` 設定），沒有這個表頭就當成加密啟用前的
+舊 blob，直接原樣提供。
+
+## 訊息搜尋的限制
+
+加密啟用時，SQL 端的 `LIKE` 沒辦法對密文做子字串比對（GCM 加密後，明文的子字串跟密文
+完全沒有對應關係）。訊息內容搜尋因此改成：只在最近 `Encryption:SearchWindowDays`
+（預設 14 天）內的文字訊息解密後在記憶體比對。超過這個天數的訊息內容搜不到（姓名搜尋
+不受影響——那是先查 `GroupMembers` 全部成員，跟訊息內容無關）。
+
+## 部署檢查清單
+
+1. 產生一把金鑰，收錄端與檢視端 `appsettings.json` 的 `Encryption:Key` 設成完全一樣的值。
+2. 兩邊都設 `Encryption:Enabled=true`。
+3. 先在測試環境驗證：送一則訊息、上傳一張圖片，確認檢視端顯示正常、資料庫裡的
+   `Text`／`Content` 欄位是看不懂的密文。
+4. 妥善保管金鑰——遺失金鑰等於遺失所有已加密的訊息與媒體，沒有復原機制。
+5. 金鑰不要進版本控制；透過環境變數或密鑰管理服務（Azure Key Vault、AWS Secrets Manager
+   等）覆蓋 `appsettings.json` 的預留空值，是比直接寫進設定檔更穩妥的做法。

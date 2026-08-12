@@ -1,4 +1,5 @@
 using MessageService.Data;
+using MessageService.Data.Crypto;
 using MessageService.Models;
 using MessageService.Options;
 using MessageService.Services;
@@ -6,6 +7,7 @@ using MessageService.Tests.TestSupport;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging.Abstractions;
 using OptionsFactory = Microsoft.Extensions.Options.Options;
 
 namespace MessageService.Tests.Services;
@@ -37,8 +39,8 @@ public class DbContentWorkSourceTests : IDisposable
         _connection.Dispose();
     }
 
-    private DbContentWorkSource CreateSource(MessageDbContext dbContext, ContentDownloadOptions? options = null) =>
-        new(dbContext, OptionsFactory.Create(options ?? new ContentDownloadOptions()));
+    private DbContentWorkSource CreateSource(MessageDbContext dbContext, ContentDownloadOptions? options = null, FieldCipher? cipher = null) =>
+        new(dbContext, OptionsFactory.Create(options ?? new ContentDownloadOptions()), cipher ?? FieldCipher.Disabled);
 
     // 用全新的 scope／DbContext 重新查詢——CompleteAsync 對 blob 欄位是繞過 EF change tracker
     // 直接下 raw ADO 指令寫入的（見類別說明），沿用同一個 DbContext 讀回來會拿到查詢前就已經
@@ -205,5 +207,90 @@ public class DbContentWorkSourceTests : IDisposable
 
         var reloaded = await ReloadContentAsync(groupMessage.Content.Id);
         Assert.Equal(payload, reloaded.Content);
+    }
+
+    // === 加密啟用時：CompleteAsync 寫進去的是分塊密文，不是明文（blob 不走 EF ValueConverter，
+    // Content 屬性讀回來就是磁碟上的原始位元組，見 MessageDbContext 的說明）===
+
+    private static readonly byte[] TestKey = Enumerable.Range(0, 32).Select(i => (byte)i).ToArray();
+
+    private static FieldCipher EnabledCipher() => new(
+        OptionsFactory.Create(new EncryptionOptions { Enabled = true, Key = Convert.ToBase64String(TestKey) }),
+        NullLogger<FieldCipher>.Instance);
+
+    private static byte[] DecryptStoredBlob(byte[] onDisk)
+    {
+        var header = onDisk.AsSpan(0, ChunkedBlobCipher.HeaderSize);
+        Assert.True(ChunkedBlobCipher.IsEncryptedHeader(header));
+        var plaintextLength = ChunkedBlobCipher.ReadPlaintextLength(header);
+
+        var result = new byte[plaintextLength];
+        if (plaintextLength == 0)
+        {
+            return result;
+        }
+
+        var resultOffset = 0;
+        var (_, lastChunkIndex) = ChunkedBlobCipher.ChunksCovering(0, plaintextLength, ChunkedBlobCipher.ChunkSize);
+        for (var i = 0; i <= lastChunkIndex; i++)
+        {
+            var (offset, length) = ChunkedBlobCipher.ChunkByteRangeOnDisk(i, plaintextLength, ChunkedBlobCipher.ChunkSize);
+            var plaintextChunk = ChunkedBlobCipher.DecryptChunk(onDisk.AsSpan((int)offset, length), TestKey);
+            plaintextChunk.CopyTo(result, resultOffset);
+            resultOffset += plaintextChunk.Length;
+        }
+
+        return result;
+    }
+
+    [Fact]
+    public async Task CompleteAsync_EncryptionEnabled_StoresChunkedCiphertext_NotPlaintext()
+    {
+        using var scope = _provider.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+        var groupMessage = new GroupMessage
+        {
+            WebhookEventId = "e1", LineMessageId = "m1", GroupId = "G1", MessageType = "image",
+            EventTimestamp = DateTimeOffset.UtcNow, ReceivedAt = DateTimeOffset.UtcNow,
+            Content = new MessageContent { DownloadStatus = DownloadStatus.Pending }
+        };
+        dbContext.GroupMessages.Add(groupMessage);
+        await dbContext.SaveChangesAsync();
+        var source = CreateSource(dbContext, cipher: EnabledCipher());
+
+        var payload = new byte[] { 10, 20, 30, 40, 50 };
+        await source.CompleteAsync(groupMessage.Content!.Id, new MemoryStream(payload), payload.Length, "image/png", CancellationToken.None);
+
+        var reloaded = await ReloadContentAsync(groupMessage.Content.Id);
+        Assert.NotEqual(payload, reloaded.Content); // 磁碟上不是明文
+        Assert.True(ChunkedBlobCipher.IsEncryptedHeader(reloaded.Content.AsSpan(0, ChunkedBlobCipher.HeaderSize)));
+        Assert.Equal(payload, DecryptStoredBlob(reloaded.Content!));
+    }
+
+    [Fact]
+    public async Task CompleteAsync_EncryptionEnabled_LargeMultiChunkPayload_RoundTripsExactly()
+    {
+        using var scope = _provider.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+        var groupMessage = new GroupMessage
+        {
+            WebhookEventId = "e1", LineMessageId = "m1", GroupId = "G1", MessageType = "video",
+            EventTimestamp = DateTimeOffset.UtcNow, ReceivedAt = DateTimeOffset.UtcNow,
+            Content = new MessageContent { DownloadStatus = DownloadStatus.Pending }
+        };
+        dbContext.GroupMessages.Add(groupMessage);
+        await dbContext.SaveChangesAsync();
+        var source = CreateSource(dbContext, cipher: EnabledCipher());
+
+        var payload = new byte[ChunkedBlobCipher.ChunkSize * 2 + 777];
+        new Random(7).NextBytes(payload);
+
+        await source.CompleteAsync(groupMessage.Content!.Id, new MemoryStream(payload), payload.Length, "video/mp4", CancellationToken.None);
+
+        var reloaded = await ReloadContentAsync(groupMessage.Content.Id);
+        Assert.Equal(
+            ChunkedBlobCipher.ComputeEncryptedLength(payload.Length),
+            reloaded.Content!.LongLength);
+        Assert.Equal(payload, DecryptStoredBlob(reloaded.Content));
     }
 }

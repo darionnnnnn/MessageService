@@ -126,4 +126,16 @@ public class FieldCipher
             return storedValue;
         }
     }
+
+    /// <summary>沒啟用加密時原樣傳回來源串流（不包一層）——DbContentWorkSource 不需要另外判斷
+    /// 要不要包，直接把回傳值交給既有的串流寫入路徑即可。</summary>
+    public Stream CreateEncryptingStream(Stream source, long plaintextLength) =>
+        _key is null ? source : new ChunkedEncryptingStream(source, plaintextLength, _key);
+
+    /// <summary>解密 ContentStreamService 從密文 blob 讀出的其中一個 chunk（nonce+tag+ciphertext）。
+    /// 沒有金鑰時沒辦法解，呼叫端要自行處理（見 ContentStreamService：視同內容不可用，回 404）。</summary>
+    public byte[] DecryptChunk(ReadOnlySpan<byte> encryptedChunk) =>
+        _key is null
+            ? throw new InvalidOperationException("Cannot decrypt blob chunk: no encryption key configured.")
+            : ChunkedBlobCipher.DecryptChunk(encryptedChunk, _key);
 }

@@ -1,4 +1,5 @@
 using MessageService.Data;
+using MessageService.Data.Crypto;
 using MessageService.Models;
 using MessageService.Options;
 using MessageService.Services;
@@ -26,6 +27,7 @@ public class ContentDownloadServiceTests : IDisposable
         services.AddScoped<IContentWorkSource, DbContentWorkSource>();
         services.AddSingleton<ILineContentClient>(_contentClient);
         services.AddSingleton(OptionsFactory.Create(new ContentDownloadOptions()));
+        services.AddSingleton(FieldCipher.Disabled);
         _provider = services.BuildServiceProvider();
 
         using var scope = _provider.CreateScope();

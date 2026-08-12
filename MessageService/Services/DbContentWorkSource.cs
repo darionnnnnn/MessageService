@@ -1,6 +1,7 @@
 using System.Data;
 using System.Data.Common;
 using MessageService.Data;
+using MessageService.Data.Crypto;
 using MessageService.Models;
 using MessageService.Options;
 using Microsoft.Data.Sqlite;
@@ -13,8 +14,10 @@ namespace MessageService.Services;
 /// <summary>Full／Db 模式用：ContentDownloadService.RequeuePendingAsync／ProcessAsync 原本
 /// 直接開 scope 拿 MessageDbContext 的那段邏輯搬過來，行為刻意保持一致。CompleteAsync 不透過
 /// EF 的 byte[] 屬性寫 blob（那樣整份要先進記憶體、變成 change tracker 的一個大字串），
-/// 改用兩種 provider 各自的串流寫入方式，見該方法說明。</summary>
-public class DbContentWorkSource(MessageDbContext dbContext, IOptions<ContentDownloadOptions> options) : IContentWorkSource
+/// 改用兩種 provider 各自的串流寫入方式，見該方法說明。cipher.Enabled 時再包一層
+/// ChunkedEncryptingStream（見 FieldCipher.CreateEncryptingStream）——blob 不像文字欄位能用
+/// EF ValueConverter 整值加密，Range 拖進度需要分塊，格式與讀取端見 ChunkedBlobCipher。</summary>
+public class DbContentWorkSource(MessageDbContext dbContext, IOptions<ContentDownloadOptions> options, FieldCipher cipher) : IContentWorkSource
 {
     private const int BufferSize = 81920;
     private readonly ContentDownloadOptions _options = options.Value;
@@ -86,13 +89,19 @@ public class DbContentWorkSource(MessageDbContext dbContext, IOptions<ContentDow
 
         try
         {
+            // 沒啟用加密時 CreateEncryptingStream 直接傳回 content 本身（不包一層），
+            // effectiveLength 也維持明文長度不變——兩個 provider 的寫入邏輯完全不用知道
+            // 加密有沒有開，只管把手上這個串流／長度寫進去就對了
+            var effectiveStream = cipher.CreateEncryptingStream(content, contentLength);
+            var effectiveLength = cipher.Enabled ? ChunkedBlobCipher.ComputeEncryptedLength(contentLength) : contentLength;
+
             if (dbContext.Database.IsSqlite())
             {
-                await WriteContentSqliteAsync((SqliteConnection)connection, contentId, content, contentLength, cancellationToken);
+                await WriteContentSqliteAsync((SqliteConnection)connection, contentId, effectiveStream, effectiveLength, cancellationToken);
             }
             else
             {
-                await WriteContentSqlServerAsync(connection, contentId, content, cancellationToken);
+                await WriteContentSqlServerAsync(connection, contentId, effectiveStream, cancellationToken);
             }
         }
         finally

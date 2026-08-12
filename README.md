@@ -16,7 +16,8 @@ MessageService.sln
 
 **其他文件**：[docs/LINE-BOT-SETUP.md](docs/LINE-BOT-SETUP.md)（建立 Bot 與串接的逐步操作、疑難排解）、
 [docs/WEB-UI-DESIGN-NOTES.md](docs/WEB-UI-DESIGN-NOTES.md)（檢視端歷次改版的設計決策理由與放棄的替代方案）、
-[docs/DEPLOYMENT-MODES.md](docs/DEPLOYMENT-MODES.md)（收錄端三種部署模式：架構、設定、決策理由、目前進度）。
+[docs/DEPLOYMENT-MODES.md](docs/DEPLOYMENT-MODES.md)（收錄端三種部署模式：架構、設定、決策理由、目前進度）、
+[docs/ENCRYPTION.md](docs/ENCRYPTION.md)（應用層欄位加密：範圍、金鑰設定、搜尋限制）。
 
 ---
 
