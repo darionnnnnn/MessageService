@@ -59,7 +59,7 @@ public class DeploymentModeTests : IDisposable
             configure(builder);
             if (allowLocalhost)
             {
-                builder.UseSetting("AllowedClientIps:0", "127.0.0.1");
+                builder.UseSetting("Ingest:AllowedClientIps:0", "127.0.0.1");
                 builder.ConfigureServices(services =>
                     services.AddSingleton<IStartupFilter>(new FakeRemoteIpStartupFilter(IPAddress.Parse("127.0.0.1"))));
             }
@@ -80,8 +80,15 @@ public class DeploymentModeTests : IDisposable
         var content = new StringContent("{\"destination\":\"d\",\"events\":[]}", Encoding.UTF8, "application/json");
         var response = await client.PostAsync("/api/line/webhook", content);
 
-        // 是 404（路由不存在）而不是 401（存在但簽章不對）——Db 模式下這個端點應該「不存在」
-        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        // 合併後：Db 模式仍掛著檢視端的 MapStaticAssets／.WithStaticAssets() 靜態資源後援
+        // （{**path:file}，只接受 GET/HEAD），對任何未註冊路徑的非 GET/HEAD 請求，路由層會先判定
+        // 「路徑有東西 match、但方法不對」而回 405，不會再往下探到「完全沒有 match」的 404。
+        // 405 跟 404 對這裡真正要驗證的事（webhook controller 沒被路由到、簽章驗證邏輯完全沒被
+        // 執行）是等價的——都不是 401，代表請求沒有走到 LineWebhookController 裡面
+        Assert.NotEqual(HttpStatusCode.Unauthorized, response.StatusCode);
+        Assert.True(
+            response.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.MethodNotAllowed,
+            $"預期 404 或 405（皆代表 webhook controller 未被路由到），實際是 {response.StatusCode}");
     }
 
     [Fact]
@@ -99,6 +106,60 @@ public class DeploymentModeTests : IDisposable
         var ex = Record.Exception(() => factory.CreateClient());
 
         Assert.Null(ex);
+    }
+
+    [Fact]
+    public async Task LineMode_ViewerRoutes_DoNotExist()
+    {
+        // 合併後最重要的安全邊界：Line／Edge 主機沒有本機資料庫，檢視端的頁面與 API
+        // 必須整組不存在（404），不能因為現在跟檢視端同一個行程就意外暴露出來
+        using var factory = CreateFactory(builder =>
+        {
+            builder.UseSetting("Deployment:Mode", "Line");
+            builder.UseSetting("Line:ChannelSecret", "secret");
+            builder.UseSetting("Ingest:BaseUrl", "https://db-host.example");
+            builder.UseSetting("Ingest:ApiKey", "test-key");
+        }, allowLocalhost: false);
+        using var client = factory.CreateClient();
+
+        var homeResponse = await client.GetAsync("/");
+        var groupsResponse = await client.GetAsync("/api/groups");
+
+        Assert.Equal(HttpStatusCode.NotFound, homeResponse.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, groupsResponse.StatusCode);
+    }
+
+    [Theory]
+    [InlineData("Full")]
+    [InlineData("Db")]
+    public async Task FullOrDbMode_ViewerRoutes_Work(string mode)
+    {
+        // Full／Db 模式（有本機資料庫）檢視端要能正常運作；同時驗證檢視端白名單
+        // （Viewer:AllowedClientIps）跟 ingest 白名單是分開的兩個設定
+        using var factory = CreateFactory(builder =>
+        {
+            builder.UseSetting("Deployment:Mode", mode);
+            if (mode == "Full")
+            {
+                builder.UseSetting("Line:ChannelSecret", "secret");
+            }
+            else
+            {
+                builder.UseSetting("Ingest:ApiKey", "correct-key");
+            }
+            builder.UseSetting("ConnectionStrings:Sqlite", $"Data Source={_dbPath}");
+            builder.UseSetting("ConnectionStrings:Outbox", $"Data Source={_outboxPath}");
+            builder.UseSetting("Viewer:AllowedClientIps:0", "127.0.0.1");
+        });
+        using var client = factory.CreateClient();
+
+        var homeResponse = await client.GetAsync("/");
+        var groupsResponse = await client.GetAsync("/api/groups");
+
+        // 首頁走 Razor View（真的算圖顯示成不成功不是這裡的重點），只確認路由沒被
+        // DeploymentModeConvention 移除即可；純 API 的 Groups 端點才嚴格驗證 200
+        Assert.NotEqual(HttpStatusCode.NotFound, homeResponse.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, groupsResponse.StatusCode);
     }
 
     [Fact]
@@ -205,7 +266,7 @@ public class DeploymentModeTests : IDisposable
             builder.UseSetting("Ingest:ApiKey", "correct-key");
             builder.UseSetting("ConnectionStrings:Sqlite", $"Data Source={_dbPath}");
             // 白名單只放一個跟測試用的假來源 IP 不一樣的位址——驗證 IP 檢查先於金鑰檢查生效
-            builder.UseSetting("AllowedClientIps:0", "10.0.0.1");
+            builder.UseSetting("Ingest:AllowedClientIps:0", "10.0.0.1");
             builder.ConfigureServices(services =>
                 services.AddSingleton<IStartupFilter>(new FakeRemoteIpStartupFilter(IPAddress.Parse("192.168.1.1"))));
         }, allowLocalhost: false);

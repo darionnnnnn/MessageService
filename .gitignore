@@ -6,6 +6,9 @@ obj/
 ## Visual Studio
 .vs/
 
+## Test run artifacts
+TestResults/
+
 ## Logs
 logs/
 

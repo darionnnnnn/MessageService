@@ -83,7 +83,7 @@ public class IngestSinkEquivalenceTests : IDisposable
             builder.UseSetting("Line:OutboundHere", "false");
             builder.UseSetting("Ingest:ApiKey", ApiKey);
             builder.UseSetting("ConnectionStrings:Sqlite", $"Data Source={dbPath}");
-            builder.UseSetting("AllowedClientIps:0", "127.0.0.1");
+            builder.UseSetting("Ingest:AllowedClientIps:0", "127.0.0.1");
             builder.ConfigureServices(services =>
                 services.AddSingleton<IStartupFilter>(new FakeRemoteIpStartupFilter(IPAddress.Parse("127.0.0.1"))));
         });
