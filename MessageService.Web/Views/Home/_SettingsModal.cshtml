@@ -106,6 +106,7 @@
                                     <input class="form-check-input" type="checkbox" id="pii-nhi-toggle">
                                     <label class="form-check-label" for="pii-nhi-toggle">健保卡號</label>
                                 </div>
+                                <p class="form-text">健保卡號的偵測規則是「12 碼純數字」，跟宅配貨運單號（黑貓、新竹貨運等常見業者也是 12 碼數字）格式相同，預設關閉；開啟前請先確認群組內容多半是健保卡號而不是貨運單號，否則會誤遮蔽貨運單號。</p>
                             </section>
 
                             <section class="settings-card">
@@ -183,7 +184,9 @@
                                     <h6 class="settings-card-title mb-0">各主機存活狀態</h6>
                                     <button type="button" class="btn btn-outline-secondary btn-sm" id="host-heartbeats-refresh-btn">重新整理</button>
                                 </div>
-                                <p class="form-text">每台部署主機（AllInOne／Edge／Core／Viewer）定期回報一次存活狀態；「離線」只代表多久沒收到回報，不代表資料遺失。</p>
+                                <p class="form-text">每台部署主機（AllInOne／Edge／Core／Viewer）定期回報一次存活狀態；「離線」只代表多久沒收到回報，不代表資料遺失。所有主機的心跳回報間隔（Heartbeat:IntervalSeconds）務必設成一致，狀態燈是以這裡（檢視端）的設定為基準判斷。Edge 這列量的是「Edge→Core 連通性」而非「Edge 是否存活」——Core 掛掉時 Edge 會顯示離線，但 Edge 本身可能仍在正常緩衝。</p>
+
+                                <div id="database-fallback-warning" class="alert alert-danger d-none" role="alert"></div>
 
                                 <div id="host-heartbeats-fingerprint-warning" class="alert alert-warning d-none" role="alert"></div>
 
@@ -197,6 +200,7 @@
                                                 <th>最後回報</th>
                                                 <th>Outbox 積壓</th>
                                                 <th>加密金鑰指紋</th>
+                                                <th class="text-end">操作</th>
                                             </tr>
                                         </thead>
                                         <tbody id="host-heartbeats-tbody"></tbody>

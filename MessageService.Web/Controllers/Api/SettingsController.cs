@@ -13,8 +13,20 @@ namespace MessageService.Web.Controllers.Api;
 [ApiController]
 [Route("api/settings")]
 [RequiresCapability(Capability.Viewer)]
-public class SettingsController(MessageDbContext dbContext, IOptions<HeartbeatOptions> heartbeatOptions) : ControllerBase
+public class SettingsController(
+    MessageDbContext dbContext, IOptions<HeartbeatOptions> heartbeatOptions, DatabaseStartupDecision databaseStartupDecision)
+    : ControllerBase
 {
+    // 只有本機這台主機的救場狀態（見 DatabaseStartupDecision 的單例說明：只在啟動時決定一次，
+    // 行程存續期間不變）——不是跨主機彙整，AllInOne 以外的模式一律回報「沒有觸發」
+    [HttpGet("database-status")]
+    public ActionResult<DatabaseStatusDto> GetDatabaseStatus() =>
+        Ok(new DatabaseStatusDto(
+            databaseStartupDecision.EffectiveProvider,
+            databaseStartupDecision.SqliteFallbackTriggered,
+            databaseStartupDecision.SqliteFallbackReason));
+
+
     [HttpGet("display")]
     public async Task<ActionResult<DisplaySettingsDto>> GetDisplaySettings(CancellationToken cancellationToken)
     {
@@ -273,6 +285,23 @@ public class SettingsController(MessageDbContext dbContext, IOptions<HeartbeatOp
         return Ok(rows.Select(h => new HostHeartbeatDto(
             h.Role, h.MachineName, h.LastSeenAt, ComputeStatus(now - h.LastSeenAt, interval),
             h.OutboxPending, h.OutboxOldestAgeSeconds, h.EncryptionKeyFingerprint)).ToList());
+    }
+
+    // 主機更名、角色改了、或那台機器退役時，舊列會永遠留著顯示 Offline，而且原本沒有任何
+    // 刪除入口——不做自動清除（自動清除會在真的離線時把「離線的主機」從畫面上抹掉，剛好抹掉
+    // 使用者要看的那件事），改成手動移除，前端二次確認
+    [HttpDelete("host-heartbeats/{role}/{machineName}")]
+    public async Task<IActionResult> DeleteHostHeartbeat(string role, string machineName, CancellationToken cancellationToken)
+    {
+        var existing = await dbContext.HostHeartbeats.FindAsync([role, machineName], cancellationToken);
+        if (existing is null)
+        {
+            return NotFound();
+        }
+
+        dbContext.HostHeartbeats.Remove(existing);
+        await dbContext.SaveChangesAsync(cancellationToken);
+        return NoContent();
     }
 
     private static string ComputeStatus(TimeSpan age, TimeSpan interval)

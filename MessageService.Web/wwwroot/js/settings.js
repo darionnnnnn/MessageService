@@ -481,7 +481,50 @@
         }
         tr.appendChild(fingerprintTd);
 
+        const actionTd = document.createElement('td');
+        actionTd.className = 'text-end';
+        const removeBtn = document.createElement('button');
+        removeBtn.type = 'button';
+        removeBtn.className = 'btn btn-outline-danger btn-sm';
+        removeBtn.textContent = '移除';
+        removeBtn.addEventListener('click', () => handleDeleteHostHeartbeat(row.role, row.machineName));
+        actionTd.appendChild(removeBtn);
+        tr.appendChild(actionTd);
+
         return tr;
+    }
+
+    async function handleDeleteHostHeartbeat(role, machineName) {
+        // 主機更名、角色改了、或那台機器退役時才需要——不做自動清除，見 SettingsController 的說明
+        const confirmed = window.confirm(
+            `確定要移除「${role} / ${machineName}」這筆主機狀態紀錄嗎？如果這台主機還在運作，` +
+            `下次心跳回報時會重新出現。`);
+        if (!confirmed) {
+            return;
+        }
+
+        try {
+            await fetchJson(`/api/settings/host-heartbeats/${encodeURIComponent(role)}/${encodeURIComponent(machineName)}`,
+                { method: 'DELETE' });
+            await Promise.all([loadDatabaseStatus(), loadHostHeartbeats()]);
+            showToast('已移除');
+        } catch {
+            showToast('移除失敗', true);
+        }
+    }
+
+    async function loadDatabaseStatus() {
+        const status = await fetchJson('/api/settings/database-status');
+
+        // 只有本機這台主機的狀態（見 DatabaseStartupDecision 說明）——AllInOne 以外的模式
+        // sqliteFallbackActive 恆為 false，這裡不用特別分模式處理
+        els.databaseFallbackWarning.classList.toggle('d-none', !status.sqliteFallbackActive);
+        if (status.sqliteFallbackActive) {
+            els.databaseFallbackWarning.textContent =
+                `目前以 SQLite 救援模式運作——設定的 SQL Server 啟動時連線／schema 驗證失敗` +
+                `（${status.sqliteFallbackReason || '原因不明'}），資料暫時寫入本機 SQLite。` +
+                `修好 SQL Server 後重新啟動即可切回，這段期間的資料不會自動搬過去。`;
+        }
     }
 
     async function loadHostHeartbeats() {
@@ -508,7 +551,7 @@
 
     async function handleHostHeartbeatsRefresh() {
         try {
-            await loadHostHeartbeats();
+            await Promise.all([loadDatabaseStatus(), loadHostHeartbeats()]);
         } catch {
             showToast('讀取主機狀態失敗', true);
         }
@@ -544,6 +587,7 @@
         els.hostHeartbeatsTbody = $('host-heartbeats-tbody');
         els.hostHeartbeatsEmpty = $('host-heartbeats-empty');
         els.hostHeartbeatsFingerprintWarning = $('host-heartbeats-fingerprint-warning');
+        els.databaseFallbackWarning = $('database-fallback-warning');
         els.hostHeartbeatsRefreshBtn = $('host-heartbeats-refresh-btn');
         els.settingsModal = $('settings-modal');
         els.settingsModalBody = $('settings-modal-body');
@@ -614,7 +658,8 @@
         }
 
         await Promise.all([
-            loadKeywords(), loadDisplaySettings(), loadPiiMaskingSettings(), loadRetentionSettings(), loadHostHeartbeats()
+            loadKeywords(), loadDisplaySettings(), loadPiiMaskingSettings(), loadRetentionSettings(),
+            loadDatabaseStatus(), loadHostHeartbeats()
         ]);
     }
 

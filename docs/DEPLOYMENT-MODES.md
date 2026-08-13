@@ -36,7 +36,17 @@
 三種拓撲怎麼組合：
 
 - **一台**：`Mode=AllInOne`。
-- **兩台**：Edge 一台（對外收 webhook）＋ Core 一台（資料庫＋檢視端）。
+- **兩台**：有兩種切法，選哪一種看「收 webhook 的主機碰不碰得到資料庫」：
+  - **A. `AllInOne`（`Viewer:Enabled=false`）＋獨立的 `Viewer`**——webhook 主機碰得到資料庫，
+    純粹是想把網頁流量隔開（例如檢視端要開放給更多同事、不想讓瀏覽流量跟收錄行程搶
+    資源）。沒有 ingest API、沒有 outbox 跨主機轉送、沒有 `Ingest:ApiKey` 要兩邊對齊，
+    維運成本比 B 低很多。**硬前提：必須用 SQL Server**——`Viewer` 那台要直連跟 `AllInOne`
+    那台同一顆資料庫，SQLite 是本機檔案，跨主機透過網路磁碟共用同一個 `.db` 檔案不可行
+    （見 `appsettings.Production.Viewer.json` 的說明）。還在用 SQLite 的話只能選 B。
+  - **B. `Edge` ＋ `Core`**——webhook 主機在 DMZ、碰不到資料庫所在的內網，才需要這一種。
+    Core 那台繼續用 SQLite 也可以。
+  - 沒有網段隔離需求、而且已經在用 SQL Server 時，選 A 不要選 B；有 DMZ 隔離需求，或還在
+    用 SQLite，選 B。
 - **三台**：Edge＋Core（`Viewer:Enabled=false`，只做資料庫與 ingest API）＋獨立的 Viewer
   （純檢視端）。
 
@@ -128,7 +138,7 @@ Edge 端排空 outbox 時預設一次 HTTP 請求送整批（`Outbox:BatchSize` 
 | 設定鍵 | 說明 |
 |---|---|
 | `Deployment:Mode` | `AllInOne`（預設）／`Edge`／`Core`／`Viewer`（舊名 `Full`／`Line`／`Db` 相容） |
-| `ConnectionStrings:Outbox` | 本機 outbox 的 SQLite 檔（`AllInOne`／`Edge` 才用得到），預設 `Data Source=outbox.db` |
+| `ConnectionStrings:Outbox` | 本機 outbox 的 SQLite 檔（`AllInOne`／`Edge` 才用得到），預設 `Data Source=Db/outbox.db`（相對路徑以 ContentRootPath 為基準，第一次啟動自動建立目錄） |
 | `Line:OutboundHere` | `bool?`，這台要不要對外呼叫 LINE API（媒體下載＋頭貼快取）。未設定時依模式推導（`AllInOne`／`Edge`＝`true`，`Core`／`Viewer`＝`false`）。決定 `ContentDownloadService`／`ProfileRefreshService` 會不會在這台主機啟動，以及 `IContentDownloadQueue`／`IProfileRefreshQueue` 是真的 Channel 還是 Null 實作。判定為 `true` 時必須同時設定 `Line:ChannelAccessToken`，否則啟動失敗 |
 | `Line:ChannelAccessToken` | 呼叫 LINE content／profile API 要用的權杖。只有 `OutboundHere` 判定為 `true` 時才需要 |
 | `Viewer:Enabled` | `bool?`，這台要不要開檢視端。未設定時依模式推導（`AllInOne`／`Core`／`Viewer`＝`true`，`Edge`＝`false`）。三台拓撲下 Core 端顯式設 `false` 把檢視端交給獨立的 Viewer 主機 |
@@ -140,8 +150,10 @@ Edge 端排空 outbox 時預設一次 HTTP 請求送整批（`Outbox:BatchSize` 
 | `Outbox:PollIntervalSeconds` | outbox 空的時候的保底輪詢間隔（寫入會立刻叫醒，這只是撿回到期重試項目用），預設 5 |
 | `Outbox:BatchSize` | 一輪最多處理幾筆（也是批次 ingest 一次請求送幾筆的上限），預設 50 |
 | `Outbox:BaseRetryDelaySeconds` / `MaxRetryDelaySeconds` | 指數退避：第 N 次失敗延遲 `Base × 2^(N-1)`，封頂 `Max`，預設 5／300。**沒有累計次數上限**——暫時性失敗永遠重試，只有 `PermanentIngestException` 第一次遇到就直接標記死信 |
-| `Database:Provider` | `Sqlite`（預設）／`SqlServer` |
+| `Database:Provider` | `Sqlite`／`SqlServer`，選填。未設定時依 `ConnectionStrings:SqlServer` 有沒有值推導（有→`SqlServer`，沒有→`Sqlite`），顯式設定永遠優先於推導（見 `DatabaseProviderResolver`） |
+| `Database:SqliteFallback` | `bool`，預設 `true`，只在 `Deployment:Mode=AllInOne` 有效。有效 provider 為 `SqlServer` 時，啟動當下先探測連得上、schema 也對（`AutoMigrate` 開啟時一併驗證 schema），探測失敗就改用本機 SQLite 撐起服務並記一則 Error log；設 `false` 改成探測失敗就直接啟動失敗。決定只在啟動當下做一次，行程存續期間不變（不做執行中動態切換），見 `DatabaseStartupProbe`／`DatabaseStartupDecision` |
 | `Database:AutoMigrate` | 啟動時是否自動跑 `Database.Migrate()`，預設 `true`。嚴管環境可關閉，改成手動在部署流程裡跑 `dotnet ef database update` |
+| `Heartbeat:IntervalSeconds` | 每台主機回報存活狀態的間隔，預設 60。**所有主機要設成一致**——設定頁「主機狀態」的 Online/Delayed/Offline 門檻是以檢視端這台的設定為基準判斷（見 `SettingsController.ComputeStatus`），各主機間隔不同時燈號會用錯的基準 |
 
 ## 設計決策
 
