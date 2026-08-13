@@ -12,6 +12,7 @@ public class DeploymentValidatorTests
     private sealed class CapturingLogger : ILogger
     {
         public List<string> Warnings { get; } = [];
+        public List<string> Errors { get; } = [];
         public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
         public bool IsEnabled(LogLevel logLevel) => true;
         public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
@@ -19,6 +20,10 @@ public class DeploymentValidatorTests
             if (logLevel == LogLevel.Warning)
             {
                 Warnings.Add(formatter(state, exception));
+            }
+            else if (logLevel == LogLevel.Error)
+            {
+                Errors.Add(formatter(state, exception));
             }
         }
     }
@@ -314,8 +319,15 @@ public class DeploymentValidatorTests
 
     // ==== Provider 與連線字串不一致 ====
 
+    private static DatabaseStartupDecision Db(
+        string? configuredProvider = null, string effectiveProvider = "Sqlite", bool wasInferred = true,
+        bool hasSqlServerConnectionString = false, bool sqliteFallbackConfigured = false,
+        bool sqliteFallbackEnabled = true, bool sqliteFallbackTriggered = false, string? sqliteFallbackReason = null) =>
+        new(configuredProvider, effectiveProvider, wasInferred, hasSqlServerConnectionString,
+            sqliteFallbackConfigured, sqliteFallbackEnabled, sqliteFallbackTriggered, sqliteFallbackReason);
+
     [Fact]
-    public void SqliteProvider_WithSqlServerConnectionString_Warns()
+    public void ExplicitSqliteProvider_WithSqlServerConnectionString_Warns()
     {
         var logger = new CapturingLogger();
 
@@ -325,14 +337,14 @@ public class DeploymentValidatorTests
             new ViewerOptions { AllowedClientIps = ["10.0.0.0/24"] },
             new IngestOptions(),
             logger,
-            databaseProvider: "Sqlite",
-            hasSqlServerConnectionString: true);
+            Db(configuredProvider: "Sqlite", effectiveProvider: "Sqlite", wasInferred: false,
+                hasSqlServerConnectionString: true));
 
         Assert.Contains(logger.Warnings, w => w.Contains("Database:Provider"));
     }
 
     [Fact]
-    public void SqliteProvider_WithoutSqlServerConnectionString_DoesNotWarn()
+    public void ExplicitSqliteProvider_WithoutSqlServerConnectionString_DoesNotWarn()
     {
         var logger = new CapturingLogger();
 
@@ -342,14 +354,13 @@ public class DeploymentValidatorTests
             new ViewerOptions { AllowedClientIps = ["10.0.0.0/24"] },
             new IngestOptions(),
             logger,
-            databaseProvider: "Sqlite",
-            hasSqlServerConnectionString: false);
+            Db(configuredProvider: "Sqlite", effectiveProvider: "Sqlite", wasInferred: false));
 
         Assert.DoesNotContain(logger.Warnings, w => w.Contains("Database:Provider"));
     }
 
     [Fact]
-    public void SqlServerProvider_WithSqlServerConnectionString_DoesNotWarn()
+    public void ExplicitSqlServerProvider_WithSqlServerConnectionString_DoesNotWarn()
     {
         var logger = new CapturingLogger();
 
@@ -359,9 +370,116 @@ public class DeploymentValidatorTests
             new ViewerOptions { AllowedClientIps = ["10.0.0.0/24"] },
             new IngestOptions(),
             logger,
-            databaseProvider: "SqlServer",
-            hasSqlServerConnectionString: true);
+            Db(configuredProvider: "SqlServer", effectiveProvider: "SqlServer", wasInferred: false,
+                hasSqlServerConnectionString: true));
 
         Assert.DoesNotContain(logger.Warnings, w => w.Contains("Database:Provider"));
+    }
+
+    [Fact]
+    public void InferredSqlServerProvider_DoesNotWarn()
+    {
+        // 需求2：沒設 Provider、依連線字串推導成 SqlServer 是正常路徑，不是「殘留設定」，
+        // 不該被當成 SqliteProvider_WithSqlServerConnectionString 那類警告
+        var logger = new CapturingLogger();
+
+        DeploymentValidator.Validate(
+            new DeploymentOptions { Mode = DeploymentMode.AllInOne },
+            Line(channelSecret: "secret"),
+            new ViewerOptions { AllowedClientIps = ["10.0.0.0/24"] },
+            new IngestOptions(),
+            logger,
+            Db(configuredProvider: null, effectiveProvider: "SqlServer", wasInferred: true,
+                hasSqlServerConnectionString: true));
+
+        Assert.DoesNotContain(logger.Warnings, w => w.Contains("Database:Provider"));
+    }
+
+    [Fact]
+    public void ExplicitSqlServerProvider_WithoutConnectionString_Throws()
+    {
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            DeploymentValidator.Validate(
+                new DeploymentOptions { Mode = DeploymentMode.AllInOne },
+                Line(channelSecret: "secret"),
+                new ViewerOptions { AllowedClientIps = ["10.0.0.0/24"] },
+                new IngestOptions(),
+                NullLogger.Instance,
+                Db(configuredProvider: "SqlServer", effectiveProvider: "SqlServer", wasInferred: false,
+                    hasSqlServerConnectionString: false)));
+
+        Assert.Contains("SqlServer", ex.Message);
+    }
+
+    [Theory]
+    [InlineData(DeploymentMode.Core)]
+    [InlineData(DeploymentMode.Edge)]
+    [InlineData(DeploymentMode.Viewer)]
+    public void NonAllInOneMode_WithSqliteFallbackConfigured_Warns(DeploymentMode mode)
+    {
+        var logger = new CapturingLogger();
+        var line = mode is DeploymentMode.Edge
+            ? Line(channelSecret: "secret", outboundHere: true, channelAccessToken: "token")
+            : Line(channelSecret: "");
+        var ingest = mode is DeploymentMode.Edge
+            ? new IngestOptions { BaseUrl = "https://core-host", ApiKey = "key" }
+            : new IngestOptions { ApiKey = "key" };
+
+        DeploymentValidator.Validate(
+            new DeploymentOptions { Mode = mode }, line, new ViewerOptions(), ingest, logger,
+            Db(sqliteFallbackConfigured: true));
+
+        Assert.Contains(logger.Warnings, w => w.Contains("SqliteFallback"));
+    }
+
+    [Fact]
+    public void AllInOneMode_WithSqliteFallbackConfigured_DoesNotWarn()
+    {
+        var logger = new CapturingLogger();
+
+        DeploymentValidator.Validate(
+            new DeploymentOptions { Mode = DeploymentMode.AllInOne },
+            Line(channelSecret: "secret"),
+            new ViewerOptions { AllowedClientIps = ["10.0.0.0/24"] },
+            new IngestOptions(),
+            logger,
+            Db(sqliteFallbackConfigured: true));
+
+        Assert.DoesNotContain(logger.Warnings, w => w.Contains("SqliteFallback"));
+    }
+
+    [Fact]
+    public void SqliteFallbackTriggered_LogsErrorWithReason()
+    {
+        var logger = new CapturingLogger();
+
+        DeploymentValidator.Validate(
+            new DeploymentOptions { Mode = DeploymentMode.AllInOne },
+            Line(channelSecret: "secret"),
+            new ViewerOptions { AllowedClientIps = ["10.0.0.0/24"] },
+            new IngestOptions(),
+            logger,
+            Db(configuredProvider: "SqlServer", effectiveProvider: "Sqlite", wasInferred: false,
+                hasSqlServerConnectionString: true, sqliteFallbackTriggered: true,
+                sqliteFallbackReason: "連線逾時"));
+
+        Assert.Contains(logger.Errors, e => e.Contains("連線逾時"));
+    }
+
+    [Fact]
+    public void SqliteFallbackNotTriggered_DoesNotLogError()
+    {
+        var logger = new CapturingLogger();
+
+        DeploymentValidator.Validate(
+            new DeploymentOptions { Mode = DeploymentMode.AllInOne },
+            Line(channelSecret: "secret"),
+            new ViewerOptions { AllowedClientIps = ["10.0.0.0/24"] },
+            new IngestOptions(),
+            logger,
+            Db(configuredProvider: "SqlServer", effectiveProvider: "SqlServer", wasInferred: false,
+                hasSqlServerConnectionString: true));
+
+        Assert.Empty(logger.Errors);
     }
 }
