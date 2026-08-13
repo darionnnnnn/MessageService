@@ -1,5 +1,4 @@
 using System.Reflection;
-using MessageService.Options;
 using MessageService.Services;
 using Microsoft.AspNetCore.Mvc.ApplicationModels;
 
@@ -10,8 +9,11 @@ namespace MessageService.Tests.Services;
 // 兩層都要有：初版用「清空 Selectors」的做法就是單元測試全綠、真實 host 啟動就炸。
 public class DeploymentModeConventionTests
 {
-    [EnabledInModes(DeploymentMode.Full, DeploymentMode.Line)]
+    [RequiresCapability(Capability.Webhook)]
     private class WebhookLikeController;
+
+    [RequiresCapability(Capability.IngestApi)]
+    private class IngestLikeController;
 
     private class UngatedController;
 
@@ -27,79 +29,83 @@ public class DeploymentModeConventionTests
         return application;
     }
 
-    [Theory]
-    [InlineData(DeploymentMode.Full)]
-    [InlineData(DeploymentMode.Line)]
-    public void Apply_ModeInAllowedSet_KeepsController(DeploymentMode mode)
+    private static DeploymentCapabilities Capabilities(
+        bool receivesWebhook = false,
+        bool hasDatabaseAccess = false,
+        bool ingestApiEnabled = false,
+        bool viewerEnabled = false,
+        bool outboundHere = false,
+        bool runsRetention = false) =>
+        new(receivesWebhook, hasDatabaseAccess, ingestApiEnabled, viewerEnabled, outboundHere, runsRetention);
+
+    [Fact]
+    public void Apply_CapabilityPresent_KeepsController()
     {
         var application = CreateApplication(typeof(WebhookLikeController));
 
-        new DeploymentModeConvention(mode, ingestApiEnabled: true).Apply(application);
+        new DeploymentModeConvention(Capabilities(receivesWebhook: true)).Apply(application);
 
         Assert.Single(application.Controllers);
     }
 
     [Fact]
-    public void Apply_ModeNotInAllowedSet_RemovesController()
+    public void Apply_CapabilityAbsent_RemovesController()
     {
         var application = CreateApplication(typeof(WebhookLikeController), typeof(UngatedController));
 
-        new DeploymentModeConvention(DeploymentMode.Db, ingestApiEnabled: true).Apply(application);
+        new DeploymentModeConvention(Capabilities(receivesWebhook: false)).Apply(application);
 
         var remaining = Assert.Single(application.Controllers);
         Assert.Equal(typeof(UngatedController).GetTypeInfo(), remaining.ControllerType);
     }
 
-    [Theory]
-    [InlineData(DeploymentMode.Full)]
-    [InlineData(DeploymentMode.Line)]
-    [InlineData(DeploymentMode.Db)]
-    public void Apply_ControllerWithoutAttribute_NeverRemoved(DeploymentMode mode)
+    [Fact]
+    public void Apply_ControllerWithoutAttribute_NeverRemoved()
     {
         var application = CreateApplication(typeof(UngatedController));
 
-        new DeploymentModeConvention(mode, ingestApiEnabled: true).Apply(application);
+        // 全部能力都關掉，沒有任何 [RequiresCapability] 的 controller 仍應保留
+        new DeploymentModeConvention(Capabilities()).Apply(application);
 
         Assert.Single(application.Controllers);
     }
 
-    // ==== RequiresIngestApiKeyAttribute：獨立於模式的第二道閘門 ====
-
-    [EnabledInModes(DeploymentMode.Full, DeploymentMode.Db)]
-    [RequiresIngestApiKey]
-    private class IngestLikeController;
+    // ==== IngestApi 能力：已經同時涵蓋「模式是否允許」與「金鑰是否配置」，
+    // 兩個條件只要有一個不成立，IngestApiEnabled 本身就會是 false ====
 
     [Fact]
-    public void Apply_RequiresApiKey_ApiEnabled_KeepsController()
+    public void Apply_IngestApiEnabled_KeepsController()
     {
         var application = CreateApplication(typeof(IngestLikeController));
 
-        new DeploymentModeConvention(DeploymentMode.Full, ingestApiEnabled: true).Apply(application);
+        new DeploymentModeConvention(Capabilities(ingestApiEnabled: true)).Apply(application);
 
         Assert.Single(application.Controllers);
     }
 
     [Fact]
-    public void Apply_RequiresApiKey_ApiDisabled_RemovesControllerEvenIfModeMatches()
+    public void Apply_IngestApiDisabled_RemovesController()
     {
         var application = CreateApplication(typeof(IngestLikeController), typeof(UngatedController));
 
-        // 模式本身允許（Full 在 EnabledInModes 清單中），但金鑰沒配置——兩道閘門獨立判定，
-        // 任一道不過都要移除
-        new DeploymentModeConvention(DeploymentMode.Full, ingestApiEnabled: false).Apply(application);
+        new DeploymentModeConvention(Capabilities(ingestApiEnabled: false)).Apply(application);
 
         var remaining = Assert.Single(application.Controllers);
         Assert.Equal(typeof(UngatedController).GetTypeInfo(), remaining.ControllerType);
     }
 
     [Fact]
-    public void Apply_RequiresApiKey_ModeNotAllowed_RemovedRegardlessOfApiKey()
+    public void Apply_MultipleControllers_EachJudgedIndependently()
     {
-        var application = CreateApplication(typeof(IngestLikeController));
+        var application = CreateApplication(
+            typeof(WebhookLikeController), typeof(IngestLikeController), typeof(UngatedController));
 
-        // Line 不在 IngestLikeController 的 EnabledInModes 清單中——即使金鑰配置了也不該存在
-        new DeploymentModeConvention(DeploymentMode.Line, ingestApiEnabled: true).Apply(application);
+        // Edge 模式的典型組合：收 webhook、沒有 ingest API、沒有能力限制的 controller 一律保留
+        new DeploymentModeConvention(Capabilities(receivesWebhook: true, ingestApiEnabled: false)).Apply(application);
 
-        Assert.Empty(application.Controllers);
+        var remainingTypes = application.Controllers.Select(c => c.ControllerType).ToHashSet();
+        Assert.Contains(typeof(WebhookLikeController).GetTypeInfo(), remainingTypes);
+        Assert.Contains(typeof(UngatedController).GetTypeInfo(), remainingTypes);
+        Assert.DoesNotContain(typeof(IngestLikeController).GetTypeInfo(), remainingTypes);
     }
 }

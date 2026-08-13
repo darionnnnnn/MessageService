@@ -208,8 +208,8 @@ public class DeploymentModeTests : IDisposable
     [Fact]
     public async Task FullMode_WithoutIngestApiKey_IngestEndpointDoesNotExist_ButHostStartsFine()
     {
-        // 預設單機部署（Full，沒特別設 Ingest:ApiKey）不該意外多開一個沒人保護的寫入端點——
-        // 這是 RequiresIngestApiKeyAttribute 存在的理由
+        // 預設單機部署（AllInOne，沒特別設 Ingest:ApiKey）不該意外多開一個沒人保護的寫入端點——
+        // 這是 IngestApiEnabled 同時檢查「金鑰是否配置」的理由（見 DeploymentCapabilities）
         using var factory = CreateFactory(builder =>
         {
             builder.UseSetting("Deployment:Mode", "Full");

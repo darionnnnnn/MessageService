@@ -6,15 +6,14 @@ using Microsoft.Extensions.Options;
 
 namespace MessageService.Controllers;
 
-/// <summary>Db／Full 模式的接收端點——Line 模式的 outbox 把資料轉送到這裡（見
+/// <summary>Core／AllInOne 模式的接收端點——Edge 模式的 outbox 把資料轉送到這裡（見
 /// HttpIngestSink），媒體下載與頭貼快取（見 ApiContentWorkSource／ApiProfileStore）也走
-/// 這裡。只在設定了 Ingest:ApiKey 時存在（見 DeploymentModeConvention 對
-/// RequiresIngestApiKeyAttribute 的處理），並且只受理帶正確 X-Ingest-Key 標頭、來源在
-/// AllowedClientIps 白名單內的請求（見 Program.cs 掛在 /api/ingest 路徑群組的兩個中介層）。</summary>
+/// 這裡。只在設定了 Ingest:ApiKey 時存在（見 DeploymentCapabilities.IngestApiEnabled 與
+/// DeploymentModeConvention 的套用），並且只受理帶正確 X-Ingest-Key 標頭、來源在
+/// Ingest:AllowedClientIps 白名單內的請求（見 Program.cs 掛在 /api/ingest 路徑群組的兩個中介層）。</summary>
 [ApiController]
 [Route("api/ingest")]
-[EnabledInModes(DeploymentMode.Full, DeploymentMode.Db)]
-[RequiresIngestApiKey]
+[RequiresCapability(Capability.IngestApi)]
 public class IngestController(
     IIngestSink sink,
     IContentWorkSource contentWorkSource,

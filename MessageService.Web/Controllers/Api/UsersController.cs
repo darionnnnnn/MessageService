@@ -1,5 +1,4 @@
 using MessageService.Data;
-using MessageService.Options;
 using MessageService.Services;
 using MessageService.Web.Dtos;
 using MessageService.Web.Services;
@@ -8,11 +7,10 @@ using Microsoft.EntityFrameworkCore;
 
 namespace MessageService.Web.Controllers.Api;
 
-// 只在有本機資料庫的模式下才存在（見 Program.cs 的 viewerEnabled／DeploymentModeConvention）——
-// 純 Line／Edge 主機沒有 MessageDbContext 可注入，這個 controller 在那些模式下不該被路由到
+// 只在檢視端能力開啟時才存在（見 DeploymentCapabilities.ViewerEnabled／DeploymentModeConvention）
 [ApiController]
 [Route("api/users")]
-[EnabledInModes(DeploymentMode.Full, DeploymentMode.Db)]
+[RequiresCapability(Capability.Viewer)]
 public class UsersController(MessageDbContext dbContext, IMaskingService maskingService) : ControllerBase
 {
     /// <summary>設定頁「自訂別名」的成員選單用。不帶 groupId 時回傳所有已知使用者（跨群組去重）。

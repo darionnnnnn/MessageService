@@ -18,10 +18,11 @@ public class DeploymentValidatorTests
             ChannelAccessToken = channelAccessToken ?? (outboundHere ? "token" : "")
         };
 
-    private static void Validate(DeploymentMode mode, LineOptions? line = null, IngestOptions? ingest = null) =>
+    private static void Validate(DeploymentMode mode, LineOptions? line = null, IngestOptions? ingest = null, ViewerOptions? viewer = null) =>
         DeploymentValidator.Validate(
             new DeploymentOptions { Mode = mode },
             line ?? Line(),
+            viewer ?? new ViewerOptions(),
             ingest ?? new IngestOptions(),
             NullLogger.Instance);
 
@@ -148,6 +149,68 @@ public class DeploymentValidatorTests
         var ex = Record.Exception(() =>
             Validate(DeploymentMode.Line, Line(outboundHere: false),
                 new IngestOptions { BaseUrl = "https://db-host", ApiKey = "key" }));
+
+        Assert.Null(ex);
+    }
+
+    // ==== Stage 2：新舊模式名稱等價、Viewer 模式、Core+檢視端組合 ====
+
+    [Fact]
+    public void CanonicalNames_ProduceIdenticalOutcomeToLegacyNames()
+    {
+        // DeploymentMode.Full/Line/Db 是 AllInOne/Edge/Core 的別名（同一個底層數值），
+        // 用新名稱寫的呼叫應該跟舊名稱完全同結果——這裡直接拿舊測試案例的輸入用新名稱重跑一次
+        var exAllInOne = Record.Exception(() => Validate(DeploymentMode.AllInOne, Line(channelSecret: "secret")));
+        var exEdge = Record.Exception(() =>
+            Validate(DeploymentMode.Edge, Line(channelSecret: "secret"),
+                new IngestOptions { BaseUrl = "https://core-host", ApiKey = "key" }));
+        var exCore = Record.Exception(() =>
+            Validate(DeploymentMode.Core, Line(channelSecret: ""), new IngestOptions { ApiKey = "key" }));
+
+        Assert.Null(exAllInOne);
+        Assert.Null(exEdge);
+        Assert.Null(exCore);
+    }
+
+    [Fact]
+    public void ViewerMode_WithNoLineOrIngestConfig_DoesNotThrow()
+    {
+        var ex = Record.Exception(() =>
+            Validate(DeploymentMode.Viewer, Line(channelSecret: "", outboundHere: false),
+                new IngestOptions()));
+
+        Assert.Null(ex);
+    }
+
+    [Fact]
+    public void ViewerMode_WithLeftoverLineChannelSecret_DoesNotThrow_OnlyWarns()
+    {
+        // 從其他主機複製 appsettings 忘記清掉 Line:ChannelSecret 是可疑組合，不是錯誤——
+        // Viewer 模式根本不會用到這個值
+        var ex = Record.Exception(() =>
+            Validate(DeploymentMode.Viewer, Line(channelSecret: "leftover-secret", outboundHere: false),
+                new IngestOptions()));
+
+        Assert.Null(ex);
+    }
+
+    [Fact]
+    public void CoreMode_ViewerEnabledWithEmptyAllowlist_DoesNotThrow_OnlyWarns()
+    {
+        // Core 模式預設一併開檢視端；空白名單雖然是「全拒」而非啟動失敗，仍值得一則警告
+        var ex = Record.Exception(() =>
+            Validate(DeploymentMode.Core, Line(channelSecret: ""),
+                new IngestOptions { ApiKey = "key" }, new ViewerOptions { AllowedClientIps = [] }));
+
+        Assert.Null(ex);
+    }
+
+    [Fact]
+    public void CoreMode_ViewerExplicitlyDisabled_DoesNotThrow_EvenWithEmptyAllowlist()
+    {
+        var ex = Record.Exception(() =>
+            Validate(DeploymentMode.Core, Line(channelSecret: ""),
+                new IngestOptions { ApiKey = "key" }, new ViewerOptions { Enabled = false, AllowedClientIps = [] }));
 
         Assert.Null(ex);
     }

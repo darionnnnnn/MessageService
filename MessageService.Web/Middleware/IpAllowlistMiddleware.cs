@@ -57,19 +57,34 @@ public class IpAllowlistMiddleware
         return _allowedNetworks.Any(network => network.Contains(normalizedIp));
     }
 
-    private static List<IPNetwork> ParseAllowedIps(IReadOnlyList<string> entries)
+    private List<IPNetwork> ParseAllowedIps(IReadOnlyList<string> entries)
     {
         var networks = new List<IPNetwork>();
         foreach (var entry in entries)
         {
-            if (entry.Contains('/') && IPNetwork.TryParse(entry, out var network))
+            if (entry.Contains('/'))
             {
+                if (!IPNetwork.TryParse(entry, out var network))
+                {
+                    // .NET 的 IPNetwork.TryParse 要求主機位元全為 0（嚴格 CIDR），「10.1.0.5/24」
+                    // 這種很常見的打字習慣會 parse 失敗——過去這裡直接把整條無聲丟掉，使用者被
+                    // 403 之後 log 只會說「not in AllowedClientIps」，完全查不出是設定寫錯。
+                    // 這是安全設定，寧可啟動失敗也不要一條規則悄悄失效
+                    throw new InvalidOperationException(
+                        $"{_options.Label}: {_options.ConfigSectionName} 有一條 CIDR 網段解析失敗：\"{entry}\"。" +
+                        "IPNetwork 要求主機位元全為 0，例如 \"10.1.0.5/24\" 請改成 \"10.1.0.0/24\"" +
+                        "（若只要允許單一位址則改成 \"10.1.0.5/32\"）。");
+                }
                 networks.Add(network);
+                continue;
             }
-            else if (IPAddress.TryParse(entry, out var address))
+
+            if (!IPAddress.TryParse(entry, out var address))
             {
-                networks.Add(new IPNetwork(address, address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork ? 32 : 128));
+                throw new InvalidOperationException(
+                    $"{_options.Label}: {_options.ConfigSectionName} 有一條設定值不是合法的 IP 或 CIDR 網段：\"{entry}\"。");
             }
+            networks.Add(new IPNetwork(address, address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork ? 32 : 128));
         }
 
         return networks;

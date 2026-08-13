@@ -1,16 +1,15 @@
 using System.Text.Json;
 using MessageService.Models.Line;
-using MessageService.Options;
 using MessageService.Services;
 using Microsoft.AspNetCore.Mvc;
 
 namespace MessageService.Controllers;
 
-// Db 模式的主機不收 webhook（它只透過 ingest API 接收 Line 模式主機轉來的資料）——見
-// DeploymentModeConvention，這裡宣告的模式集合就是路由存在與否的唯一依據
+// Core／Viewer 模式的主機不收 webhook（Core 只透過 ingest API 接收 Edge 模式主機轉來的資料）——
+// 見 DeploymentModeConvention，這裡宣告的能力就是路由存在與否的唯一依據
 [ApiController]
 [Route("api/line/webhook")]
-[EnabledInModes(DeploymentMode.Full, DeploymentMode.Line)]
+[RequiresCapability(Capability.Webhook)]
 public class LineWebhookController(
     ILineSignatureValidator signatureValidator,
     IWebhookEventHandler eventHandler,

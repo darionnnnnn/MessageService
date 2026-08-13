@@ -1,7 +1,6 @@
 using MessageService.Data;
 using MessageService.Data.Crypto;
 using MessageService.Models;
-using MessageService.Options;
 using MessageService.Services;
 using MessageService.Web.Dtos;
 using MessageService.Web.Services;
@@ -11,10 +10,9 @@ using Microsoft.Extensions.Options;
 
 namespace MessageService.Web.Controllers.Api;
 
-// 只在有本機資料庫的模式下才存在（見 Program.cs 的 viewerEnabled／DeploymentModeConvention）——
-// 純 Line／Edge 主機沒有 MessageDbContext 可注入，這個 controller 在那些模式下不該被路由到
+// 只在檢視端能力開啟時才存在（見 DeploymentCapabilities.ViewerEnabled／DeploymentModeConvention）
 [ApiController]
-[EnabledInModes(DeploymentMode.Full, DeploymentMode.Db)]
+[RequiresCapability(Capability.Viewer)]
 public class MessagesController(
     MessageDbContext dbContext,
     ContentStreamService contentStreamService,

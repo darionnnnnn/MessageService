@@ -17,6 +17,27 @@
 
 ## 執行進度
 
+- **階段2（模式重定義）已完成並 commit**，分支 `feature/deployment-consolidation`。
+  全 solution 建置 0 警告 0 錯誤，461 測試全綠（較階段1新增 14 個）。
+  實作期間相對本文件原稿的三個調整：
+  1. **`DeploymentMode` 用列舉別名取代原規劃的字串+自訂 parser 方案**：`Full=AllInOne`／
+     `Line=Edge`／`Db=Core` 三個舊名與新名共用底層數值，ASP.NET Core 的設定綁定本身就用
+     `Enum.TryParse` 認名稱不認值，舊 appsettings.json 裡的 "Full"/"Line"/"Db" 完全不用碰就
+     繼續有效；既有測試碼裡大量的 `DeploymentMode.Full` 字面值也因此不用整批改名。比原規劃
+     省下一個獨立的 parser 類別，且沒有「綁定完就分不出原本用哪個名字」的問題——用哪個 Warning
+     只在需要時才另外 sniff 一次原始字串。
+  2. **`Capability.IngestApi` 直接吃 `IngestApiEnabled`（已同時涵蓋模式與金鑰兩個條件），
+     刪掉了 `RequiresIngestApiKeyAttribute` 這個獨立的第二道閘門**：原本兩個閘門是巧合形成的
+     （`ingestApiEnabled` 在 Stage 1 之前純粹是「容器建好之前就要知道」的技術限制，不是刻意的
+     防禦分層），折成一個之後兩者不會再有「改一邊忘了改另一邊」的機會，且既有測試（三個獨立
+     案例）已經覆蓋過的行為在新測試裡原樣保留，只是不再需要兩個屬性疊加。
+  3. **ingest API 的 IP 白名單／金鑰中介層維持掛在 `HasDatabaseAccess`，沒有收斂到更精準的
+     `IngestApiEnabled`**：原本以為這樣更乾淨，但追蹤發現若中介層完全不掛，AllInOne/Core 模式
+     沒設 `Ingest:ApiKey` 時，POST 到 `/api/ingest/*` 會落到階段1發現的靜態資源後援
+     （405 而非 404），跟現有測試 `FullMode_WithoutIngestApiKey_..._ButHostStartsFine` 期待的
+     404 衝突——`IngestApiKeyMiddleware` 金鑰為空時的顯式 404 短路正是為了維持這個行為，
+     所以中介層掛載條件維持不變。
+
 - **階段1（專案合併）已完成並 commit**（`801b728`，分支 `feature/deployment-consolidation`）。
   全 solution 建置 0 警告 0 錯誤，447 測試全綠。
   實作期間相對本文件原稿的兩個調整：
