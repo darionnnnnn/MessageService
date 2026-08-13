@@ -17,6 +17,28 @@
 
 ## 執行進度
 
+- **階段4（效能與行為修正，問題4/5/6/9）已全部完成並 commit**，分支
+  `feature/deployment-consolidation`，拆成四個子 commit（4a~4d）。全 solution 建置
+  0 警告 0 錯誤，最終 493 測試全綠（較階段3新增 29 個）。
+  - **4a 側欄反正規化**（`764e37c`）：Groups 加 LastMessageId/LastMessageAt，新增
+    GroupLastMessageTracker 統一維護（DirectIngestSink 落地即時呼叫、測試 seeding
+    事後批次呼叫共用同一份邏輯）；GroupsController 改讀 Groups 表；漂移回退＋保留期
+    清除後重算指標都有對應測試。
+  - **4b 轉檔延遲重排**（`287bfb5`）：IContentDownloadQueue 新增 EnqueueDelayed；
+    ContentDownloadService 的轉檔檢查從迴圈等待改成單次查詢＋延遲重排，worker 不再被
+    卡住；新增「3 支永遠 Processing 的影片不擋圖片」的並發回歸測試直接證明效果。
+  - **4c aroundId 雙段查詢**（`b4e1c34`）：拿掉非 sargable 的 `ORDER BY ABS()`，改錨點
+    兩側各查一次；連帶拿掉了 aroundId 原本疊加的 days 過濾（純依 Id 取最近半窗，
+    跟 afterId 分頁的既有慣例一致）——這是規劃時沒完全預期到的額外簡化，記在
+    程式碼註解與測試裡。
+  - **4d outbox 批次排空**（`576a618`）：IIngestSink 新增 SubmitBatchAsync（帶預設實作，
+    DirectIngestSink 沿用、HttpIngestSink 覆寫真的一次送整批）；新增
+    `POST /api/ingest/events-batch`；Edge 打到未升級的舊 Core（404）自動退回逐筆模式。
+    這裡也發現一個規劃時沒完全想清楚的地方：批次中途遇到「暫時性失敗」（非
+    PermanentIngestException）會讓整批這次都不算數（不是舊版的「其他項目照常」），
+    因為冪等保證讓整批重試是安全的，比逐筆記錄「處理到哪」簡單很多——已有專門測試
+    釘住這個語意，跟「單筆永久拒絕不影響其他項目」的行為明確區分開。
+
 - **階段3（Schema 改用 Database.Migrate()）已完成並 commit**，分支 `feature/deployment-consolidation`。
   全 solution 建置 0 警告 0 錯誤，464 測試全綠（較階段2新增 9 個：LegacySqliteBaseliner 7 個、
   兩 provider 的 pending-model-changes 守門測試各 1 個）。
