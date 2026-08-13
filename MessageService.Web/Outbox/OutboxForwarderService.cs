@@ -17,11 +17,13 @@ public class OutboxForwarderService(
     IContentDownloadQueue downloadQueue,
     IProfileRefreshQueue profileRefreshQueue,
     IOptions<OutboxOptions> options,
+    IOptions<HeartbeatOptions> heartbeatOptions,
     ILogger<OutboxForwarderService> logger) : BackgroundService
 {
     private static readonly TimeSpan DeadLetterCheckInterval = TimeSpan.FromHours(1);
 
     private readonly OutboxOptions _options = options.Value;
+    private readonly HeartbeatOptions _heartbeatOptions = heartbeatOptions.Value;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -82,6 +84,29 @@ public class OutboxForwarderService(
                 "Outbox has {Count} dead-lettered entries awaiting manual review (see LastError column in outbox.db)",
                 deadLetterCount);
         }
+
+        // P0 那類「批次 ingest 撞重複鍵 500，Edge outbox 永久卡死但完全沒有告警」的情況——
+        // 死信計數看不出來（暫時性失敗永遠不會死信，見 OutboxEntry.DeadLetteredAt 說明），
+        // 只能靠最舊未死信項目的年齡判斷排空是不是卡住了。順著同一個每小時迴圈檢查，
+        // 第一個小時內就會被叫出來，不用等到有人發現「怎麼今天都沒新訊息」
+        var oldestPendingCreatedAt = await dbContext.Entries
+            .Where(e => e.DeadLetteredAt == null)
+            .OrderBy(e => e.CreatedAt)
+            .Select(e => (DateTimeOffset?)e.CreatedAt)
+            .FirstOrDefaultAsync(cancellationToken);
+
+        if (oldestPendingCreatedAt is { } createdAt)
+        {
+            var age = DateTimeOffset.UtcNow - createdAt;
+            var alertThreshold = TimeSpan.FromMinutes(_heartbeatOptions.OutboxBacklogAlertMinutes);
+            if (age >= alertThreshold)
+            {
+                logger.LogError(
+                    "Outbox has a pending entry that has been waiting {AgeMinutes:F0} minutes " +
+                    "(alert threshold {ThresholdMinutes} minutes) — forwarding may be stuck",
+                    age.TotalMinutes, _heartbeatOptions.OutboxBacklogAlertMinutes);
+            }
+        }
     }
 
     /// <summary>處理一批到期的 outbox 項目。回傳是否處理了至少一筆——公開方法，
@@ -106,7 +131,10 @@ public class OutboxForwarderService(
         }
 
         // 反序列化本身失敗（不該發生，但防禦性處理）不算落地失敗——payload 壞了重試也不會變好，
-        // 直接死信，不讓這種項目卡進下面的批次呼叫
+        // 直接死信，不讓這種項目卡進下面的批次呼叫。
+        // 這裡用索引子賦值而非 group：OutboxDbContext 對 WebhookEventId 有唯一索引，同一批 batch
+        // 裡不可能出現兩列相同的 WebhookEventId（DB 層面保證），不需要為理論上不會發生的重複
+        // 多寫一層 group 邏輯——見 SqliteOutboxWriter.EnqueueAsync 對撞鍵的處理
         var entriesByWebhookEventId = new Dictionary<string, OutboxEntry>();
         var envelopes = new List<IngestEnvelope>();
         foreach (var entry in batch)

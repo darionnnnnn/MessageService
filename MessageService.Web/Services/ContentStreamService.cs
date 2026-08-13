@@ -13,15 +13,18 @@ namespace MessageService.Web.Services;
 /// 只讀取實際要傳送的位元組；ADO.NET 的 blob stream 是 forward-only，不支援 Seek，
 /// 所以「拖進度」是靠瀏覽器對同一個 URL 發出新的 Range 請求，而非在單一連線內做 Seek。
 ///
-/// 加密啟用時 blob 存的是分塊密文（格式見 ChunkedBlobCipher，DbContentWorkSource 寫入）——
-/// 讀取端一律先偷看前 16 bytes 表頭判斷是不是這個格式（不看 Encryption:Enabled 設定本身，
-/// 純粹看資料長什麼樣子），這樣新舊資料可以混存。注意反過來不成立：加密設定事後被關掉時，
-/// 既有的加密內容因為沒有金鑰可解，會直接回 404（不是顯示亂碼），見 docs/ENCRYPTION.md。
+/// 加密啟用時 blob 存的是分塊密文（格式見 ChunkedBlobCipher，MSE1／MSE2 兩種都認，
+/// DbContentWorkSource 寫入）——讀取端一律先偷看前 16 bytes 表頭判斷是不是這個格式
+/// （不看 Encryption:Enabled 設定本身，純粹看資料長什麼樣子），這樣新舊資料可以混存。
+/// 注意反過來不成立：加密設定事後被關掉時，既有的加密內容因為沒有金鑰可解，會直接回 404
+/// （不是顯示亂碼），見 docs/ENCRYPTION.md。MSE2 表頭多帶一個 byte 的 key id，跟目前設定的
+/// 金鑰指紋（cipher.MatchesKeyId）不符時視同內容不可用——輪替金鑰後舊資料還在，但沒有對應
+/// 金鑰的那些會乾脆回 404，不會嘗試用錯的金鑰硬解。
 /// Range 請求只解密涵蓋所需區間的那幾個 chunk，一次只在記憶體放一個 chunk，
 /// 不管請求範圍多大都不會整份解密進記憶體。
 ///
 /// 「是不是密文」既然只看資料本身，那個表頭就是外部可控的輸入（加密關閉期間，任何人都
-/// 可以在群組裡傳一個開頭剛好是 MSE1 的檔案），所以表頭裡的數字在使用前一定要驗證，
+/// 可以在群組裡傳一個開頭剛好是 MSE1／MSE2 的檔案），所以表頭裡的數字在使用前一定要驗證，
 /// 見 StreamAsync 裡的說明。
 /// </summary>
 public class ContentStreamService(MessageDbContext dbContext, FieldCipher cipher, ILogger<ContentStreamService> logger)
@@ -120,6 +123,18 @@ public class ContentStreamService(MessageDbContext dbContext, FieldCipher cipher
                         messageContentId, chunkSize, totalLength, storedLength);
                     return ContentStreamResult.NotFound;
                 }
+
+                // MSE2 表頭帶的 key id 跟目前設定的金鑰指紋不符——這顆 blob 是用另一把金鑰加的
+                // （金鑰輪替，或多台主機的 Encryption:Key 沒對齊）。在這裡（回應還沒開始寫）
+                // 判定失敗，比讓 AES-GCM 認證標籤驗證失敗才發現快，也才有機會乾淨地回 404——
+                // 真的走到 DecryptChunk 才失敗的話，串流可能已經開始寫進 response，來不及改狀態碼
+                if (!cipher.MatchesKeyId(ChunkedBlobCipher.ReadKeyId(header)))
+                {
+                    logger.LogWarning(
+                        "Message content {MessageContentId} was encrypted with a different key (key id mismatch); treating as unavailable",
+                        messageContentId);
+                    return ContentStreamResult.NotFound;
+                }
             }
             else
             {
@@ -142,7 +157,15 @@ public class ContentStreamService(MessageDbContext dbContext, FieldCipher cipher
             // 連 revalidate 都不做。把 CompletedAt 一起折進去（已在上面同一次投影撈回來，零額外查詢），
             // 順帶也讓還原備份、換資料庫這類情境不會撞快取。
             var etag = $"\"mc-{messageContentId}-{meta.CompletedAt?.UtcTicks ?? 0:x}\"";
-            response.Headers.CacheControl = "private, max-age=31536000, immutable";
+            // 看這顆 blob「實際上是不是密文」（isEncrypted，跟上面判斷要不要解密同一個依據），
+            // 不是看 Encryption:Enabled 現在開著沒開——體檢輪抓到的間隙：先前寫的是
+            // cipher.Enabled，會導致啟用加密前就存在、從未加密過的舊 blob，在管理者事後打開
+            // 加密設定後，明明本身仍是明文，也被連坐套上 no-store，白白讓瀏覽器不再快取這些
+            // 本來就不涉及個資合規顧慮的舊內容。加密的動機通常是個資合規，把解密後的內容長期
+            // 存在每台值班電腦的瀏覽器快取磁碟上，是稽核會問的一條，但這個顧慮只適用於「這顆
+            // blob 真的是加密寫入的」那些。ETag／304 仍照常運作（那是記憶體內的協商快取，
+            // 不涉及磁碟落地），只是加密的那些不再允許瀏覽器跨工作階段保留內容本身
+            response.Headers.CacheControl = isEncrypted ? "no-store" : "private, max-age=31536000, immutable";
             response.Headers.ETag = etag;
 
             if (MatchesIfNoneMatch(ifNoneMatch, etag))

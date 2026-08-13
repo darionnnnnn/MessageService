@@ -41,6 +41,11 @@ public class WebAppFactoryFixture : IDisposable
             builder.UseSetting("Deployment:Mode", "Db");
             builder.UseSetting("Ingest:ApiKey", "webappfactoryfixture-unused-key");
             builder.UseSetting("Line:OutboundHere", "false");
+            // HeartbeatService 啟動就立刻寫一筆 HostHeartbeats（見 HeartbeatOptions.Enabled
+            // 說明），會跟測試自己準備的心跳資料互相污染；其他背景服務都能靠既有能力開關
+            // （OutboundHere／ReceivesWebhook）在這個 fixture 的設定下自然關閉，心跳沒有
+            // 現成開關可借，所以額外關掉
+            builder.UseSetting("Heartbeat:Enabled", "false");
             for (var i = 0; i < ips.Count; i++)
             {
                 builder.UseSetting($"Viewer:AllowedClientIps:{i}", ips[i]);

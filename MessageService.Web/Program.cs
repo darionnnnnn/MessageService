@@ -6,6 +6,7 @@ using MessageService.Outbox;
 using MessageService.Services;
 using MessageService.Web.Middleware;
 using MessageService.Web.Services;
+using System.Net;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
@@ -50,6 +51,8 @@ var lineOptionsRaw = builder.Configuration.GetSection(LineOptions.SectionName).G
 var viewerOptionsRaw = builder.Configuration.GetSection(ViewerOptions.SectionName).Get<ViewerOptions>()
     ?? new ViewerOptions();
 var capabilities = DeploymentCapabilities.Derive(deploymentMode, lineOptionsRaw, viewerOptionsRaw, ingestOptionsRaw);
+// HeartbeatService 需要在建構子直接拿到能力推導結果，不必每次都自己重新 Derive 一次
+builder.Services.AddSingleton(capabilities);
 
 // Add services to the container.
 
@@ -79,6 +82,7 @@ builder.Services.Configure<ViewerOptions>(builder.Configuration.GetSection(Viewe
 builder.Services.Configure<IngestOptions>(builder.Configuration.GetSection(IngestOptions.SectionName));
 builder.Services.Configure<OutboxOptions>(builder.Configuration.GetSection(OutboxOptions.SectionName));
 builder.Services.Configure<EncryptionOptions>(builder.Configuration.GetSection(EncryptionOptions.SectionName));
+builder.Services.Configure<HeartbeatOptions>(builder.Configuration.GetSection(HeartbeatOptions.SectionName));
 // 單例：金鑰是固定設定值，跟請求無關；MessageDbContext 的建構子也靠 DI 注入同一份實例，
 // 見 MessageDbContextModelCacheKeyFactory 對「模型依 cipher 狀態分開快取」的說明。合併前
 // 收錄端與檢視端各自持有一份，現在單一行程只有一份，跨行程金鑰不一致的風險本身也隨之消失
@@ -165,6 +169,26 @@ else
     });
 }
 
+// 需求4：Web 端要能看到另外幾台服務是否正常運作——有資料庫就直接寫 HostHeartbeats，
+// 沒有資料庫（Edge）就打上面已經註冊好的 "ingest" 具名 HttpClient 代寫，見
+// HeartbeatService／IHeartbeatReporter 的兩種實作說明。IHeartbeatStore 額外只在有資料庫時
+// 註冊——IngestController 的 heartbeat 端點（只存在於 AllInOne／Core）跟 DbHeartbeatReporter
+// 共用同一份 upsert 邏輯。
+if (capabilities.HasDatabaseAccess)
+{
+    builder.Services.AddScoped<IHeartbeatStore, DbHeartbeatStore>();
+    builder.Services.AddScoped<IHeartbeatReporter, DbHeartbeatReporter>();
+}
+else
+{
+    builder.Services.AddScoped<IHeartbeatReporter, HttpHeartbeatReporter>();
+}
+// 測試主機（WebAppFactoryFixture）會把這個關掉，見 HeartbeatOptions.Enabled 說明
+if (builder.Configuration.GetValue("Heartbeat:Enabled", true))
+{
+    builder.Services.AddHostedService<HeartbeatService>();
+}
+
 // 媒體下載／頭貼刷新的入列佇列：這台主機要不要真的做這兩件事只看 OutboundHere，
 // 跟模式或資料庫存取權無關（Core 端也可能 OutboundHere=true）。沒有消費者時换成 Null 實作，
 // 不然 ContentDownloadQueue 的 Channel.CreateUnbounded 會在沒人消費的情況下無上限累積
@@ -238,7 +262,10 @@ using (var validationScope = app.Services.CreateScope())
     var lineOptions = validationScope.ServiceProvider.GetRequiredService<IOptions<LineOptions>>().Value;
     var viewerOptions = validationScope.ServiceProvider.GetRequiredService<IOptions<ViewerOptions>>().Value;
     var ingestOptions = validationScope.ServiceProvider.GetRequiredService<IOptions<IngestOptions>>().Value;
-    DeploymentValidator.Validate(deploymentOptions, lineOptions, viewerOptions, ingestOptions, validationLogger);
+    var hasSqlServerConnectionString = !string.IsNullOrWhiteSpace(builder.Configuration.GetConnectionString("SqlServer"));
+    DeploymentValidator.Validate(
+        deploymentOptions, lineOptions, viewerOptions, ingestOptions, validationLogger,
+        databaseProvider, hasSqlServerConnectionString);
 
     // FieldCipher 是單例，第一次被解析時才會驗證 Encryption:Key（Enabled=true 但金鑰缺漏／
     // 格式錯誤會在建構子裡丟例外）——這裡強制在啟動當下就解析一次，壞設定要讓服務直接
@@ -257,30 +284,58 @@ if (capabilities.HasDatabaseAccess && builder.Configuration.GetValue("Database:A
     // baseline 紀錄，或 Migrate() 一邊建 __EFMigrationsHistory 表、一邊也在建，其中一邊會直接
     // 炸掉。具名 mutex 讓它們排隊而不是打架——Baseliner 必須也包在裡面（它的偵測→補齊不是
     // 原子操作，正是最需要排隊的那段）。單一實例的情況下這裡幾乎瞬間就能拿到鎖，沒有實際延遲。
-    using var migrationMutex = new Mutex(initiallyOwned: false, @"Global\MessageService.Migrate");
+    //
+    // Global\ 命名空間的核心物件預設 DACL 只授權建立者——同一台機器上兩個不同應用程式集區
+    // 身分（例如 Core／Viewer 各自一個站台）的行程，第二個啟動的那個連 new Mutex(...) 都會被
+    // UnauthorizedAccessException 拒絕。這種情況下拿不到跨行程鎖不該擋住啟動：單站台部署
+    // 根本沒有競爭對手，多站台情境退化成不加鎖執行，Baseliner 的偵測與 Migrate() 本身的冪等性
+    // 仍能自然收斂，只是失去排隊保護（風險見下面的警告訊息）。
+    Mutex? migrationMutex = null;
     try
     {
-        migrationMutex.WaitOne();
+        migrationMutex = new Mutex(initiallyOwned: false, @"Global\MessageService.Migrate");
+        try
+        {
+            migrationMutex.WaitOne();
+        }
+        catch (AbandonedMutexException)
+        {
+            // 前一個持鎖行程沒釋放就死掉（IIS 回收逾時強殺、當機）——這個例外拋出時鎖其實
+            // 「已經取得」，照常往下走即可；對方沒做完的部分由 Baseliner 的偵測與 Migrate()
+            // 的冪等性自然補齊
+        }
     }
-    catch (AbandonedMutexException)
+    catch (UnauthorizedAccessException ex)
     {
-        // 前一個持鎖行程沒釋放就死掉（IIS 回收逾時強殺、當機）——這個例外拋出時鎖其實
-        // 「已經取得」，照常往下走即可；對方沒做完的部分由 Baseliner 的偵測與 Migrate()
-        // 的冪等性自然補齊
+        migrationLogger.LogWarning(ex,
+            "無法取得跨行程 migration 鎖（Global\\MessageService.Migrate，通常是同機另一個應用程式" +
+            "集區身分已建立過這個具名物件）——改為不加鎖執行 migration。單站台部署不受影響；" +
+            "同機多站台情境請確認集區身分一致，或錯開兩者的啟動時間降低競爭視窗。");
+        migrationMutex = null;
     }
+
     try
     {
         if (databaseProvider == "Sqlite")
         {
             var messageDbConnectionString = builder.Configuration.GetConnectionString("Sqlite") ?? "Data Source=messages.db";
             LegacySqliteBaseliner.EnsureBaseline(messageDbConnectionString, migrationLogger);
-        }
 
-        dbContext.Database.Migrate();
+            dbContext.Database.Migrate();
+
+            // Core+Viewer 同機兩站台、或 IIS 重疊回收過渡期都可能有兩個行程同時開 messages.db——
+            // 跟 outbox.db 同一個理由（見 EnableWalMode 說明），持久屬性設一次即可
+            OutboxSchemaUpgrader.EnableWalMode(messageDbConnectionString);
+        }
+        else
+        {
+            dbContext.Database.Migrate();
+        }
     }
     finally
     {
-        migrationMutex.ReleaseMutex();
+        migrationMutex?.ReleaseMutex();
+        migrationMutex?.Dispose();
     }
 }
 
@@ -294,6 +349,10 @@ if (capabilities.ReceivesWebhook)
     // DeadLetteredAt 欄位要在這裡另外處理，見 OutboxSchemaUpgrader 的說明
     var outboxConnectionString = builder.Configuration.GetConnectionString("Outbox") ?? "Data Source=outbox.db";
     OutboxSchemaUpgrader.EnsureDeadLetterColumn(outboxConnectionString);
+
+    // 既有 outbox.db 可能已經因為 LINE redelivery 累積了重複 WebhookEventId（P0）——
+    // 必須先去重才能補建唯一索引，見 EnsureWebhookEventIdUniqueIndex 說明
+    OutboxSchemaUpgrader.EnsureWebhookEventIdUniqueIndex(outboxConnectionString);
 
     // webhook 執行緒寫、forwarder 執行緒讀刪；rollback journal 模式下兩邊會互相 block
     // （busy_timeout 預設 30 秒，遠超 LINE 的 webhook 逾時），WAL 讓讀寫不互相阻塞
@@ -328,13 +387,54 @@ if (builder.Configuration.GetValue<bool>("Http:UseHttpsRedirection"))
     app.UseHttpsRedirection();
 }
 
-// 部署在反向代理後面時才需要開啟，讓下面的白名單中介層看到的是真實來源 IP 而非代理 IP
+// 部署在反向代理後面時才需要開啟，讓下面的白名單中介層看到的是真實來源 IP 而非代理 IP。
+// ASP.NET Core 的 ForwardedHeadersOptions 預設只信任 loopback 送來的轉發標頭——單開這個
+// 開關不設 KnownProxies／KnownNetworks 等於沒開（中介層看到的仍是代理 IP，白名單全擋），
+// 這正是之前留給「有真實需求再做」的坑，見 docs/POST-CONSOLIDATION-REVIEW-PLAN.md 批次B
 if (builder.Configuration.GetValue<bool>("UseForwardedHeaders"))
 {
-    app.UseForwardedHeaders(new ForwardedHeadersOptions
+    var forwardedHeadersOptions = new ForwardedHeadersOptions
     {
         ForwardedHeaders = ForwardedHeaders.XForwardedFor
-    });
+    };
+
+    var knownProxies = builder.Configuration.GetSection("ForwardedHeaders:KnownProxies").Get<string[]>() ?? [];
+    foreach (var entry in knownProxies)
+    {
+        if (!IPAddress.TryParse(entry, out var address))
+        {
+            throw new InvalidOperationException(
+                $"ForwardedHeaders:KnownProxies 有一個位址解析失敗：\"{entry}\"。請確認是合法的 IP 位址" +
+                "（單一位址，不接受 CIDR——網段請填到 ForwardedHeaders:KnownNetworks）。");
+        }
+        forwardedHeadersOptions.KnownProxies.Add(address);
+    }
+
+    var knownNetworks = builder.Configuration.GetSection("ForwardedHeaders:KnownNetworks").Get<string[]>() ?? [];
+    foreach (var entry in knownNetworks)
+    {
+        // System.Net.IPNetwork（KnownIPNetworks 用的型別）不是 ForwardedHeadersOptions.KnownNetworks
+        // 舊版用的 Microsoft.AspNetCore.HttpOverrides.IPNetwork——後者已標記 Obsolete，改用新版
+        if (!System.Net.IPNetwork.TryParse(entry, out var network))
+        {
+            // IPNetwork 要求主機位元全為 0（嚴格 CIDR），跟 IpAllowlistMiddleware 對白名單的
+            // 解析原則一致——這是安全設定，寧可啟動失敗也不要一條規則悄悄失效
+            throw new InvalidOperationException(
+                $"ForwardedHeaders:KnownNetworks 有一條 CIDR 網段解析失敗：\"{entry}\"。IPNetwork 要求主機位元" +
+                "全為 0，例如 \"10.1.0.5/24\" 請改成 \"10.1.0.0/24\"（若只要允許單一位址則改成 \"10.1.0.5/32\"）。");
+        }
+        forwardedHeadersOptions.KnownIPNetworks.Add(network);
+    }
+
+    if (forwardedHeadersOptions.KnownProxies.Count == 0 && forwardedHeadersOptions.KnownIPNetworks.Count == 0)
+    {
+        app.Logger.LogWarning(
+            "UseForwardedHeaders 已開啟，但 ForwardedHeaders:KnownProxies／KnownNetworks 都是空的——" +
+            "ASP.NET Core 預設只信任 loopback，上游代理送來的 X-Forwarded-For 會被忽略，此開關目前等於沒開。" +
+            "請設定其中一項為實際反向代理的位址或網段。");
+    }
+
+    app.UseForwardedHeaders(forwardedHeadersOptions);
 }
 
 // 檢視端 IP 白名單（沒有登入機制時的最低防護）：只包住非 webhook／非 ingest 的路徑——

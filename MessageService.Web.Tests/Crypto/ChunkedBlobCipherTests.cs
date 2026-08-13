@@ -31,6 +31,50 @@ public class ChunkedBlobCipherTests
         Assert.Equal(ChunkedBlobCipher.ChunkSize, ChunkedBlobCipher.ReadChunkSize(header));
     }
 
+    // === MSE2：表頭挪一個 byte 塞 key id，見 docs/POST-CONSOLIDATION-REVIEW-PLAN.md 批次E ===
+
+    [Fact]
+    public void BuildHeaderV1_ReadKeyId_ReturnsNull()
+    {
+        // 舊格式沒有 key id 欄位——呼叫端據此判斷「這筆資料寫入時還沒有 key id 概念，
+        // 不需要比對指紋」，見 ContentStreamService 的說明
+        var header = ChunkedBlobCipher.BuildHeader(123);
+
+        Assert.Null(ChunkedBlobCipher.ReadKeyId(header));
+    }
+
+    [Fact]
+    public void BuildHeaderV2_IsEncryptedHeader_ReadPlaintextLengthAndChunkSize_RoundTrip()
+    {
+        var header = ChunkedBlobCipher.BuildHeader(123456789, keyId: 0xAB);
+
+        Assert.True(ChunkedBlobCipher.IsEncryptedHeader(header));
+        Assert.Equal(123456789, ChunkedBlobCipher.ReadPlaintextLength(header));
+        // key id 借用的是 chunkSize 欄位的最高 byte——讀出來的 chunkSize 必須完全不受影響，
+        // 否則 ContentStreamService 拿它算 chunk 邊界會整個算錯
+        Assert.Equal(ChunkedBlobCipher.ChunkSize, ChunkedBlobCipher.ReadChunkSize(header));
+    }
+
+    [Theory]
+    [InlineData((byte)0x00)]
+    [InlineData((byte)0xAB)]
+    [InlineData((byte)0xFF)]
+    public void BuildHeaderV2_ReadKeyId_RoundTrips(byte keyId)
+    {
+        var header = ChunkedBlobCipher.BuildHeader(1, keyId);
+
+        Assert.Equal(keyId, ChunkedBlobCipher.ReadKeyId(header));
+    }
+
+    [Fact]
+    public void BuildHeaderV1AndV2_ProduceSameLength_HeaderSizeUnchanged()
+    {
+        // 表頭大小不變是這個設計的重點——所有既有的 Range 位移數學（ChunkByteRangeOnDisk／
+        // ComputeEncryptedLength）完全不需要因為新增 key id 而改寫
+        Assert.Equal(ChunkedBlobCipher.BuildHeader(999).Length, ChunkedBlobCipher.BuildHeader(999, 0x01).Length);
+        Assert.Equal(ChunkedBlobCipher.HeaderSize, ChunkedBlobCipher.BuildHeader(999, 0x01).Length);
+    }
+
     [Fact]
     public void IsEncryptedHeader_RandomBytes_ReturnsFalse()
     {

@@ -6,7 +6,9 @@ public class OutboxEntry
 {
     public long Id { get; set; }
 
-    /// <summary>只供 log 辨識用，不是去重鍵——真正的去重靠 IIngestSink 落地那端的資料庫唯一索引。</summary>
+    /// <summary>供 log 辨識用，也是這張表本身的去重鍵（唯一索引，見 OutboxDbContext）——
+    /// LINE redelivery 送同一事件兩次時，outbox 只留一列；落地那端另有自己的資料庫唯一索引，
+    /// 兩層去重互不依賴。</summary>
     public required string WebhookEventId { get; set; }
 
     /// <summary>序列化的 IngestEnvelope（System.Text.Json）。</summary>

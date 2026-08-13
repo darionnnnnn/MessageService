@@ -19,10 +19,10 @@ public class EncryptedContentStreamTests : IDisposable
 
     public void Dispose() => _fixture.Dispose();
 
-    private static byte[] BuildEncryptedBlob(byte[] plaintext)
+    private static byte[] BuildEncryptedBlob(byte[] plaintext, byte? keyId = null)
     {
         using var onDisk = new MemoryStream();
-        onDisk.Write(ChunkedBlobCipher.BuildHeader(plaintext.Length));
+        onDisk.Write(keyId is { } id ? ChunkedBlobCipher.BuildHeader(plaintext.Length, id) : ChunkedBlobCipher.BuildHeader(plaintext.Length));
 
         var (_, lastChunkIndex) = plaintext.Length == 0
             ? (0L, -1L)
@@ -38,6 +38,11 @@ public class EncryptedContentStreamTests : IDisposable
 
         return onDisk.ToArray();
     }
+
+    // Key 陣列是 0,1,2,...,31——跟 FieldCipher.ComputeKeyId 同一份 SHA-256(前4 bytes) 邏輯
+    // 手動算一次，取第一個 byte 當表頭要塞的 MSE2 key id
+    private static readonly byte CorrectKeyId =
+        System.Security.Cryptography.SHA256.HashData(Key)[0];
 
     private async Task<long> SeedEncryptedContentAsync(byte[] plaintext, string contentType = "video/mp4", string? fileName = null)
     {
@@ -161,7 +166,7 @@ public class EncryptedContentStreamTests : IDisposable
     }
 
     [Fact]
-    public async Task GetContent_EncryptedBlob_SetsCorrectEtagAndCacheControl()
+    public async Task GetContent_EncryptedBlob_SetsCorrectEtagAndNoStoreCacheControl()
     {
         var contentId = await SeedEncryptedContentAsync([1, 2, 3]);
 
@@ -169,7 +174,11 @@ public class EncryptedContentStreamTests : IDisposable
 
         // ETag 格式是 "mc-{id}-{CompletedAt ticks}"，見 ContentStreamTests 對 Id 重用的說明
         Assert.StartsWith($"\"mc-{contentId}-", response.Headers.ETag?.Tag);
-        Assert.True(response.Headers.CacheControl?.Private);
+        // 加密啟用時不進瀏覽器磁碟快取——跟未加密時的 immutable+一年 max-age（見
+        // ContentStreamTests.GetContent_SetsImmutableCacheControlAndETag）刻意不同，
+        // 見 ContentStreamService 對 no-store 的說明
+        Assert.True(response.Headers.CacheControl?.NoStore);
+        Assert.False(response.Headers.CacheControl?.Private ?? false);
     }
 
     [Fact]
@@ -202,5 +211,77 @@ public class EncryptedContentStreamTests : IDisposable
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.Equal(plaintext, await response.Content.ReadAsByteArrayAsync());
+        // 體檢輪揪出的真 bug：Cache-Control 曾經看的是 Encryption:Enabled（目前設定），不是這顆
+        // blob 本身是不是密文——這台 fixture 的加密是開著的，但這顆內容從沒被加密過，理當拿到
+        // 跟未加密部署完全一樣的長效快取，不該因為「管理者後來打開了加密」就連坐失去快取
+        Assert.False(response.Headers.CacheControl?.NoStore);
+        Assert.True(response.Headers.CacheControl?.Private);
+        Assert.Equal(TimeSpan.FromDays(365), response.Headers.CacheControl?.MaxAge);
+    }
+
+    // === MSE2 key id：見 docs/POST-CONSOLIDATION-REVIEW-PLAN.md 批次E ===
+
+    [Fact]
+    public async Task GetContent_Mse2BlobWithMatchingKeyId_DecryptsCorrectly()
+    {
+        var plaintext = new byte[] { 1, 2, 3, 4, 5 };
+        long contentId = 0;
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            var groupMessage = new GroupMessage
+            {
+                WebhookEventId = "e1", LineMessageId = "m1", GroupId = "G1", MessageType = "video",
+                EventTimestamp = DateTimeOffset.UtcNow, ReceivedAt = DateTimeOffset.UtcNow,
+                Content = new MessageContent
+                {
+                    DownloadStatus = DownloadStatus.Completed,
+                    Content = BuildEncryptedBlob(plaintext, CorrectKeyId),
+                    ContentType = "video/mp4",
+                    CompletedAt = DateTimeOffset.UtcNow
+                }
+            };
+            dbContext.GroupMessages.Add(groupMessage);
+            await dbContext.SaveChangesAsync();
+            contentId = groupMessage.Content.Id;
+        });
+
+        var response = await _fixture.Client.GetAsync($"/api/messages/{contentId}/content");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(plaintext, await response.Content.ReadAsByteArrayAsync());
+    }
+
+    [Fact]
+    public async Task GetContent_Mse2BlobWithMismatchedKeyId_Returns404_NotAttemptDecryptWithWrongKey()
+    {
+        // 模擬金鑰輪替後，這台主機設定的金鑰指紋跟這顆 blob 表頭記的不一樣——見
+        // FieldCipher.MatchesKeyId／ContentStreamService 的說明：直接判定內容不可用，
+        // 不會硬著用現在的金鑰去解（那樣要嘛 AES-GCM 認證標籤失敗炸例外，要嘛萬一 1 byte
+        // key id 剛好撞到才更危險——都不該讓它發生）
+        var plaintext = new byte[] { 1, 2, 3, 4, 5 };
+        var wrongKeyId = (byte)(CorrectKeyId + 1);
+        long contentId = 0;
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            var groupMessage = new GroupMessage
+            {
+                WebhookEventId = "e1", LineMessageId = "m1", GroupId = "G1", MessageType = "video",
+                EventTimestamp = DateTimeOffset.UtcNow, ReceivedAt = DateTimeOffset.UtcNow,
+                Content = new MessageContent
+                {
+                    DownloadStatus = DownloadStatus.Completed,
+                    Content = BuildEncryptedBlob(plaintext, wrongKeyId),
+                    ContentType = "video/mp4",
+                    CompletedAt = DateTimeOffset.UtcNow
+                }
+            };
+            dbContext.GroupMessages.Add(groupMessage);
+            await dbContext.SaveChangesAsync();
+            contentId = groupMessage.Content.Id;
+        });
+
+        var response = await _fixture.Client.GetAsync($"/api/messages/{contentId}/content");
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
 }

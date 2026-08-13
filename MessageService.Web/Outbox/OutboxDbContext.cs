@@ -20,6 +20,10 @@ public class OutboxDbContext(DbContextOptions<OutboxDbContext> options) : DbCont
             entity.Property(e => e.NextAttemptAt).HasConversion(new DateTimeOffsetToBinaryConverter());
             entity.Property(e => e.DeadLetteredAt).HasConversion(new DateTimeOffsetToBinaryConverter());
             entity.HasIndex(e => e.NextAttemptAt);
+            // LINE redelivery 送同一個 WebhookEventId 兩次是預期行為，靠 SqliteOutboxWriter 撞鍵
+            // 判定「已在佇列中」擋掉重複列——只對全新檔案生效，既有 outbox.db 由
+            // OutboxSchemaUpgrader.EnsureWebhookEventIdUniqueIndex 補建
+            entity.HasIndex(e => e.WebhookEventId).IsUnique();
         });
     }
 }

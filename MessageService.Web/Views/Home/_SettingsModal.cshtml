@@ -19,6 +19,9 @@
                         <li class="nav-item" role="presentation">
                             <button class="nav-link" id="tab-keywords-btn" data-bs-toggle="tab" data-bs-target="#tab-keywords" type="button" role="tab" aria-controls="tab-keywords" aria-selected="false">關鍵字遮蔽</button>
                         </li>
+                        <li class="nav-item" role="presentation">
+                            <button class="nav-link" id="tab-hosts-btn" data-bs-toggle="tab" data-bs-target="#tab-hosts" type="button" role="tab" aria-controls="tab-hosts" aria-selected="false">主機狀態</button>
+                        </li>
                     </ul>
 
                     <div class="tab-content settings-tab-content">
@@ -171,6 +174,35 @@
                                         <button type="submit" class="btn btn-primary btn-sm">新增規則</button>
                                     </div>
                                 </form>
+                            </section>
+                        </div>
+
+                        <div class="tab-pane fade" id="tab-hosts" role="tabpanel" aria-labelledby="tab-hosts-btn">
+                            <section class="settings-card">
+                                <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
+                                    <h6 class="settings-card-title mb-0">各主機存活狀態</h6>
+                                    <button type="button" class="btn btn-outline-secondary btn-sm" id="host-heartbeats-refresh-btn">重新整理</button>
+                                </div>
+                                <p class="form-text">每台部署主機（AllInOne／Edge／Core／Viewer）定期回報一次存活狀態；「離線」只代表多久沒收到回報，不代表資料遺失。</p>
+
+                                <div id="host-heartbeats-fingerprint-warning" class="alert alert-warning d-none" role="alert"></div>
+
+                                <div class="table-responsive">
+                                    <table class="table table-sm align-middle">
+                                        <thead>
+                                            <tr>
+                                                <th>角色</th>
+                                                <th>主機名稱</th>
+                                                <th>狀態</th>
+                                                <th>最後回報</th>
+                                                <th>Outbox 積壓</th>
+                                                <th>加密金鑰指紋</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="host-heartbeats-tbody"></tbody>
+                                    </table>
+                                </div>
+                                <p id="host-heartbeats-empty" class="form-text d-none">目前還沒有任何主機回報過心跳。</p>
                             </section>
                         </div>
                     </div>

@@ -53,6 +53,7 @@ public class LegacySqliteBaselinerTests : IDisposable
         using var drop = connection.CreateCommand();
         drop.CommandText = """
             DROP TABLE AnonymousIdentities;
+            DROP TABLE HostHeartbeats;
             ALTER TABLE GroupMessages DROP COLUMN StickerId;
             ALTER TABLE GroupMessages DROP COLUMN PackageId;
             ALTER TABLE MessageContents DROP COLUMN FailedAttempts;
@@ -66,6 +67,7 @@ public class LegacySqliteBaselinerTests : IDisposable
             ALTER TABLE Groups DROP COLUMN LastMessageAt;
             DROP INDEX IF EXISTS IX_GroupMessages_GroupId_Id;
             DROP INDEX IF EXISTS IX_GroupMessages_GroupId_EventTimestamp;
+            DROP INDEX IF EXISTS IX_MessageContents_DownloadStatus;
             """;
         drop.ExecuteNonQuery();
     }

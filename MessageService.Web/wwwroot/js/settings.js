@@ -397,6 +397,123 @@
         });
     }
 
+    // === 主機狀態（需求4：Web 端要能看到另外幾台服務是否正常運作，見
+    //     docs/POST-CONSOLIDATION-REVIEW-PLAN.md 批次D。狀態燈由伺服器端算好，見
+    //     SettingsController.ComputeStatus——這裡只負責照燈號挑對應的樣式與文字）===
+
+    const HOST_STATUS_BADGE = {
+        Online: { className: 'text-bg-success', label: '正常' },
+        Delayed: { className: 'text-bg-warning', label: '遲滯' },
+        Offline: { className: 'text-bg-secondary', label: '離線' }
+    };
+
+    function formatRelativeTime(iso) {
+        const seconds = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000));
+        if (seconds < 60) {
+            return `${seconds} 秒前`;
+        }
+        const minutes = Math.round(seconds / 60);
+        if (minutes < 60) {
+            return `${minutes} 分鐘前`;
+        }
+        const hours = Math.round(minutes / 60);
+        if (hours < 24) {
+            return `${hours} 小時前`;
+        }
+        return `${Math.round(hours / 24)} 天前`;
+    }
+
+    function renderHostStatusBadge(status) {
+        const badge = document.createElement('span');
+        const meta = HOST_STATUS_BADGE[status] || HOST_STATUS_BADGE.Offline;
+        badge.className = `badge ${meta.className}`;
+        badge.textContent = meta.label;
+        return badge;
+    }
+
+    function renderHostOutboxCell(pending, oldestAgeSeconds) {
+        // null＝這台主機不收 webhook（Core／Viewer），沒有 outbox 可言，不是「查不到資料」
+        if (pending === null || pending === undefined) {
+            return document.createTextNode('—');
+        }
+        if (pending === 0) {
+            return document.createTextNode('0');
+        }
+        const minutes = oldestAgeSeconds != null ? Math.round(oldestAgeSeconds / 60) : null;
+        return document.createTextNode(
+            minutes !== null ? `${pending} 筆（最舊 ${minutes} 分鐘）` : `${pending} 筆`);
+    }
+
+    function renderHostHeartbeatRow(row, fingerprintMismatch) {
+        const tr = document.createElement('tr');
+
+        const roleTd = document.createElement('td');
+        roleTd.textContent = row.role;
+        tr.appendChild(roleTd);
+
+        const machineTd = document.createElement('td');
+        machineTd.textContent = row.machineName;
+        tr.appendChild(machineTd);
+
+        const statusTd = document.createElement('td');
+        statusTd.appendChild(renderHostStatusBadge(row.status));
+        tr.appendChild(statusTd);
+
+        const lastSeenTd = document.createElement('td');
+        lastSeenTd.textContent = formatRelativeTime(row.lastSeenAt);
+        lastSeenTd.title = new Date(row.lastSeenAt).toLocaleString('zh-TW');
+        tr.appendChild(lastSeenTd);
+
+        const outboxTd = document.createElement('td');
+        outboxTd.appendChild(renderHostOutboxCell(row.outboxPending, row.outboxOldestAgeSeconds));
+        tr.appendChild(outboxTd);
+
+        const fingerprintTd = document.createElement('td');
+        if (row.encryptionKeyFingerprint) {
+            const code = document.createElement('code');
+            code.textContent = row.encryptionKeyFingerprint;
+            if (fingerprintMismatch) {
+                code.className = 'badge text-bg-danger';
+            }
+            fingerprintTd.appendChild(code);
+        } else {
+            fingerprintTd.textContent = '—';
+        }
+        tr.appendChild(fingerprintTd);
+
+        return tr;
+    }
+
+    async function loadHostHeartbeats() {
+        const rows = await fetchJson('/api/settings/host-heartbeats');
+
+        els.hostHeartbeatsEmpty.classList.toggle('d-none', rows.length > 0);
+
+        // 各主機的 Encryption:Key 沒對齊時，加密內容在那台主機上會顯示成 ENC1: 亂碼、媒體
+        // 一律回 404——與其等使用者自己發現，不如在指紋不一致時直接在畫面上標出來
+        const distinctFingerprints = new Set(rows.map(r => r.encryptionKeyFingerprint).filter(Boolean));
+        const mismatch = distinctFingerprints.size > 1;
+        els.hostHeartbeatsFingerprintWarning.classList.toggle('d-none', !mismatch);
+        if (mismatch) {
+            els.hostHeartbeatsFingerprintWarning.textContent =
+                '偵測到不同主機的加密金鑰指紋不一致——請確認每一台直連資料庫的主機（AllInOne／Core／Viewer）' +
+                'Encryption:Key 設定完全相同，否則加密內容會顯示成亂碼、媒體會一律 404。';
+        }
+
+        els.hostHeartbeatsTbody.innerHTML = '';
+        for (const row of rows) {
+            els.hostHeartbeatsTbody.appendChild(renderHostHeartbeatRow(row, mismatch));
+        }
+    }
+
+    async function handleHostHeartbeatsRefresh() {
+        try {
+            await loadHostHeartbeats();
+        } catch {
+            showToast('讀取主機狀態失敗', true);
+        }
+    }
+
     // === 初始化 ===
     // 設定現在是聊天頁裡的 modal，不再是獨立頁面：元素綁定跟不需要資料的監聽器在頁面
     // 載入時就做完，實際打 API 撈資料延後到第一次打開 modal 才做（shown.bs.modal），
@@ -424,6 +541,10 @@
         els.piiNhiToggle = $('pii-nhi-toggle');
         els.retentionDaysInput = $('retention-days-input');
         els.retentionSaveBtn = $('retention-save-btn');
+        els.hostHeartbeatsTbody = $('host-heartbeats-tbody');
+        els.hostHeartbeatsEmpty = $('host-heartbeats-empty');
+        els.hostHeartbeatsFingerprintWarning = $('host-heartbeats-fingerprint-warning');
+        els.hostHeartbeatsRefreshBtn = $('host-heartbeats-refresh-btn');
         els.settingsModal = $('settings-modal');
         els.settingsModalBody = $('settings-modal-body');
     }
@@ -446,6 +567,7 @@
             toggle.addEventListener('change', handlePiiMaskingChange);
         }
         els.retentionSaveBtn.addEventListener('click', handleRetentionSave);
+        els.hostHeartbeatsRefreshBtn.addEventListener('click', handleHostHeartbeatsRefresh);
 
         // 換分頁時把捲動位置歸零；不然上一個分頁捲很深時，切過去的新分頁會被卡在
         // 同一個捲動位置，內容被卡在畫面外
@@ -491,7 +613,9 @@
             els.aliasGroupFilter.appendChild(opt);
         }
 
-        await Promise.all([loadKeywords(), loadDisplaySettings(), loadPiiMaskingSettings(), loadRetentionSettings()]);
+        await Promise.all([
+            loadKeywords(), loadDisplaySettings(), loadPiiMaskingSettings(), loadRetentionSettings(), loadHostHeartbeats()
+        ]);
     }
 
     function init() {

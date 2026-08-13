@@ -7,7 +7,9 @@ namespace MessageService.Services;
 /// 出問題時往往沒辦法立刻連上去看 log。</summary>
 public static class DeploymentValidator
 {
-    public static void Validate(DeploymentOptions deployment, LineOptions line, ViewerOptions viewer, IngestOptions ingest, ILogger logger)
+    public static void Validate(
+        DeploymentOptions deployment, LineOptions line, ViewerOptions viewer, IngestOptions ingest, ILogger logger,
+        string? databaseProvider = null, bool hasSqlServerConnectionString = false)
     {
         var mode = deployment.Mode;
         var capabilities = DeploymentCapabilities.Derive(mode, line, viewer, ingest);
@@ -72,13 +74,26 @@ public static class DeploymentValidator
                 "所有訊息內容會停在 Pending。如果這不是刻意的，請檢查設定。");
         }
 
-        // Core 模式預設會一併開檢視端（見 DeploymentCapabilities.ViewerEnabled）——空白名單雖然
-        // 是「全拒」而非啟動失敗，但這種組合通常代表部署時漏設，值得提醒
-        if (mode is DeploymentMode.Core && capabilities.ViewerEnabled && viewer.AllowedClientIps.Length == 0)
+        // 檢視端啟用時預設會一併開（見 DeploymentCapabilities.ViewerEnabled）——空白名單雖然是
+        // 「全拒」而非啟動失敗，但這種組合通常代表部署時漏設，值得提醒。不限 Core：AllInOne
+        // 是最常見的拓撲，同樣會「檢視端啟用了卻全拒」而不自知
+        if (capabilities.ViewerEnabled && viewer.AllowedClientIps.Length == 0)
         {
             logger.LogWarning(
-                "Deployment:Mode=Core 且檢視端已啟用，但 Viewer:AllowedClientIps 是空的——檢視端會拒絕所有請求，" +
-                "直到設定允許的來源網段為止。");
+                "Deployment:Mode={Mode} 且檢視端已啟用，但 Viewer:AllowedClientIps 是空的——檢視端會拒絕所有請求，" +
+                "直到設定允許的來源網段為止。", mode);
+        }
+
+        // Provider 鍵決定啟動時實際連的是哪個資料庫（見 Program.cs 的 databaseProvider 判斷）——
+        // 顯式維持 Sqlite 預設、不做「有連線字串就自動切換」的隱式推導（殘留設定不該悄悄換
+        // 資料庫），但這代表打錯 Provider 鍵或忘記改的情況只能靠這條警告攔：已經設定了
+        // SqlServer 連線字串，Provider 卻還是 Sqlite，多半是想切換但忘了改這個鍵
+        if (databaseProvider == "Sqlite" && hasSqlServerConnectionString)
+        {
+            logger.LogWarning(
+                "Database:Provider 是 Sqlite，但 ConnectionStrings:SqlServer 有設定值——這個連線字串不會被使用。" +
+                "如果是想改用 SQL Server，請把 Database:Provider 改成 \"SqlServer\"；如果只是複製設定殘留，" +
+                "可以移除這個連線字串。");
         }
 
         // Viewer 模式不會用到 Line／Ingest 設定——多半是從別台主機複製 appsettings 忘記清掉，

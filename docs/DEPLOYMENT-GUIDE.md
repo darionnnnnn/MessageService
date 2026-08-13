@@ -109,7 +109,33 @@ dotnet ef database update --project MessageService.Data --context SqlServerMessa
 > `SqlServerMessageDbContext`）各自跑一次 `dotnet ef migrations add`——這是給熟悉 EF 的維護者
 > 看的，一般部署不需要碰這個。若不想在正式主機上安裝 SDK 執行 `dotnet ef`，可以把
 > `Database:AutoMigrate` 留預設值 `true`，讓應用程式啟動時自己跑 migrations（SQLite／SQL Server
-> 都適用；多實例同時啟動時有具名 mutex 防止互撞）。
+> 都適用；多實例同時啟動時有具名 mutex 防止互撞，見 D4 的 IIS 常駐設定——同機多站台的
+> 情況下拿不到跨行程鎖會自動降級為不加鎖執行，單站台部署不受影響）。
+
+### 既有 SQL Server 環境升級注意事項
+
+**這一節只適用於「已經在跑正式資料的既有 SQL Server 環境」升級到新版本**——全新部署、
+或還在用 SQLite 的環境不用管這段。
+
+某幾次改版（例如 `SchemaHardeningRound1` 那次）的 migration 對既有欄位做了
+`ALTER COLUMN`（把幾個 `nvarchar(max)` 欄位收斂成有限長度，好建索引）。SQL Server 執行
+`ALTER COLUMN` 時會**整張表重寫**並持 **Sch-M（結構性）鎖**，鎖持有期間這張表完全無法讀寫；
+`MessageContents` 這張表又裝著所有訊息附檔的 blob，是全庫體積最大的一張。既有環境的
+`GroupMessages`／`MessageContents` 若已經累積相當資料量，升級前務必：
+
+1. **先估列數**：`SELECT COUNT(*) FROM GroupMessages; SELECT COUNT(*) FROM MessageContents;`——
+   幾萬列通常幾秒內完成，數百萬列以上就要認真排時段
+2. **安排維護時段**：升級期間服務會整個停擺（webhook 收不到、檢視端打不開），不是背景
+   悄悄進行；時段長度抓「表重寫」的量，用 blob 的 `SUM(DATALENGTH(Content))` 概估比列數
+   準——大量媒體檔案會讓重寫時間遠超單純列數估出來的直覺
+3. **確認交易紀錄檔（transaction log）空間**：`ALTER COLUMN` 整張表重寫是單一大交易，
+   交易紀錄檔空間不夠會直接失敗並回滾（回滾同樣要花跟正向操作差不多的時間），升級前
+   檢查可用空間、必要時先擴充或先做一次紀錄檔備份釋放空間
+4. **先備份**：完整備份（見下方 Part I）加上升級前的還原點，確認備份確實可還原再開始
+5. 跑 `dotnet ef database update`（見上方指令），確認新版 log 沒有錯誤後才恢復對外服務
+
+SQLite 環境不受影響——既有檔案由 `LegacySqliteBaseliner` 一次性橋接到 baseline，
+之後跟全新 SQLite migrations 走同一條路，沒有 `ALTER COLUMN` 鎖表的問題。
 
 ---
 
@@ -219,7 +245,9 @@ Edge 端的 outbox 排空預設會打 Core 的批次 ingest 端點（`POST /api/
 要加密訊息內容與媒體檔案的話，**每一台直連資料庫的主機**（AllInOne／Core／Viewer）都要設定
 `Encryption:Key`，金鑰產生指令、格式、注意事項見 [ENCRYPTION.md](ENCRYPTION.md)，這裡不重複。
 核心規則只有一條：**所有直連資料庫的主機，`Encryption:Key` 必須逐字相同**，不一致的話
-文字會顯示成 `ENC1:` 亂碼、媒體會整個 404（Edge 主機不直連資料庫，不需要設這個值）。
+文字會顯示成 `ENC2:` 亂碼、媒體會整個 404（Edge 主機不直連資料庫，不需要設這個值）。
+可以到設定頁「主機狀態」區塊比對各主機的金鑰指紋，不用等看到亂碼才發現設定沒對齊，
+見 [ENCRYPTION.md](ENCRYPTION.md) 的「金鑰指紋」一節。
 
 ---
 
@@ -237,13 +265,74 @@ Edge 端的 outbox 排空預設會打 Core 的批次 ingest 端點（`POST /api/
 - [ ] （拆機模式）檢查 Edge／Core 兩端的 `Line:OutboundHere` 組合：預設值（Edge=true、
       Core=false）不用動；若把媒體下載搬到 Core（Core 顯式設 true），Edge 必須同步顯式
       設 false，否則兩台會重複下載同一批媒體（Core 端啟動 log 會有一則提醒 Warning）
-- [ ] **應用程式集區常駐設定已套用**（`Set-AppPool.ps1` 跑過）——**隔天早上**檢查 log
-      有沒有出現 `Retention cleanup removed ...`，確認保留期清除真的在半夜跑過，
-      不是行程被 IIS 回收沒排到
+- [ ] **應用程式集區常駐設定已套用**（`Set-AppPool.ps1` 跑過）——打開檢視端設定頁的
+      「主機狀態」區塊，確認這台主機的狀態燈是「正常」且「最後回報」在一分鐘內
+      （心跳服務跟保留期清除、outbox 排空同樣是 `BackgroundService`，行程被 IIS 回收的話
+      心跳會第一個停，不用像過去那樣等到隔天早上翻 log 才發現）
 - [ ] 站台目錄的存取權限只開放應用程式集區帳號與管理者——`appsettings.Production.json`
       含明文機密，不該讓其他人（或其他應用程式集區）讀得到
 - [ ] 重佈演練：解壓一份新的發佈成品到同一個站台目錄，確認
       `appsettings.Production.json` 還在、內容沒被覆蓋、站台仍能正常啟動
+- [ ] （拆機模式）設定頁「主機狀態」區塊看得到 Edge 主機那一列（由 Core 代寫，見
+      `POST /api/ingest/heartbeat`），且 outbox 積壓數是 0 或很快歸零
+- [ ] （多台直連資料庫）設定頁「主機狀態」區塊裡各主機的「加密金鑰指紋」欄位一致
+      （或都是 `—`）——不一致的話代表某台的 `Encryption:Key` 設定跟其他台不同，
+      見 [ENCRYPTION.md](ENCRYPTION.md) 的「金鑰指紋」一節
+
+---
+
+## Part I：備份與還原
+
+### I1. SQL Server
+
+標準 SQL Server 備份即可（完整備份＋日誌備份，依 RPO 需求排程），沒有這個專案特有的
+額外步驟。還原後直接啟動站台，`Database:AutoMigrate`（若開著）會自動確認 schema 版本
+一致；若還原到的備份版本落後於目前部署的程式版本，啟動時會自動補跑缺的 migrations
+（SQLite／SQL Server 都是同一套機制）。
+
+### I2. SQLite
+
+`messages.db`／`outbox.db` 各自是**單一檔案**，但啟用 WAL 模式後（本專案預設開啟，見
+[README.md](../README.md)）實際上是三個檔案一組：`messages.db`、`messages.db-wal`、
+`messages.db-shm`（`outbox.db` 同理）。**只複製主檔案而漏了 `-wal`，還原出來的資料庫會
+遺失最近尚未 checkpoint 的異動**——WAL 模式下最新的寫入可能還停留在 `-wal` 檔案裡，
+沒有合併回主檔案。
+
+安全備份 SQLite 的兩種做法：
+
+1. **停機備份**：停掉站台（或至少確保沒有寫入行為）後，三個檔案（主檔＋`-wal`＋`-shm`，
+   若後兩者存在）一起複製。最簡單可靠，代價是備份當下服務中斷。
+2. **線上備份**（不想停機）：先執行一次 checkpoint 把 `-wal` 的內容合併回主檔案，
+   再單獨複製主檔案即可（此時 `-wal`/`-shm` 即使還在也只是空殼，不複製也沒關係）：
+   ```sql
+   PRAGMA wal_checkpoint(TRUNCATE);
+   ```
+   可以透過 `sqlite3` CLI、或任何能對這個資料庫下 SQL 的工具執行；執行期間會短暫要求
+   獨佔存取，跟正常讀寫爭用的機率很低但非零，避開尖峰時段執行。
+
+還原時把備份出來的檔案放回 `ConnectionStrings` 指定的路徑，啟動站台即可。
+
+### I3. 加密金鑰的備份（僅開啟加密時適用）
+
+`Encryption:Key` **必須跟資料庫備份分開保管，但兩者要能同時取得**——這是這個專案備份
+策略裡最容易被忽略、後果也最嚴重的一點：
+
+- 只備份資料庫、弄丟金鑰＝**所有已加密的訊息與媒體永久無法讀取**，沒有任何復原機制
+  （AES-256-GCM 沒有後門，這是設計目的）
+- 只備份金鑰、弄丟資料庫備份＝金鑰本身沒有意義，但至少沒有訊息被鎖死的風險
+- 兩者放在同一個地方備份（例如金鑰寫在跟資料庫備份同一個檔案伺服器上）＝**等於沒有分開
+  保管的意義**，那個位置一旦外洩，資料庫備份與金鑰一起被拿走，加密形同虛設
+
+建議：金鑰另外存進密碼管理器或密鑰保管服務，不要跟著資料庫備份的例行排程一起處理；
+一次金鑰輪替或人員異動後，記得同步更新保管處的副本。
+
+### I4. 建議的還原演練頻率
+
+備份沒有實際還原驗證過，等同沒有備份。建議至少：
+
+- 新環境上線時做一次「從備份完整還原」的演練，確認流程本身可行、耗時多久
+- 之後每半年到一年重複一次，尤其是資料量成長之後——還原耗時會隨資料量增加，
+  過時的耗時估計會讓真正需要還原時的 RTO（復原時間目標）評估失準
 
 ---
 

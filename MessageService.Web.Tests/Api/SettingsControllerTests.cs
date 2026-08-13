@@ -351,4 +351,111 @@ public class SettingsControllerTests : IDisposable
         Assert.False(settings.MaskLandline);
         Assert.False(settings.MaskNhiCard);
     }
+
+    // === 主機狀態（需求4，見 docs/POST-CONSOLIDATION-REVIEW-PLAN.md 批次D）===
+
+    [Fact]
+    public async Task GetHostHeartbeats_NoRows_ReturnsEmptyList()
+    {
+        var rows = await _fixture.Client.GetFromJsonAsync<List<HostHeartbeatDto>>("/api/settings/host-heartbeats");
+
+        Assert.Empty(rows!);
+    }
+
+    [Fact]
+    public async Task GetHostHeartbeats_RecentlySeen_StatusIsOnline()
+    {
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            dbContext.HostHeartbeats.Add(new HostHeartbeat
+            {
+                Role = "Core", MachineName = "core-host", LastSeenAt = DateTimeOffset.UtcNow,
+                OutboxPending = null, OutboxOldestAgeSeconds = null, EncryptionKeyFingerprint = "abcd1234"
+            });
+            await Task.CompletedTask;
+        });
+
+        var rows = await _fixture.Client.GetFromJsonAsync<List<HostHeartbeatDto>>("/api/settings/host-heartbeats");
+
+        var row = Assert.Single(rows!);
+        Assert.Equal("Core", row.Role);
+        Assert.Equal("core-host", row.MachineName);
+        Assert.Equal("Online", row.Status);
+        Assert.Equal("abcd1234", row.EncryptionKeyFingerprint);
+    }
+
+    [Fact]
+    public async Task GetHostHeartbeats_LongSinceLastSeen_StatusIsOffline()
+    {
+        // 預設 Heartbeat:IntervalSeconds=60，離線門檻是 5 倍＝300 秒；30 分鐘前遠遠超過
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            dbContext.HostHeartbeats.Add(new HostHeartbeat
+            {
+                Role = "Edge", MachineName = "edge-host", LastSeenAt = DateTimeOffset.UtcNow.AddMinutes(-30)
+            });
+            await Task.CompletedTask;
+        });
+
+        var rows = await _fixture.Client.GetFromJsonAsync<List<HostHeartbeatDto>>("/api/settings/host-heartbeats");
+
+        Assert.Equal("Offline", Assert.Single(rows!).Status);
+    }
+
+    [Fact]
+    public async Task GetHostHeartbeats_ModeratelyStale_StatusIsDelayed()
+    {
+        // 2 倍～5 倍間隔（120～300 秒）之間算遲滯，不是離線
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            dbContext.HostHeartbeats.Add(new HostHeartbeat
+            {
+                Role = "AllInOne", MachineName = "allinone-host", LastSeenAt = DateTimeOffset.UtcNow.AddSeconds(-180)
+            });
+            await Task.CompletedTask;
+        });
+
+        var rows = await _fixture.Client.GetFromJsonAsync<List<HostHeartbeatDto>>("/api/settings/host-heartbeats");
+
+        Assert.Equal("Delayed", Assert.Single(rows!).Status);
+    }
+
+    [Fact]
+    public async Task GetHostHeartbeats_WithOutboxBacklog_ReturnsPendingAndAge()
+    {
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            dbContext.HostHeartbeats.Add(new HostHeartbeat
+            {
+                Role = "Edge", MachineName = "edge-host", LastSeenAt = DateTimeOffset.UtcNow,
+                OutboxPending = 7, OutboxOldestAgeSeconds = 120.5
+            });
+            await Task.CompletedTask;
+        });
+
+        var rows = await _fixture.Client.GetFromJsonAsync<List<HostHeartbeatDto>>("/api/settings/host-heartbeats");
+
+        var row = Assert.Single(rows!);
+        Assert.Equal(7, row.OutboxPending);
+        Assert.Equal(120.5, row.OutboxOldestAgeSeconds);
+    }
+
+    [Fact]
+    public async Task GetHostHeartbeats_MultipleHosts_OrderedByRoleThenMachineName()
+    {
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            dbContext.HostHeartbeats.AddRange(
+                new HostHeartbeat { Role = "Edge", MachineName = "b-host", LastSeenAt = DateTimeOffset.UtcNow },
+                new HostHeartbeat { Role = "Core", MachineName = "a-host", LastSeenAt = DateTimeOffset.UtcNow },
+                new HostHeartbeat { Role = "Edge", MachineName = "a-host", LastSeenAt = DateTimeOffset.UtcNow });
+            await Task.CompletedTask;
+        });
+
+        var rows = await _fixture.Client.GetFromJsonAsync<List<HostHeartbeatDto>>("/api/settings/host-heartbeats");
+
+        Assert.Equal(
+            [("Core", "a-host"), ("Edge", "a-host"), ("Edge", "b-host")],
+            rows!.Select(r => (r.Role, r.MachineName)));
+    }
 }

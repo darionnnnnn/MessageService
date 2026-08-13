@@ -150,6 +150,33 @@ namespace MessageService.Data.Migrations.SqlServer
                     b.ToTable("GroupMessages");
                 });
 
+            modelBuilder.Entity("MessageService.Models.HostHeartbeat", b =>
+                {
+                    b.Property<string>("Role")
+                        .HasMaxLength(20)
+                        .HasColumnType("nvarchar(20)");
+
+                    b.Property<string>("MachineName")
+                        .HasMaxLength(128)
+                        .HasColumnType("nvarchar(128)");
+
+                    b.Property<string>("EncryptionKeyFingerprint")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<DateTimeOffset>("LastSeenAt")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<double?>("OutboxOldestAgeSeconds")
+                        .HasColumnType("float");
+
+                    b.Property<long?>("OutboxPending")
+                        .HasColumnType("bigint");
+
+                    b.HasKey("Role", "MachineName");
+
+                    b.ToTable("HostHeartbeats");
+                });
+
             modelBuilder.Entity("MessageService.Models.MaskKeyword", b =>
                 {
                     b.Property<int>("Id")
@@ -221,6 +248,9 @@ namespace MessageService.Data.Migrations.SqlServer
                         .HasColumnType("datetimeoffset");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("DownloadStatus")
+                        .HasFilter("[DownloadStatus] <> 'Completed'");
 
                     b.HasIndex("GroupMessageId")
                         .IsUnique();

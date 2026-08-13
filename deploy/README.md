@@ -21,6 +21,6 @@
 ## Set-AppPool.ps1
 
 在目標 Windows Server 上（系統管理員身分）設定 IIS 應用程式集區常駐執行，避免閒置逾時／
-固定間隔回收把背景服務（保留期清除、outbox 排空、媒體下載、頭貼刷新）殺掉。用法見指令稿
-內的 `.EXAMPLE`。這是 applicationHost.config 層級的設定，進不了專案裡的 `web.config`，
+固定間隔回收把背景服務（保留期清除、outbox 排空、媒體下載、頭貼刷新、主機心跳）殺掉。
+用法見指令稿內的 `.EXAMPLE`。這是 applicationHost.config 層級的設定，進不了專案裡的 `web.config`，
 只能用這支指令稿或 IIS 管理員手動設定固化下來。

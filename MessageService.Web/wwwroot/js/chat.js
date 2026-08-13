@@ -293,6 +293,13 @@
         return fallback;
     }
 
+    // Downloading（已被某個 worker 認領、正在寫入 blob，見 DbContentWorkSource.CompleteAsync）
+    // 對使用者來說跟 Pending 是同一件事：都還沒抓完，只是 Pending 還沒開始、Downloading
+    // 已經在做了，畫面上沒有必要區分，都顯示同一個「內容抓取中…」節點並繼續輪詢
+    function isDownloadInProgress(downloadStatus) {
+        return downloadStatus === 'Pending' || downloadStatus === 'Downloading';
+    }
+
     function buildPendingNode(contentId, messageType, fileName) {
         const wrap = document.createElement('div');
         wrap.className = 'msg-pending';
@@ -363,7 +370,7 @@
             return div;
         }
 
-        if (content.downloadStatus === 'Pending') {
+        if (isDownloadInProgress(content.downloadStatus)) {
             return buildPendingNode(content.id, type, content.fileName);
         }
         if (content.downloadStatus === 'Failed') {
@@ -417,7 +424,7 @@
         group.appendChild(bubbleRow);
         row.appendChild(group);
 
-        if (message.content && message.content.downloadStatus === 'Pending') {
+        if (message.content && isDownloadInProgress(message.content.downloadStatus)) {
             state.pendingContentIds.add(message.content.id);
         }
 
@@ -1042,7 +1049,10 @@
             return;
         }
         for (const status of statuses) {
-            if (status.downloadStatus !== 'Pending') {
+            // Downloading 還沒到終態，繼續留在 pendingContentIds 裡讓下一輪輪詢再檢查——
+            // 提早移除的話，這則訊息之後不管是變 Completed 還是 Failed 都不會再被撿回來
+            // 更新畫面，會永遠卡在轉圈圈的 spinner 節點
+            if (!isDownloadInProgress(status.downloadStatus)) {
                 state.pendingContentIds.delete(status.contentId);
                 updateContentNode(status);
             }

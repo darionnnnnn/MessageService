@@ -20,6 +20,7 @@ public class IngestController(
     IProfileStore profileStore,
     IContentDownloadQueue downloadQueue,
     IProfileRefreshQueue profileRefreshQueue,
+    IHeartbeatStore heartbeatStore,
     IOptions<IngestOptions> ingestOptions,
     ILogger<IngestController> logger) : ControllerBase
 {
@@ -78,7 +79,12 @@ public class IngestController(
             return Problem(statusCode: StatusCodes.Status500InternalServerError);
         }
 
-        var envelopesByWebhookEventId = envelopes.ToDictionary(e => e.WebhookEventId);
+        // LINE redelivery 會用同一個 WebhookEventId 重送整包，同一批裡出現重複鍵是預期會發生的
+        // （見 docs/DEPLOYMENT-GUIDE.md 對 Webhook redelivery 的建議）——重複鍵的內容永遠相同
+        // （同一事件），取哪一筆都一樣，用 ToDictionary 直接丟例外會讓整批回 500
+        var envelopesByWebhookEventId = envelopes
+            .GroupBy(e => e.WebhookEventId)
+            .ToDictionary(g => g.Key, g => g.First());
         foreach (var item in results)
         {
             if (item.PermanentlyRejected)
@@ -157,6 +163,21 @@ public class IngestController(
     public async Task<IActionResult> UpsertMemberProfile([FromBody] MemberUpsertRequest request, CancellationToken cancellationToken)
     {
         await profileStore.UpsertMemberAsync(request.GroupId, request.Profile.UserId, request.Profile, cancellationToken);
+        return NoContent();
+    }
+
+    // === 心跳（Line:OutboundHere 與加密都無關——Edge 沒有本機資料庫，靠這支端點代寫自己的
+    // 存活狀態，見 HttpHeartbeatReporter／HostHeartbeat 說明） ===
+
+    [HttpPost("heartbeat")]
+    public async Task<IActionResult> ReportHeartbeat([FromBody] HeartbeatRequest request, CancellationToken cancellationToken)
+    {
+        // Edge 不碰加密金鑰，代寫時指紋固定 null——不能拿這台（Core）自己的指紋去填 Edge 那列，
+        // 那樣「金鑰指紋不一致」的比對就永遠測不出來
+        await heartbeatStore.UpsertAsync(
+            request.Role, request.MachineName,
+            new HeartbeatReport(request.OutboxPending, request.OutboxOldestAgeSeconds),
+            encryptionKeyFingerprint: null, cancellationToken);
         return NoContent();
     }
 }

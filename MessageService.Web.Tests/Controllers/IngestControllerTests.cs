@@ -34,13 +34,15 @@ public class IngestControllerTests
         FakeContentWorkSource? contentWorkSource = null,
         FakeProfileStore? profileStore = null,
         FakeContentDownloadQueue? downloadQueue = null,
-        FakeProfileRefreshQueue? profileRefreshQueue = null) =>
+        FakeProfileRefreshQueue? profileRefreshQueue = null,
+        FakeHeartbeatStore? heartbeatStore = null) =>
         new(
             sink ?? new FakeIngestSink(),
             contentWorkSource ?? new FakeContentWorkSource(),
             profileStore ?? new FakeProfileStore(),
             downloadQueue ?? new FakeContentDownloadQueue(),
             profileRefreshQueue ?? new FakeProfileRefreshQueue(),
+            heartbeatStore ?? new FakeHeartbeatStore(),
             OptionsFactory.Create(new IngestOptions()),
             NullLogger<IngestController>.Instance);
 
@@ -180,6 +182,23 @@ public class IngestControllerTests
         Assert.Equal(7, Assert.Single(downloadQueue.Enqueued));
     }
 
+    // P0：LINE redelivery 用同一個 WebhookEventId 重送整包，同一批裡出現重複鍵是預期會發生的
+    // （見 docs/POST-CONSOLIDATION-REVIEW-PLAN.md 批次A）。改用 GroupBy 之前這裡會直接讓
+    // ToDictionary 丟 ArgumentException，端點回 500，讓 Edge 端 outbox 永久卡死
+    [Fact]
+    public async Task SubmitEventsBatch_DuplicateWebhookEventId_DoesNotThrowAndReturnsOk()
+    {
+        var sink = new FakeIngestSink();
+        var controller = CreateController(sink: sink);
+        var envelopes = new List<IngestEnvelope> { Envelope("evt-1"), Envelope("evt-1"), Envelope("evt-2") };
+
+        var result = await controller.SubmitEventsBatch(envelopes, CancellationToken.None);
+
+        var ok = Assert.IsType<OkObjectResult>(result);
+        var results = Assert.IsType<List<IngestBatchItemResult>>(ok.Value);
+        Assert.Equal(["evt-1", "evt-1", "evt-2"], results.Select(r => r.WebhookEventId));
+    }
+
     // === content-work ===
 
     [Fact]
@@ -275,5 +294,26 @@ public class IngestControllerTests
         Assert.Equal("G1", groupId);
         Assert.Equal("U1", userId);
         Assert.Equal(profile, saved);
+    }
+
+    // === heartbeat（Edge 代寫自己的存活狀態，見 HeartbeatRequest 說明）===
+
+    [Fact]
+    public async Task ReportHeartbeat_DelegatesToStore_WithNullFingerprint()
+    {
+        var store = new FakeHeartbeatStore();
+        var controller = CreateController(heartbeatStore: store);
+        var request = new HeartbeatRequest("Edge", "edge-host-1", OutboxPending: 3, OutboxOldestAgeSeconds: 42.5);
+
+        var result = await controller.ReportHeartbeat(request, CancellationToken.None);
+
+        Assert.IsType<NoContentResult>(result);
+        var (role, machineName, report, fingerprint) = Assert.Single(store.Upserted);
+        Assert.Equal("Edge", role);
+        Assert.Equal("edge-host-1", machineName);
+        Assert.Equal(3, report.OutboxPending);
+        Assert.Equal(42.5, report.OutboxOldestAgeSeconds);
+        // Edge 不碰加密金鑰——不能拿 Core 自己的指紋去填 Edge 那列，否則「金鑰不一致」比對失效
+        Assert.Null(fingerprint);
     }
 }

@@ -78,4 +78,47 @@ public class SqliteOutboxWriterTests : IDisposable
 
         Assert.Equal(1, _signal.NotifyCount);
     }
+
+    // P0：LINE redelivery 用同一個 WebhookEventId 重送——OutboxDbContext 的唯一索引擋住第二次
+    // 寫入，撞鍵要視為「已在佇列中」而非例外，見 SqliteOutboxWriter.EnqueueAsync 說明
+    [Fact]
+    public async Task EnqueueAsync_SameWebhookEventIdTwice_DoesNotThrowAndKeepsOnlyOneRow()
+    {
+        var envelope = SampleEnvelope();
+        using (var scope = _provider.CreateScope())
+        {
+            var writer = scope.ServiceProvider.GetRequiredService<IOutboxWriter>();
+            await writer.EnqueueAsync(envelope, CancellationToken.None);
+        }
+
+        using (var scope = _provider.CreateScope())
+        {
+            var writer = scope.ServiceProvider.GetRequiredService<IOutboxWriter>();
+            var ex = await Record.ExceptionAsync(() => writer.EnqueueAsync(envelope, CancellationToken.None));
+            Assert.Null(ex);
+        }
+
+        using var readScope = _provider.CreateScope();
+        var dbContext = readScope.ServiceProvider.GetRequiredService<OutboxDbContext>();
+        Assert.Single(dbContext.Entries);
+    }
+
+    [Fact]
+    public async Task EnqueueAsync_SameWebhookEventIdTwice_DoesNotNotifySignalOnDuplicate()
+    {
+        var envelope = SampleEnvelope();
+        using (var scope = _provider.CreateScope())
+        {
+            var writer = scope.ServiceProvider.GetRequiredService<IOutboxWriter>();
+            await writer.EnqueueAsync(envelope, CancellationToken.None);
+        }
+
+        using (var scope = _provider.CreateScope())
+        {
+            var writer = scope.ServiceProvider.GetRequiredService<IOutboxWriter>();
+            await writer.EnqueueAsync(envelope, CancellationToken.None);
+        }
+
+        Assert.Equal(1, _signal.NotifyCount);
+    }
 }

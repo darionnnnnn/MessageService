@@ -108,6 +108,82 @@ public class OutboxSchemaUpgraderTests : IDisposable
         Assert.Equal("wal", mode, ignoreCase: true);
     }
 
+    /// <summary>模擬已經因為 LINE redelivery 而累積重複 WebhookEventId 的舊 outbox.db——
+    /// P0 的根因：升級路徑必須先去重才能補建唯一索引，見 EnsureWebhookEventIdUniqueIndex 說明。</summary>
+    private void CreateLegacySchemaWithDuplicateWebhookEventIds()
+    {
+        using var connection = new SqliteConnection(ConnectionString);
+        connection.Open();
+        using var create = connection.CreateCommand();
+        create.CommandText = """
+            CREATE TABLE Entries (
+                Id INTEGER PRIMARY KEY AUTOINCREMENT,
+                WebhookEventId TEXT NOT NULL,
+                PayloadJson TEXT NOT NULL,
+                CreatedAt INTEGER NOT NULL,
+                Attempts INTEGER NOT NULL,
+                NextAttemptAt INTEGER NULL,
+                LastError TEXT NULL,
+                DeadLetteredAt INTEGER NULL
+            );
+            INSERT INTO Entries (WebhookEventId, PayloadJson, CreatedAt, Attempts) VALUES ('evt-dup', '{"n":1}', 0, 0);
+            INSERT INTO Entries (WebhookEventId, PayloadJson, CreatedAt, Attempts) VALUES ('evt-dup', '{"n":2}', 0, 0);
+            INSERT INTO Entries (WebhookEventId, PayloadJson, CreatedAt, Attempts) VALUES ('evt-solo', '{"n":3}', 0, 0);
+            """;
+        create.ExecuteNonQuery();
+    }
+
+    [Fact]
+    public void EnsureWebhookEventIdUniqueIndex_DuplicateRows_KeepsOnlySmallestIdPerEvent()
+    {
+        CreateLegacySchemaWithDuplicateWebhookEventIds();
+
+        OutboxSchemaUpgrader.EnsureWebhookEventIdUniqueIndex(ConnectionString);
+
+        using var connection = new SqliteConnection(ConnectionString);
+        connection.Open();
+        using var query = connection.CreateCommand();
+        query.CommandText = "SELECT Id, WebhookEventId, PayloadJson FROM Entries ORDER BY Id";
+        using var reader = query.ExecuteReader();
+
+        Assert.True(reader.Read());
+        Assert.Equal("evt-dup", reader.GetString(1));
+        Assert.Equal("""{"n":1}""", reader.GetString(2)); // 最小 Id 那筆保留
+
+        Assert.True(reader.Read());
+        Assert.Equal("evt-solo", reader.GetString(1));
+
+        Assert.False(reader.Read());
+    }
+
+    [Fact]
+    public void EnsureWebhookEventIdUniqueIndex_AfterDedupe_IndexRejectsFutureDuplicates()
+    {
+        CreateLegacySchemaWithDuplicateWebhookEventIds();
+
+        OutboxSchemaUpgrader.EnsureWebhookEventIdUniqueIndex(ConnectionString);
+
+        using var connection = new SqliteConnection(ConnectionString);
+        connection.Open();
+        using var insert = connection.CreateCommand();
+        insert.CommandText =
+            "INSERT INTO Entries (WebhookEventId, PayloadJson, CreatedAt, Attempts) VALUES ('evt-solo', '{}', 0, 0)";
+
+        var ex = Assert.Throws<SqliteException>(() => insert.ExecuteNonQuery());
+        Assert.Equal(19, ex.SqliteErrorCode); // SQLITE_CONSTRAINT
+    }
+
+    [Fact]
+    public void EnsureWebhookEventIdUniqueIndex_NoDuplicates_IsIdempotent()
+    {
+        CreateLegacySchemaWithOneRow();
+        OutboxSchemaUpgrader.EnsureWebhookEventIdUniqueIndex(ConnectionString);
+
+        var ex = Record.Exception(() => OutboxSchemaUpgrader.EnsureWebhookEventIdUniqueIndex(ConnectionString));
+
+        Assert.Null(ex);
+    }
+
     [Fact]
     public void EnsureDeadLetterColumn_FreshTableAlreadyHasColumn_IsNoOp()
     {

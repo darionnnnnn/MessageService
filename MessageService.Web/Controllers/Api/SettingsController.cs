@@ -1,9 +1,11 @@
 using MessageService.Data;
 using MessageService.Models;
+using MessageService.Options;
 using MessageService.Services;
 using MessageService.Web.Dtos;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 
 namespace MessageService.Web.Controllers.Api;
 
@@ -11,7 +13,7 @@ namespace MessageService.Web.Controllers.Api;
 [ApiController]
 [Route("api/settings")]
 [RequiresCapability(Capability.Viewer)]
-public class SettingsController(MessageDbContext dbContext) : ControllerBase
+public class SettingsController(MessageDbContext dbContext, IOptions<HeartbeatOptions> heartbeatOptions) : ControllerBase
 {
     [HttpGet("display")]
     public async Task<ActionResult<DisplaySettingsDto>> GetDisplaySettings(CancellationToken cancellationToken)
@@ -252,6 +254,34 @@ public class SettingsController(MessageDbContext dbContext) : ControllerBase
         dbContext.UserAliases.Remove(existing);
         await dbContext.SaveChangesAsync(cancellationToken);
         return NoContent();
+    }
+
+    // === 主機狀態（需求4：Web 端要能看到另外幾台服務是否正常運作，見
+    // docs/POST-CONSOLIDATION-REVIEW-PLAN.md 批次D）===
+
+    [HttpGet("host-heartbeats")]
+    public async Task<ActionResult<IReadOnlyList<HostHeartbeatDto>>> GetHostHeartbeats(CancellationToken cancellationToken)
+    {
+        var rows = await dbContext.HostHeartbeats
+            .AsNoTracking()
+            .OrderBy(h => h.Role).ThenBy(h => h.MachineName)
+            .ToListAsync(cancellationToken);
+
+        var now = DateTimeOffset.UtcNow;
+        var interval = TimeSpan.FromSeconds(Math.Max(1, heartbeatOptions.Value.IntervalSeconds));
+
+        return Ok(rows.Select(h => new HostHeartbeatDto(
+            h.Role, h.MachineName, h.LastSeenAt, ComputeStatus(now - h.LastSeenAt, interval),
+            h.OutboxPending, h.OutboxOldestAgeSeconds, h.EncryptionKeyFingerprint)).ToList());
+    }
+
+    private static string ComputeStatus(TimeSpan age, TimeSpan interval)
+    {
+        if (age < interval * 2)
+        {
+            return "Online";
+        }
+        return age < interval * 5 ? "Delayed" : "Offline";
     }
 
     private static void ApplyGroupSelection(MaskKeyword keyword, UpsertMaskKeywordDto dto)

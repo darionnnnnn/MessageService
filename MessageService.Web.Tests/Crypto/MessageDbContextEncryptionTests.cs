@@ -11,7 +11,8 @@ namespace MessageService.Tests.Crypto;
 
 // MessageDbContext 透過 EF ValueConverter 套用欄位加密——這組測試確認密文真的落地在原始
 // SQL 欄位裡（不是只在 C# 端看起來加密），而且 LINQ 投影（不是只有完整實體）也會自動解密，
-// 加密啟用前寫入的舊資料（沒有 ENC1: 前綴）仍然讀得到
+// 加密啟用前寫入的舊資料（沒有 ENC2: 前綴）仍然讀得到。新寫入一律是 ENC2:（帶 key id），
+// 舊格式 ENC1: 的相容性測試在 FieldCipherTests，這裡不重複
 public class MessageDbContextEncryptionTests : IDisposable
 {
     private const string Key = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
@@ -59,7 +60,7 @@ public class MessageDbContextEncryptionTests : IDisposable
 
         var raw = await ReadRawColumnAsync("GroupMessages", "Text", "WebhookEventId = 'e1'");
         Assert.NotNull(raw);
-        Assert.StartsWith("ENC1:", raw);
+        Assert.StartsWith("ENC2:", raw);
         Assert.DoesNotContain("密碼", raw);
     }
 
@@ -181,7 +182,7 @@ public class MessageDbContextEncryptionTests : IDisposable
         }
 
         var rawName = await ReadRawColumnAsync("Groups", "GroupName", "GroupId = 'G1'");
-        Assert.StartsWith("ENC1:", rawName);
+        Assert.StartsWith("ENC2:", rawName);
 
         await using var reader = CreateContext(cipher);
         var group = await reader.Groups.SingleAsync();
@@ -203,7 +204,7 @@ public class MessageDbContextEncryptionTests : IDisposable
         }
 
         var rawName = await ReadRawColumnAsync("GroupMembers", "DisplayName", "UserId = 'U1'");
-        Assert.StartsWith("ENC1:", rawName);
+        Assert.StartsWith("ENC2:", rawName);
 
         await using var reader = CreateContext(cipher);
         var member = await reader.GroupMembers.SingleAsync();
@@ -222,7 +223,7 @@ public class MessageDbContextEncryptionTests : IDisposable
         }
 
         var raw = await ReadRawColumnAsync("UserAliases", "Alias", "UserId = 'U1'");
-        Assert.StartsWith("ENC1:", raw);
+        Assert.StartsWith("ENC2:", raw);
 
         await using var reader = CreateContext(cipher);
         var alias = await reader.UserAliases.SingleAsync();
@@ -248,7 +249,7 @@ public class MessageDbContextEncryptionTests : IDisposable
         }
 
         var raw = await ReadRawColumnAsync("MessageContents", "FileName", $"Id = {contentId}");
-        Assert.StartsWith("ENC1:", raw);
+        Assert.StartsWith("ENC2:", raw);
 
         await using var reader = CreateContext(cipher);
         var content = await reader.MessageContents.SingleAsync(c => c.Id == contentId);

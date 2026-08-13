@@ -137,6 +137,178 @@ public class DbContentWorkSourceTests : IDisposable
         Assert.Equal(groupMessage.Content!.Id, Assert.Single(ids));
     }
 
+    // GetAsync 不改狀態、可以安全重複呼叫——影片／語音要靠它反覆查詢轉檔狀態（見
+    // ContentDownloadService.CheckTranscodingAsync），同一個 worker 對同一筆內容會多次呼叫；
+    // 真正的認領動作在 CompleteAsync（見該方法說明與下面「認領機制」那組測試）
+    [Fact]
+    public async Task GetAsync_PendingContent_ReturnsWorkItem_WithoutChangingStatus()
+    {
+        using var scope = _provider.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+        var groupMessage = new GroupMessage
+        {
+            WebhookEventId = "e1", LineMessageId = "line-m1", GroupId = "G1", MessageType = "image",
+            EventTimestamp = DateTimeOffset.UtcNow, ReceivedAt = DateTimeOffset.UtcNow,
+            Content = new MessageContent { DownloadStatus = DownloadStatus.Pending }
+        };
+        dbContext.GroupMessages.Add(groupMessage);
+        await dbContext.SaveChangesAsync();
+        var source = CreateSource(dbContext);
+
+        var first = await source.GetAsync(groupMessage.Content!.Id, CancellationToken.None);
+        var second = await source.GetAsync(groupMessage.Content.Id, CancellationToken.None);
+
+        Assert.NotNull(first);
+        Assert.NotNull(second);
+        Assert.Equal("line-m1", first!.LineMessageId);
+        var reloaded = await dbContext.MessageContents.AsNoTracking().SingleAsync(c => c.Id == groupMessage.Content.Id);
+        Assert.Equal(DownloadStatus.Pending, reloaded.DownloadStatus);
+    }
+
+    [Fact]
+    public async Task GetAsync_DownloadingContent_ReturnsNull()
+    {
+        using var scope = _provider.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+        var groupMessage = new GroupMessage
+        {
+            WebhookEventId = "e1", LineMessageId = "line-m1", GroupId = "G1", MessageType = "image",
+            EventTimestamp = DateTimeOffset.UtcNow, ReceivedAt = DateTimeOffset.UtcNow,
+            Content = new MessageContent { DownloadStatus = DownloadStatus.Downloading }
+        };
+        dbContext.GroupMessages.Add(groupMessage);
+        await dbContext.SaveChangesAsync();
+        var source = CreateSource(dbContext);
+
+        var item = await source.GetAsync(groupMessage.Content!.Id, CancellationToken.None);
+
+        Assert.Null(item);
+    }
+
+    // === CompleteAsync 的認領機制：多個 worker 共讀同一個 Channel，同一個 contentId 有機會
+    // 被入列兩次——CompleteAsync 開頭用一句 ExecuteUpdateAsync 認領（Pending→Downloading），
+    // 沒認領到的那個直接跳過，避免兩邊同時對同一顆 blob 交錯寫入，見該方法說明 ===
+
+    [Fact]
+    public async Task CompleteAsync_SecondCallAfterAlreadyCompleted_DoesNotOverwriteContent()
+    {
+        // 模擬兩個 worker 都下載完同一筆內容、依序呼叫 CompleteAsync——第一個成功寫入並標
+        // Completed，第二個的認領會因為狀態已經不是 Pending 而拿到 0，必須直接跳過，
+        // 不能覆寫第一個已經寫好的內容
+        using var scope = _provider.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+        var groupMessage = new GroupMessage
+        {
+            WebhookEventId = "e1", LineMessageId = "m1", GroupId = "G1", MessageType = "image",
+            EventTimestamp = DateTimeOffset.UtcNow, ReceivedAt = DateTimeOffset.UtcNow,
+            Content = new MessageContent { DownloadStatus = DownloadStatus.Pending }
+        };
+        dbContext.GroupMessages.Add(groupMessage);
+        await dbContext.SaveChangesAsync();
+        var source = CreateSource(dbContext);
+        var contentId = groupMessage.Content!.Id;
+
+        var firstPayload = new byte[] { 1, 2, 3 };
+        await source.CompleteAsync(contentId, new MemoryStream(firstPayload), firstPayload.Length, "image/png", CancellationToken.None);
+
+        var secondPayload = new byte[] { 9, 9, 9, 9, 9 };
+        await source.CompleteAsync(contentId, new MemoryStream(secondPayload), secondPayload.Length, "image/png", CancellationToken.None);
+
+        var reloaded = await ReloadContentAsync(contentId);
+        Assert.Equal(DownloadStatus.Completed, reloaded.DownloadStatus);
+        Assert.Equal(firstPayload, reloaded.Content); // 第二次呼叫沒有覆寫掉第一次寫入的內容
+    }
+
+    [Fact]
+    public async Task CompleteAsync_ContentAlreadyDownloading_SkipsWithoutThrowing()
+    {
+        // 認領失敗（狀態已經不是 Pending）要安靜跳過，不能拋例外把整個 ContentDownloadService
+        // worker 拖垮
+        using var scope = _provider.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+        var groupMessage = new GroupMessage
+        {
+            WebhookEventId = "e1", LineMessageId = "m1", GroupId = "G1", MessageType = "image",
+            EventTimestamp = DateTimeOffset.UtcNow, ReceivedAt = DateTimeOffset.UtcNow,
+            Content = new MessageContent { DownloadStatus = DownloadStatus.Downloading }
+        };
+        dbContext.GroupMessages.Add(groupMessage);
+        await dbContext.SaveChangesAsync();
+        var source = CreateSource(dbContext);
+
+        var payload = new byte[] { 1, 2, 3 };
+        var ex = await Record.ExceptionAsync(() =>
+            source.CompleteAsync(groupMessage.Content!.Id, new MemoryStream(payload), payload.Length, "image/png", CancellationToken.None));
+
+        Assert.Null(ex);
+        var reloaded = await dbContext.MessageContents.AsNoTracking().SingleAsync(c => c.Id == groupMessage.Content.Id);
+        Assert.Equal(DownloadStatus.Downloading, reloaded.DownloadStatus); // 沒被改動，也沒被誤標 Completed
+        Assert.Null(reloaded.Content);
+    }
+
+    // 體檢輪揪出的真 bug：認領（Pending→Downloading）之後若寫入失敗（長度不符、連線中斷等），
+    // 一定要把狀態改回 Pending 再往外拋，否則 ProcessAsync 的重試迴圈下一次呼叫 CompleteAsync
+    // 會因為認領不到（狀態已經不是 Pending）而靜默 return，重試被誤判成功、內容永遠卡在
+    // Downloading——見 CompleteAsync 的 catch 區塊與 RevertClaimAsync 說明
+    [Fact]
+    public async Task CompleteAsync_DeclaredLengthExceedsActualStreamLength_ThrowsAndRevertsClaimToPending()
+    {
+        using var scope = _provider.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+        var groupMessage = new GroupMessage
+        {
+            WebhookEventId = "e1", LineMessageId = "m1", GroupId = "G1", MessageType = "image",
+            EventTimestamp = DateTimeOffset.UtcNow, ReceivedAt = DateTimeOffset.UtcNow,
+            Content = new MessageContent { DownloadStatus = DownloadStatus.Pending }
+        };
+        dbContext.GroupMessages.Add(groupMessage);
+        await dbContext.SaveChangesAsync();
+        var source = CreateSource(dbContext);
+        var contentId = groupMessage.Content!.Id;
+
+        // 宣稱 100 bytes，來源串流實際只有 3 bytes——模擬 LINE 回應的 Content-Length 標頭
+        // 跟實際內容對不起來（見 CompleteAsync 對 contentLength 不可盡信的說明）
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            source.CompleteAsync(contentId, new MemoryStream([1, 2, 3]), 100, "image/png", CancellationToken.None));
+        Assert.Contains("produced 3 bytes", ex.Message);
+
+        var reloaded = await dbContext.MessageContents.AsNoTracking().SingleAsync(c => c.Id == contentId);
+        Assert.Equal(DownloadStatus.Pending, reloaded.DownloadStatus); // 改回 Pending，不是卡在 Downloading
+
+        // 證明真的能重新認領：下一次呼叫（模擬 ProcessAsync 的重試）用正確長度必須成功寫入，
+        // 不能因為上次失敗留下的殘留狀態而靜默 no-op
+        var payload = new byte[] { 9, 9, 9 };
+        await source.CompleteAsync(contentId, new MemoryStream(payload), payload.Length, "image/png", CancellationToken.None);
+
+        var completed = await ReloadContentAsync(contentId);
+        Assert.Equal(DownloadStatus.Completed, completed.DownloadStatus);
+        Assert.Equal(payload, completed.Content);
+    }
+
+    [Fact]
+    public async Task GetPendingIdsAsync_DownloadingContent_IsRecoveredAndResetToPending()
+    {
+        // 上次行程被殺時卡在 Downloading 的列——啟動接續要整批撿回並重設回 Pending，
+        // 見 GetPendingIdsAsync 對 DownloadStatus.Downloading 的說明
+        using var scope = _provider.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+        var groupMessage = new GroupMessage
+        {
+            WebhookEventId = "e1", LineMessageId = "m1", GroupId = "G1", MessageType = "image",
+            EventTimestamp = DateTimeOffset.UtcNow, ReceivedAt = DateTimeOffset.UtcNow,
+            Content = new MessageContent { DownloadStatus = DownloadStatus.Downloading }
+        };
+        dbContext.GroupMessages.Add(groupMessage);
+        await dbContext.SaveChangesAsync();
+        var source = CreateSource(dbContext);
+
+        var ids = await source.GetPendingIdsAsync(CancellationToken.None);
+
+        Assert.Equal(groupMessage.Content!.Id, Assert.Single(ids));
+        var reloaded = await dbContext.MessageContents.AsNoTracking().SingleAsync(c => c.Id == groupMessage.Content.Id);
+        Assert.Equal(DownloadStatus.Pending, reloaded.DownloadStatus);
+    }
+
     [Fact]
     public async Task FailAsync_IncrementsFailedAttemptsAndSetsLastAttemptAt()
     {

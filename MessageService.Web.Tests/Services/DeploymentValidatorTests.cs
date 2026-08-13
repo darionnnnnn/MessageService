@@ -279,4 +279,89 @@ public class DeploymentValidatorTests
 
         Assert.Null(ex);
     }
+
+    // AllInOne 是最常見的拓撲，空白名單同樣代表「檢視端啟用了卻全拒」——這條警告原本只在
+    // Core 模式檢查，見 docs/POST-CONSOLIDATION-REVIEW-PLAN.md 批次B
+    [Fact]
+    public void AllInOneMode_ViewerEnabledWithEmptyAllowlist_Warns()
+    {
+        var logger = new CapturingLogger();
+
+        DeploymentValidator.Validate(
+            new DeploymentOptions { Mode = DeploymentMode.AllInOne },
+            Line(channelSecret: "secret"),
+            new ViewerOptions { AllowedClientIps = [] },
+            new IngestOptions(),
+            logger);
+
+        Assert.Contains(logger.Warnings, w => w.Contains("AllowedClientIps"));
+    }
+
+    [Fact]
+    public void AllInOneMode_ViewerEnabledWithNonEmptyAllowlist_DoesNotWarn()
+    {
+        var logger = new CapturingLogger();
+
+        DeploymentValidator.Validate(
+            new DeploymentOptions { Mode = DeploymentMode.AllInOne },
+            Line(channelSecret: "secret"),
+            new ViewerOptions { AllowedClientIps = ["10.0.0.0/24"] },
+            new IngestOptions(),
+            logger);
+
+        Assert.DoesNotContain(logger.Warnings, w => w.Contains("AllowedClientIps"));
+    }
+
+    // ==== Provider 與連線字串不一致 ====
+
+    [Fact]
+    public void SqliteProvider_WithSqlServerConnectionString_Warns()
+    {
+        var logger = new CapturingLogger();
+
+        DeploymentValidator.Validate(
+            new DeploymentOptions { Mode = DeploymentMode.AllInOne },
+            Line(channelSecret: "secret"),
+            new ViewerOptions { AllowedClientIps = ["10.0.0.0/24"] },
+            new IngestOptions(),
+            logger,
+            databaseProvider: "Sqlite",
+            hasSqlServerConnectionString: true);
+
+        Assert.Contains(logger.Warnings, w => w.Contains("Database:Provider"));
+    }
+
+    [Fact]
+    public void SqliteProvider_WithoutSqlServerConnectionString_DoesNotWarn()
+    {
+        var logger = new CapturingLogger();
+
+        DeploymentValidator.Validate(
+            new DeploymentOptions { Mode = DeploymentMode.AllInOne },
+            Line(channelSecret: "secret"),
+            new ViewerOptions { AllowedClientIps = ["10.0.0.0/24"] },
+            new IngestOptions(),
+            logger,
+            databaseProvider: "Sqlite",
+            hasSqlServerConnectionString: false);
+
+        Assert.DoesNotContain(logger.Warnings, w => w.Contains("Database:Provider"));
+    }
+
+    [Fact]
+    public void SqlServerProvider_WithSqlServerConnectionString_DoesNotWarn()
+    {
+        var logger = new CapturingLogger();
+
+        DeploymentValidator.Validate(
+            new DeploymentOptions { Mode = DeploymentMode.AllInOne },
+            Line(channelSecret: "secret"),
+            new ViewerOptions { AllowedClientIps = ["10.0.0.0/24"] },
+            new IngestOptions(),
+            logger,
+            databaseProvider: "SqlServer",
+            hasSqlServerConnectionString: true);
+
+        Assert.DoesNotContain(logger.Warnings, w => w.Contains("Database:Provider"));
+    }
 }
