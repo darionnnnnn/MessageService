@@ -66,6 +66,7 @@ public class LegacySqliteBaselinerTests : IDisposable
             ALTER TABLE Groups DROP COLUMN LastMessageAt;
             DROP INDEX IF EXISTS IX_GroupMessages_GroupId_Id;
             DROP INDEX IF EXISTS IX_GroupMessages_GroupId_EventTimestamp;
+            DROP INDEX IF EXISTS IX_MessageContents_DownloadStatus;
             """;
         drop.ExecuteNonQuery();
     }

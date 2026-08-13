@@ -161,7 +161,7 @@ public class EncryptedContentStreamTests : IDisposable
     }
 
     [Fact]
-    public async Task GetContent_EncryptedBlob_SetsCorrectEtagAndCacheControl()
+    public async Task GetContent_EncryptedBlob_SetsCorrectEtagAndNoStoreCacheControl()
     {
         var contentId = await SeedEncryptedContentAsync([1, 2, 3]);
 
@@ -169,7 +169,11 @@ public class EncryptedContentStreamTests : IDisposable
 
         // ETag 格式是 "mc-{id}-{CompletedAt ticks}"，見 ContentStreamTests 對 Id 重用的說明
         Assert.StartsWith($"\"mc-{contentId}-", response.Headers.ETag?.Tag);
-        Assert.True(response.Headers.CacheControl?.Private);
+        // 加密啟用時不進瀏覽器磁碟快取——跟未加密時的 immutable+一年 max-age（見
+        // ContentStreamTests.GetContent_SetsImmutableCacheControlAndETag）刻意不同，
+        // 見 ContentStreamService 對 no-store 的說明
+        Assert.True(response.Headers.CacheControl?.NoStore);
+        Assert.False(response.Headers.CacheControl?.Private ?? false);
     }
 
     [Fact]

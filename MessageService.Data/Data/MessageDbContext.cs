@@ -73,6 +73,12 @@ public class MessageDbContext(DbContextOptions options, FieldCipher? cipher = nu
         modelBuilder.Entity<MessageContent>(entity =>
         {
             entity.Property(c => c.DownloadStatus).HasConversion<string>().HasMaxLength(20);
+
+            // GetPendingIdsAsync／認領邏輯只關心「還沒下載完」的列，但這張表裝著所有 blob——
+            // 沒有索引就是全表掃描。篩選索引只蓋未完成的列，兩個 provider 的篩選子句語法不同
+            // （方括號 vs 雙引號），但都是相同的邏輯條件
+            entity.HasIndex(c => c.DownloadStatus)
+                .HasFilter(Database.IsSqlite() ? "\"DownloadStatus\" <> 'Completed'" : "[DownloadStatus] <> 'Completed'");
         });
 
         modelBuilder.Entity<Group>().HasKey(g => g.GroupId);

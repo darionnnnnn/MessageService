@@ -211,6 +211,9 @@ namespace MessageService.Data.Migrations.Sqlite
 
                     b.HasKey("Id");
 
+                    b.HasIndex("DownloadStatus")
+                        .HasFilter("\"DownloadStatus\" <> 'Completed'");
+
                     b.HasIndex("GroupMessageId")
                         .IsUnique();
 

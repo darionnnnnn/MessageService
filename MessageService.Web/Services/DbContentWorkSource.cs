@@ -24,10 +24,21 @@ public class DbContentWorkSource(MessageDbContext dbContext, IOptions<ContentDow
 
     public async Task<IReadOnlyList<long>> GetPendingIdsAsync(CancellationToken cancellationToken)
     {
+        // Downloading：上次行程被殺／當機時卡在「已認領但沒做完」的列，見 GetAsync 的認領邏輯
+        // 與 DownloadStatus.Downloading 的說明。啟動接續沒辦法分辨「真的還在下載中」跟「已經
+        // 沒有 worker 在處理」，一律當成中斷、整批撿回改回 Pending 重跑——單一行程模式下這是
+        // 唯一的回收路徑，接受「worker 崩潰但行程沒重啟」這段期間該筆會卡住的已知限制
         var pendingIds = await dbContext.MessageContents
-            .Where(c => c.DownloadStatus == DownloadStatus.Pending)
+            .Where(c => c.DownloadStatus == DownloadStatus.Pending || c.DownloadStatus == DownloadStatus.Downloading)
             .Select(c => c.Id)
             .ToListAsync(cancellationToken);
+
+        if (pendingIds.Count > 0)
+        {
+            await dbContext.MessageContents
+                .Where(c => pendingIds.Contains(c.Id) && c.DownloadStatus == DownloadStatus.Downloading)
+                .ExecuteUpdateAsync(s => s.SetProperty(c => c.DownloadStatus, DownloadStatus.Pending), cancellationToken);
+        }
 
         // Failed 只在訊息到達後的保留視窗內、且累計失敗次數未達上限才重新撿回——LINE 的內容
         // 有保存期限，過期的檔案永遠下載不到，不該每次重啟都無限重跑（見 ContentDownloadOptions）。
@@ -79,13 +90,34 @@ public class DbContentWorkSource(MessageDbContext dbContext, IOptions<ContentDow
         return new ContentWorkItem(content.Id, content.GroupMessage.LineMessageId, content.GroupMessage.MessageType);
     }
 
-    /// <summary>blob 寫入先於中繼資料更新：中斷時（例如服務被殺）DownloadStatus 維持原狀，
-    /// 下次啟動的 RequeuePendingAsync 會整個重跑，不會留下「狀態是 Completed 但內容是半截」
-    /// 的資料。SQL Server 用 SqlParameter 的串流參數（直接把 Stream 指派給 Value，provider
-    /// 端會邊讀邊送，不整份進記憶體）；SQLite 沒有這個機制，改用 zeroblob() 先配置定長空間，
-    /// 再用 SqliteBlob（Stream 子類別）增量寫入。</summary>
+    /// <summary>blob 寫入先於中繼資料更新：中斷時（例如服務被殺）狀態最壞停在 Downloading，
+    /// 下次啟動的 RequeuePendingAsync 會整個重跑（見 GetPendingIdsAsync 對 Downloading 的回收
+    /// 邏輯），不會留下「狀態是 Completed 但內容是半截」的資料。
+    ///
+    /// 認領（Pending → Downloading）刻意放在這裡而不是 GetAsync：影片／語音要先靠 GetAsync
+    /// 反覆查詢轉檔狀態（見 ContentDownloadService.CheckTranscodingAsync），同一個 worker 對
+    /// 同一筆內容會多次呼叫 GetAsync，若在那裡認領，第二次查詢會因為狀態已經不是 Pending
+    /// 而被自己擋下來。真正需要獨占的是「寫入同一顆 blob」這個動作本身——ContentDownloadService
+    /// 有多個 worker 共讀同一個 Channel，同一個 contentId 有機會被入列兩次，沒有認領的話兩個
+    /// worker 會同時對同一顆 blob 下載並交錯寫入（SQLite 的 zeroblob + SqliteBlob 尤其明顯），
+    /// 而且兩邊最後都標 Completed，沒有機制能再把它們揪出來重試。ExecuteUpdateAsync 的 WHERE
+    /// 帶著 DownloadStatus==Pending 條件，第二個 worker 的更新會影響 0 列，claimed==0 時直接
+    /// return，不重複下載寫入。
+    ///
+    /// SQL Server 用 SqlParameter 的串流參數（直接把 Stream 指派給 Value，provider 端會邊讀
+    /// 邊送，不整份進記憶體）；SQLite 沒有這個機制，改用 zeroblob() 先配置定長空間，再用
+    /// SqliteBlob（Stream 子類別）增量寫入。</summary>
     public async Task CompleteAsync(long contentId, Stream content, long contentLength, string? contentType, CancellationToken cancellationToken)
     {
+        var claimed = await dbContext.MessageContents
+            .Where(c => c.Id == contentId && c.DownloadStatus == DownloadStatus.Pending)
+            .ExecuteUpdateAsync(s => s.SetProperty(c => c.DownloadStatus, DownloadStatus.Downloading), cancellationToken);
+
+        if (claimed == 0)
+        {
+            return;
+        }
+
         var connection = dbContext.Database.GetDbConnection();
         var wasClosed = connection.State != ConnectionState.Open;
         if (wasClosed)

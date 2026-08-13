@@ -297,9 +297,17 @@ if (capabilities.HasDatabaseAccess && builder.Configuration.GetValue("Database:A
         {
             var messageDbConnectionString = builder.Configuration.GetConnectionString("Sqlite") ?? "Data Source=messages.db";
             LegacySqliteBaseliner.EnsureBaseline(messageDbConnectionString, migrationLogger);
-        }
 
-        dbContext.Database.Migrate();
+            dbContext.Database.Migrate();
+
+            // Core+Viewer 同機兩站台、或 IIS 重疊回收過渡期都可能有兩個行程同時開 messages.db——
+            // 跟 outbox.db 同一個理由（見 EnableWalMode 說明），持久屬性設一次即可
+            OutboxSchemaUpgrader.EnableWalMode(messageDbConnectionString);
+        }
+        else
+        {
+            dbContext.Database.Migrate();
+        }
     }
     finally
     {

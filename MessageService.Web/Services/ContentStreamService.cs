@@ -142,7 +142,10 @@ public class ContentStreamService(MessageDbContext dbContext, FieldCipher cipher
             // 連 revalidate 都不做。把 CompletedAt 一起折進去（已在上面同一次投影撈回來，零額外查詢），
             // 順帶也讓還原備份、換資料庫這類情境不會撞快取。
             var etag = $"\"mc-{messageContentId}-{meta.CompletedAt?.UtcTicks ?? 0:x}\"";
-            response.Headers.CacheControl = "private, max-age=31536000, immutable";
+            // 加密啟用時不進瀏覽器磁碟快取：加密的動機通常是個資合規，把解密後的內容長期存在
+            // 每台值班電腦的瀏覽器快取磁碟上，是稽核會問的一條。ETag／304 仍照常運作（那是
+            // 記憶體內的協商快取，不涉及磁碟落地），只是不再允許瀏覽器跨工作階段保留內容本身
+            response.Headers.CacheControl = cipher.Enabled ? "no-store" : "private, max-age=31536000, immutable";
             response.Headers.ETag = etag;
 
             if (MatchesIfNoneMatch(ifNoneMatch, etag))
