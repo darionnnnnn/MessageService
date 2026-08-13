@@ -18,4 +18,9 @@ logs/
 *.db-wal
 *.db.bak-*
 
+## 部署時站台目錄下的實際設定檔，含明文機密（Line ChannelSecret／連線字串／Ingest ApiKey／
+## Encryption Key）——絕不可進版控。版控只放 deploy/ 底下的樣板（appsettings.Production.*.json），
+## 部署時複製樣板改名成這個檔名再填值，見 docs/CONSOLIDATION-PLAN.md 階段5。
+appsettings.Production.json
+
 ## User secrets are stored outside the repo by design; nothing to ignore here.

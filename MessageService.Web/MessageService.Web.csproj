@@ -26,4 +26,12 @@
     <None Update="nlog.config" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- appsettings.Production.json 絕不進版控（見 .gitignore）、也絕不該被 publish 打包進去——
+         它只活在站台目錄，內容含明文機密，理當隨每台主機各自維護。萬一有人在專案資料夾裡
+         放了這個檔案測試（例如想在本機模擬 Production 設定），SDK 預設會把任何符合
+         appsettings*.json 的檔案自動當內容項目打包，這裡明確排除避免不小心把它發布出去。 -->
+    <Content Remove="appsettings.Production.json" />
+  </ItemGroup>
+
 </Project>
