@@ -3,6 +3,7 @@ using System.Net.Http.Json;
 using MessageService.Options;
 using MessageService.Services;
 using MessageService.Tests.TestSupport;
+using Microsoft.Extensions.Logging.Abstractions;
 using OptionsFactory = Microsoft.Extensions.Options.Options;
 
 namespace MessageService.Tests.Services;
@@ -28,7 +29,7 @@ public class HttpIngestSinkTests
     {
         var handler = new FakeHttpMessageHandler(responder);
         var httpClient = new HttpClient(handler) { BaseAddress = new Uri("https://db-host.example/") };
-        var sink = new HttpIngestSink(httpClient, OptionsFactory.Create(new IngestOptions { ApiKey = apiKey }));
+        var sink = new HttpIngestSink(httpClient, OptionsFactory.Create(new IngestOptions { ApiKey = apiKey }), NullLogger<HttpIngestSink>.Instance);
         return (sink, handler);
     }
 
@@ -114,11 +115,134 @@ public class HttpIngestSinkTests
     {
         var handler = new FakeHttpMessageHandler(_ => throw new HttpRequestException("connection refused"));
         var httpClient = new HttpClient(handler) { BaseAddress = new Uri("https://db-host.example/") };
-        var sink = new HttpIngestSink(httpClient, OptionsFactory.Create(new IngestOptions { ApiKey = "key" }));
+        var sink = new HttpIngestSink(httpClient, OptionsFactory.Create(new IngestOptions { ApiKey = "key" }), NullLogger<HttpIngestSink>.Instance);
 
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(
             () => sink.SubmitAsync(SampleEnvelope(), CancellationToken.None));
         Assert.IsNotType<PermanentIngestException>(ex);
         Assert.IsType<HttpRequestException>(ex.InnerException);
+    }
+
+    // === SubmitBatchAsync（問題9） ===
+
+    private static HttpResponseMessage BatchOkWithBody(params IngestBatchItemResult[] results) => new(HttpStatusCode.OK)
+    {
+        Content = JsonContent.Create(results.ToList())
+    };
+
+    [Fact]
+    public async Task SubmitBatchAsync_EmptyList_ReturnsEmptyWithoutSendingRequest()
+    {
+        var (sink, handler) = CreateSink(_ => throw new InvalidOperationException("should not be called"));
+
+        var results = await sink.SubmitBatchAsync([], CancellationToken.None);
+
+        Assert.Empty(results);
+        Assert.Null(handler.LastRequest);
+    }
+
+    [Fact]
+    public async Task SubmitBatchAsync_SendsCorrectPathAndApiKeyHeaderAndWholeListAsBody()
+    {
+        var (sink, handler) = CreateSink(
+            _ => BatchOkWithBody(new IngestBatchItemResult("evt-1", null, false, null)),
+            apiKey: "the-shared-secret");
+
+        await sink.SubmitBatchAsync([SampleEnvelope("evt-1")], CancellationToken.None);
+
+        Assert.NotNull(handler.LastRequest);
+        Assert.Equal("https://db-host.example/api/ingest/events-batch", handler.LastRequest!.RequestUri!.ToString());
+        Assert.Equal(HttpMethod.Post, handler.LastRequest.Method);
+        Assert.Equal("the-shared-secret", handler.LastRequest.Headers.GetValues("X-Ingest-Key").Single());
+    }
+
+    [Fact]
+    public async Task SubmitBatchAsync_2xxResponse_ReturnsResultsFromBody()
+    {
+        var (sink, _) = CreateSink(_ => BatchOkWithBody(
+            new IngestBatchItemResult("evt-1", 42, false, null),
+            new IngestBatchItemResult("evt-2", null, true, "malformed")));
+
+        var results = await sink.SubmitBatchAsync([SampleEnvelope("evt-1"), SampleEnvelope("evt-2")], CancellationToken.None);
+
+        Assert.Equal(2, results.Count);
+        Assert.Equal(42, results[0].ContentId);
+        Assert.False(results[0].PermanentlyRejected);
+        Assert.True(results[1].PermanentlyRejected);
+        Assert.Equal("malformed", results[1].Error);
+    }
+
+    [Fact]
+    public async Task SubmitBatchAsync_400Response_ThrowsPermanentIngestException()
+    {
+        var (sink, _) = CreateSink(_ => new HttpResponseMessage(HttpStatusCode.BadRequest)
+        {
+            Content = new StringContent("invalid batch shape")
+        });
+
+        var ex = await Assert.ThrowsAsync<PermanentIngestException>(
+            () => sink.SubmitBatchAsync([SampleEnvelope()], CancellationToken.None));
+        Assert.Contains("invalid batch shape", ex.Message);
+    }
+
+    [Theory]
+    [InlineData(HttpStatusCode.Unauthorized)]
+    [InlineData(HttpStatusCode.InternalServerError)]
+    public async Task SubmitBatchAsync_OtherErrorStatusCodes_ThrowsRetryableException_NotPermanent(HttpStatusCode statusCode)
+    {
+        var (sink, _) = CreateSink(_ => new HttpResponseMessage(statusCode));
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => sink.SubmitBatchAsync([SampleEnvelope()], CancellationToken.None));
+        Assert.IsNotType<PermanentIngestException>(ex);
+    }
+
+    [Fact]
+    public async Task SubmitBatchAsync_BatchEndpointReturns404_FallsBackToOneByOne()
+    {
+        // 相容性：Edge 新版打到還沒升級的 Core（沒有批次端點）——見 docs/DEPLOYMENT-MODES.md
+        // 「先升 Core 再升 Edge」。退回逐筆模式打既有的單筆端點，一樣能完成整批。
+        var envelopes = new List<IngestEnvelope> { SampleEnvelope("evt-1"), SampleEnvelope("evt-2") };
+        var oneByOneCallCount = 0;
+        var (sink, handler) = CreateSink(request =>
+        {
+            if (request.RequestUri!.AbsolutePath.EndsWith("events-batch"))
+            {
+                return new HttpResponseMessage(HttpStatusCode.NotFound);
+            }
+            oneByOneCallCount++;
+            return OkWithBody(contentId: oneByOneCallCount);
+        });
+
+        var results = await sink.SubmitBatchAsync(envelopes, CancellationToken.None);
+
+        Assert.Equal(2, oneByOneCallCount);
+        Assert.Equal(["evt-1", "evt-2"], results.Select(r => r.WebhookEventId));
+        Assert.All(results, r => Assert.False(r.PermanentlyRejected));
+        Assert.NotNull(handler.LastRequest);
+        Assert.EndsWith("/api/ingest/events", handler.LastRequest!.RequestUri!.ToString());
+    }
+
+    [Fact]
+    public async Task SubmitBatchAsync_FallbackOneByOne_PermanentRejectionForOneItem_OthersStillSucceed()
+    {
+        var envelopes = new List<IngestEnvelope> { SampleEnvelope("evt-good"), SampleEnvelope("evt-bad") };
+        var (sink, _) = CreateSink(request =>
+        {
+            if (request.RequestUri!.AbsolutePath.EndsWith("events-batch"))
+            {
+                return new HttpResponseMessage(HttpStatusCode.NotFound);
+            }
+            var body = request.Content!.ReadAsStringAsync().Result;
+            return body.Contains("evt-bad")
+                ? new HttpResponseMessage(HttpStatusCode.BadRequest) { Content = new StringContent("bad envelope") }
+                : OkWithBody();
+        });
+
+        var results = await sink.SubmitBatchAsync(envelopes, CancellationToken.None);
+
+        Assert.Equal(2, results.Count);
+        Assert.False(results.Single(r => r.WebhookEventId == "evt-good").PermanentlyRejected);
+        Assert.True(results.Single(r => r.WebhookEventId == "evt-bad").PermanentlyRejected);
     }
 }

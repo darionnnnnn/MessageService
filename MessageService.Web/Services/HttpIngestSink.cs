@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.Threading;
 using MessageService.Options;
 using Microsoft.Extensions.Options;
 
@@ -14,9 +15,15 @@ namespace MessageService.Services;
 /// 重試不會變好，判定為永久失敗直接死信；其餘（含 401/403，可能是金鑰設定錯，
 /// 修好設定後重試會成功）與所有 5xx／連線層錯誤一律當暫時性失敗，往外拋讓 outbox
 /// 照退避排程重試。</summary>
-public class HttpIngestSink(HttpClient httpClient, IOptions<IngestOptions> options) : IIngestSink
+public class HttpIngestSink(HttpClient httpClient, IOptions<IngestOptions> options, ILogger<HttpIngestSink> logger) : IIngestSink
 {
     private const string HeaderName = "X-Ingest-Key";
+
+    // 靜態旗標，跨這顆類別所有實例共用——AddHttpClient<TClient,TImplementation> 預設每次
+    // 解析都給新實例，單一欄位存不住「已經印過警告」的狀態。刻意不是「已知 Core 不支援批次」
+    // 的旗標：每次還是照樣先試批次端點，Core 升級後不用重啟 Edge 就會自動改用批次——只是
+    // 避免升級前的過渡期每 5 秒（PollIntervalSeconds）洗一次警告 log。
+    private static int _batchEndpointNotFoundWarned;
 
     public async Task<IngestResult> SubmitAsync(IngestEnvelope envelope, CancellationToken cancellationToken)
     {
@@ -43,6 +50,66 @@ public class HttpIngestSink(HttpClient httpClient, IOptions<IngestOptions> optio
             $"Ingest API returned {(int)response.StatusCode} for webhook event {envelope.WebhookEventId}");
     }
 
+    /// <summary>一次 HTTP 請求送整批，取代逐筆各自一次 RTT（見問題9）。Core 端還沒升級、
+    /// 沒有這支端點時（404）退回逐筆模式，不讓拆機部署被迫同時升級兩端——升級順序建議
+    /// 先升 Core 再升 Edge，見 docs/DEPLOYMENT-MODES.md。</summary>
+    public async Task<IReadOnlyList<IngestBatchItemResult>> SubmitBatchAsync(
+        IReadOnlyList<IngestEnvelope> envelopes, CancellationToken cancellationToken)
+    {
+        if (envelopes.Count == 0)
+        {
+            return [];
+        }
+
+        using var response = await SendBatchAsync(envelopes, cancellationToken);
+
+        if (response.StatusCode == HttpStatusCode.NotFound)
+        {
+            if (Interlocked.CompareExchange(ref _batchEndpointNotFoundWarned, 1, 0) == 0)
+            {
+                logger.LogWarning(
+                    "Core 端 ingest API 找不到批次端點 POST /api/ingest/events-batch（404）——" +
+                    "可能還沒升級，暫時退回逐筆模式（{Count} 筆各自一次 HTTP round-trip）。" +
+                    "升級順序請先升 Core 再升 Edge，見 docs/DEPLOYMENT-MODES.md。",
+                    envelopes.Count);
+            }
+            return await SubmitOneByOneAsync(envelopes, cancellationToken);
+        }
+
+        if (response.IsSuccessStatusCode)
+        {
+            var payload = await response.Content.ReadFromJsonAsync<List<IngestBatchItemResult>>(cancellationToken);
+            return payload ?? [];
+        }
+
+        if (response.StatusCode == HttpStatusCode.BadRequest)
+        {
+            var body = await response.Content.ReadAsStringAsync(cancellationToken);
+            throw new PermanentIngestException($"Ingest API rejected event batch as malformed (400): {body}");
+        }
+
+        throw new InvalidOperationException($"Ingest API returned {(int)response.StatusCode} for event batch of {envelopes.Count} events");
+    }
+
+    private async Task<IReadOnlyList<IngestBatchItemResult>> SubmitOneByOneAsync(
+        IReadOnlyList<IngestEnvelope> envelopes, CancellationToken cancellationToken)
+    {
+        var results = new List<IngestBatchItemResult>(envelopes.Count);
+        foreach (var envelope in envelopes)
+        {
+            try
+            {
+                var result = await SubmitAsync(envelope, cancellationToken);
+                results.Add(new IngestBatchItemResult(envelope.WebhookEventId, result.ContentId, false, null));
+            }
+            catch (PermanentIngestException ex)
+            {
+                results.Add(new IngestBatchItemResult(envelope.WebhookEventId, null, true, ex.Message));
+            }
+        }
+        return results;
+    }
+
     private async Task<HttpResponseMessage> SendAsync(IngestEnvelope envelope, CancellationToken cancellationToken)
     {
         using var request = new HttpRequestMessage(HttpMethod.Post, "api/ingest/events")
@@ -67,6 +134,28 @@ public class HttpIngestSink(HttpClient httpClient, IOptions<IngestOptions> optio
             // 逾時（不是呼叫端主動取消）——httpClient.Timeout 到期時 HttpClient 就是丟這個型別
             throw new InvalidOperationException(
                 $"Ingest API request timed out for webhook event {envelope.WebhookEventId}", ex);
+        }
+    }
+
+    private async Task<HttpResponseMessage> SendBatchAsync(IReadOnlyList<IngestEnvelope> envelopes, CancellationToken cancellationToken)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Post, "api/ingest/events-batch")
+        {
+            Content = JsonContent.Create(envelopes)
+        };
+        request.Headers.TryAddWithoutValidation(HeaderName, options.Value.ApiKey ?? "");
+
+        try
+        {
+            return await httpClient.SendAsync(request, cancellationToken);
+        }
+        catch (HttpRequestException ex)
+        {
+            throw new InvalidOperationException($"Failed to reach ingest API for event batch of {envelopes.Count} events", ex);
+        }
+        catch (TaskCanceledException ex) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new InvalidOperationException($"Ingest API batch request timed out for {envelopes.Count} events", ex);
         }
     }
 }

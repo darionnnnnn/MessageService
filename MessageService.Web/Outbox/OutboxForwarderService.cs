@@ -105,49 +105,104 @@ public class OutboxForwarderService(
             return false;
         }
 
+        // 反序列化本身失敗（不該發生，但防禦性處理）不算落地失敗——payload 壞了重試也不會變好，
+        // 直接死信，不讓這種項目卡進下面的批次呼叫
+        var entriesByWebhookEventId = new Dictionary<string, OutboxEntry>();
+        var envelopes = new List<IngestEnvelope>();
         foreach (var entry in batch)
         {
+            IngestEnvelope envelope;
             try
             {
-                var envelope = JsonSerializer.Deserialize<IngestEnvelope>(entry.PayloadJson)
+                envelope = JsonSerializer.Deserialize<IngestEnvelope>(entry.PayloadJson)
                     ?? throw new InvalidOperationException("Outbox entry payload deserialized to null.");
-
-                var result = await sink.SubmitAsync(envelope, cancellationToken);
-                // 這台主機（不是落地端那台）要不要接手媒體下載／頭貼刷新，見 IngestSideEffects
-                // 說明——在 Full 模式下 sink 是 DirectIngestSink，落地跟這裡是同一台主機；
-                // Line 模式下 sink 是 HttpIngestSink，ContentId 是從遠端 ingest API 的回應帶回來的
-                IngestSideEffects.Apply(envelope, result, downloadQueue, profileRefreshQueue);
-
-                dbContext.Entries.Remove(entry);
-                await dbContext.SaveChangesAsync(cancellationToken);
             }
-            catch (PermanentIngestException ex)
+            catch (Exception ex)
             {
-                // 落地端明確判定「重試也沒用」（例如 ingest API 回 400）——不管累計次數，
-                // 第一次遇到就直接死信，不浪費重試次數也不刷無意義的退避 log
                 entry.Attempts++;
                 entry.LastError = ex.Message;
                 entry.DeadLetteredAt = now;
-                await dbContext.SaveChangesAsync(cancellationToken);
-
                 logger.LogError(ex,
-                    "Outbox entry {Id} (WebhookEventId {WebhookEventId}) permanently rejected by sink, dead-lettering without retry",
+                    "Outbox entry {Id} (WebhookEventId {WebhookEventId}) has an unreadable payload, dead-lettering without retry",
                     entry.Id, entry.WebhookEventId);
+                continue;
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                // 暫時性失敗永遠重試、不死信——短暫斷線與長時間停機都不該讓事件遺失，
-                // 見 OutboxOptions 的說明
-                entry.Attempts++;
-                entry.LastError = ex.Message;
-                entry.NextAttemptAt = now + ComputeBackoff(entry.Attempts);
-                await dbContext.SaveChangesAsync(cancellationToken);
 
-                logger.LogWarning(ex,
-                    "Failed to forward outbox entry {Id} (WebhookEventId {WebhookEventId}), attempt {Attempts}, retrying at {NextAttemptAt}",
-                    entry.Id, entry.WebhookEventId, entry.Attempts, entry.NextAttemptAt);
-            }
+            entriesByWebhookEventId[entry.WebhookEventId] = entry;
+            envelopes.Add(envelope);
         }
+
+        if (envelopes.Count == 0)
+        {
+            await dbContext.SaveChangesAsync(cancellationToken);
+            return true;
+        }
+
+        // 問題9：一次 HTTP 請求送整批，取代逐筆各自一次 RTT——見 IIngestSink.SubmitBatchAsync
+        // 說明。DirectIngestSink（AllInOne／Core）用介面預設實作（順序處理、單筆
+        // PermanentIngestException 只影響那一筆）；HttpIngestSink（Edge）真的一次送整批。
+        IReadOnlyList<IngestBatchItemResult>? results = null;
+        Exception? batchFailure = null;
+        try
+        {
+            results = await sink.SubmitBatchAsync(envelopes, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            batchFailure = ex;
+        }
+
+        if (results is not null)
+        {
+            foreach (var item in results)
+            {
+                if (!entriesByWebhookEventId.TryGetValue(item.WebhookEventId, out var entry))
+                {
+                    continue;
+                }
+
+                if (item.PermanentlyRejected)
+                {
+                    // 落地端明確判定「重試也沒用」（例如 ingest API 回 400）——不管累計次數，
+                    // 第一次遇到就直接死信，不浪費重試次數也不刷無意義的退避 log
+                    entry.Attempts++;
+                    entry.LastError = item.Error;
+                    entry.DeadLetteredAt = now;
+                    logger.LogError(
+                        "Outbox entry {Id} (WebhookEventId {WebhookEventId}) permanently rejected by sink, dead-lettering without retry: {Error}",
+                        entry.Id, entry.WebhookEventId, item.Error);
+                    continue;
+                }
+
+                // 這台主機（不是落地端那台）要不要接手媒體下載／頭貼刷新，見 IngestSideEffects
+                // 說明——在 AllInOne 模式下 sink 是 DirectIngestSink，落地跟這裡是同一台主機；
+                // Edge 模式下 sink 是 HttpIngestSink，ContentId 是從遠端 ingest API 的回應帶回來的
+                var envelope = envelopes.First(e => e.WebhookEventId == item.WebhookEventId);
+                IngestSideEffects.Apply(envelope, new IngestResult(item.ContentId), downloadQueue, profileRefreshQueue);
+
+                dbContext.Entries.Remove(entry);
+            }
+
+            // 批次結果沒提到的項目（SubmitBatchAsync 處理到一半遇到暫時性失敗而整批中止，
+            // 只回傳處理到那筆為止的結果）維持原樣不動——下次整批重試，對已經處理過的
+            // 項目安全（IIngestSink 的冪等保證）
+        }
+        else
+        {
+            // 整批呼叫本身失敗（例如連不上 ingest API）——所有項目都當暫時性失敗處理，
+            // 沿用既有的指數退避；短暫斷線與長時間停機都不該讓事件遺失，見 OutboxOptions 的說明
+            foreach (var entry in entriesByWebhookEventId.Values)
+            {
+                entry.Attempts++;
+                entry.LastError = batchFailure!.Message;
+                entry.NextAttemptAt = now + ComputeBackoff(entry.Attempts);
+            }
+
+            logger.LogWarning(batchFailure,
+                "Failed to forward outbox batch of {Count} entries, retrying at backoff", entriesByWebhookEventId.Count);
+        }
+
+        await dbContext.SaveChangesAsync(cancellationToken);
 
         return true;
     }

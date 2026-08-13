@@ -93,7 +93,7 @@ public class IngestSinkEquivalenceTests : IDisposable
         using var factory = CreateDbModeFactory(_apiDbPath);
 
         var httpClient = factory.CreateClient();
-        var sink = new HttpIngestSink(httpClient, OptionsFactory.Create(new IngestOptions { ApiKey = ApiKey }));
+        var sink = new HttpIngestSink(httpClient, OptionsFactory.Create(new IngestOptions { ApiKey = ApiKey }), NullLogger<HttpIngestSink>.Instance);
 
         await sink.SubmitAsync(envelope, CancellationToken.None);
 
@@ -116,6 +116,48 @@ public class IngestSinkEquivalenceTests : IDisposable
         AssertEquivalent(direct, viaHttp);
         Assert.Null(direct.Content);
         Assert.Null(viaHttp.Content);
+    }
+
+    [Fact]
+    public async Task Batch_DirectDefaultImplAndRealHttpBatchEndpoint_ProduceEquivalentRows()
+    {
+        // 問題9：DirectIngestSink 用 IIngestSink.SubmitBatchAsync 的介面預設實作（逐筆呼叫
+        // SubmitAsync）；HttpIngestSink 真的打 /api/ingest/events-batch 一次送整批，落地端還是
+        // 同一顆 IngestController→DirectIngestSink。兩條路徑的最終結果要完全一致。
+        var envelopes = new List<IngestEnvelope>
+        {
+            Envelope("evt-equiv-batch-1"),
+            Envelope("evt-equiv-batch-2", hasContent: true),
+        };
+
+        var directOptions = new DbContextOptionsBuilder<MessageDbContext>().UseSqlite($"Data Source={_directDbPath}").Options;
+        using (var directDbContext = new MessageDbContext(directOptions))
+        {
+            await directDbContext.Database.EnsureCreatedAsync();
+            // 靜態型別要是介面本身——SubmitBatchAsync 是預設介面方法，只有透過介面型別
+            // 的變數才能呼叫到（透過具體類別的變數呼叫會編譯錯誤，找不到這個成員）
+            IIngestSink directSink = new DirectIngestSink(directDbContext, NullLogger<DirectIngestSink>.Instance);
+            await directSink.SubmitBatchAsync(envelopes, CancellationToken.None);
+        }
+
+        using var factory = CreateDbModeFactory(_apiDbPath);
+        var httpClient = factory.CreateClient();
+        var httpSink = new HttpIngestSink(httpClient, OptionsFactory.Create(new IngestOptions { ApiKey = ApiKey }), NullLogger<HttpIngestSink>.Instance);
+        await httpSink.SubmitBatchAsync(envelopes, CancellationToken.None);
+
+        var directQueryOptions = new DbContextOptionsBuilder<MessageDbContext>().UseSqlite($"Data Source={_directDbPath}").Options;
+        using var directQueryContext = new MessageDbContext(directQueryOptions);
+        using var scope = factory.Services.CreateScope();
+        var apiDbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+
+        foreach (var envelope in envelopes)
+        {
+            var direct = await directQueryContext.GroupMessages.Include(m => m.Content).AsNoTracking()
+                .SingleAsync(m => m.WebhookEventId == envelope.WebhookEventId);
+            var viaHttp = await apiDbContext.GroupMessages.Include(m => m.Content).AsNoTracking()
+                .SingleAsync(m => m.WebhookEventId == envelope.WebhookEventId);
+            AssertEquivalent(direct, viaHttp);
+        }
     }
 
     [Fact]
@@ -156,7 +198,7 @@ public class IngestSinkEquivalenceTests : IDisposable
         // 依賴的保證（見 IIngestSink 介面說明「判定為重複時一樣要回傳既有那筆的 ContentId」）
         using var factory = CreateDbModeFactory(_apiDbPath);
         var httpClient = factory.CreateClient();
-        var httpSink = new HttpIngestSink(httpClient, OptionsFactory.Create(new IngestOptions { ApiKey = ApiKey }));
+        var httpSink = new HttpIngestSink(httpClient, OptionsFactory.Create(new IngestOptions { ApiKey = ApiKey }), NullLogger<HttpIngestSink>.Instance);
 
         var firstHttp = await httpSink.SubmitAsync(envelope, CancellationToken.None);
         var secondHttp = await httpSink.SubmitAsync(envelope, CancellationToken.None);

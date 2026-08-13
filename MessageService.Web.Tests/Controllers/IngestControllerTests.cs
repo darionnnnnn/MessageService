@@ -107,6 +107,79 @@ public class IngestControllerTests
         Assert.Equal(7, Assert.Single(downloadQueue.Enqueued));
     }
 
+    // === POST events-batch（問題9） ===
+
+    private static IngestEnvelope Envelope(string webhookEventId) => SampleEnvelope() with { WebhookEventId = webhookEventId };
+
+    [Fact]
+    public async Task SubmitEventsBatch_EmptyList_ReturnsOkWithEmptyResults()
+    {
+        var controller = CreateController();
+
+        var result = await controller.SubmitEventsBatch([], CancellationToken.None);
+
+        var ok = Assert.IsType<OkObjectResult>(result);
+        Assert.Empty(Assert.IsType<List<IngestBatchItemResult>>(ok.Value));
+    }
+
+    [Fact]
+    public async Task SubmitEventsBatch_AllSucceed_ReturnsResultsForEach()
+    {
+        var sink = new FakeIngestSink();
+        var controller = CreateController(sink: sink);
+        var envelopes = new List<IngestEnvelope> { Envelope("evt-1"), Envelope("evt-2") };
+
+        var result = await controller.SubmitEventsBatch(envelopes, CancellationToken.None);
+
+        var ok = Assert.IsType<OkObjectResult>(result);
+        var results = Assert.IsType<List<IngestBatchItemResult>>(ok.Value);
+        Assert.Equal(["evt-1", "evt-2"], results.Select(r => r.WebhookEventId));
+        Assert.All(results, r => Assert.False(r.PermanentlyRejected));
+        Assert.Equal(["evt-1", "evt-2"], sink.Submitted.Select(e => e.WebhookEventId));
+    }
+
+    [Fact]
+    public async Task SubmitEventsBatch_SinkThrowsTransiently_Returns500()
+    {
+        var sink = new FakeIngestSink { ThrowOnNextSubmit = new InvalidOperationException("db unreachable") };
+        var controller = CreateController(sink: sink);
+
+        var result = await controller.SubmitEventsBatch([Envelope("evt-1")], CancellationToken.None);
+
+        var problem = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(StatusCodes.Status500InternalServerError, problem.StatusCode);
+    }
+
+    [Fact]
+    public async Task SubmitEventsBatch_OneEntryPermanentlyRejected_OthersStillSucceed()
+    {
+        var sink = new FakeIngestSink();
+        sink.ThrowForWebhookEventId["evt-bad"] = new PermanentIngestException("malformed");
+        var controller = CreateController(sink: sink);
+        var envelopes = new List<IngestEnvelope> { Envelope("evt-good-1"), Envelope("evt-bad"), Envelope("evt-good-2") };
+
+        var result = await controller.SubmitEventsBatch(envelopes, CancellationToken.None);
+
+        var ok = Assert.IsType<OkObjectResult>(result);
+        var results = Assert.IsType<List<IngestBatchItemResult>>(ok.Value);
+        Assert.Equal(["evt-good-1", "evt-good-2"], sink.Submitted.Select(e => e.WebhookEventId));
+        var rejected = Assert.Single(results, r => r.PermanentlyRejected);
+        Assert.Equal("evt-bad", rejected.WebhookEventId);
+        Assert.Contains("malformed", rejected.Error);
+    }
+
+    [Fact]
+    public async Task SubmitEventsBatch_SuccessfulItems_EnqueueOnThisHostsOwnQueue()
+    {
+        var sink = new FakeIngestSink { NextContentId = 7 };
+        var downloadQueue = new FakeContentDownloadQueue();
+        var controller = CreateController(sink: sink, downloadQueue: downloadQueue);
+
+        await controller.SubmitEventsBatch([Envelope("evt-1")], CancellationToken.None);
+
+        Assert.Equal(7, Assert.Single(downloadQueue.Enqueued));
+    }
+
     // === content-work ===
 
     [Fact]

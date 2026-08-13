@@ -53,6 +53,47 @@ public class IngestController(
         return Ok(new IngestEventResponse(result.ContentId));
     }
 
+    /// <summary>問題9：Edge 端的 OutboxForwarderService 排空時改打這支端點，一次 HTTP 請求送
+    /// 整批，取代逐筆各自一次 RTT。落地邏輯完全委派給 IIngestSink.SubmitBatchAsync（Core／
+    /// AllInOne 用介面的預設實作，順序處理、單筆 PermanentIngestException 只影響那一筆）——
+    /// 這裡只負責把每筆成功結果轉交給 IngestSideEffects（介面本身不知道 downloadQueue／
+    /// profileRefreshQueue 這些呼叫端才有的東西，見該類別說明）。</summary>
+    [HttpPost("events-batch")]
+    public async Task<IActionResult> SubmitEventsBatch(
+        [FromBody] List<IngestEnvelope> envelopes, CancellationToken cancellationToken)
+    {
+        if (envelopes.Count == 0)
+        {
+            return Ok(new List<IngestBatchItemResult>());
+        }
+
+        IReadOnlyList<IngestBatchItemResult> results;
+        try
+        {
+            results = await sink.SubmitBatchAsync(envelopes, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogError(ex, "Failed to ingest webhook event batch of {Count} events", envelopes.Count);
+            return Problem(statusCode: StatusCodes.Status500InternalServerError);
+        }
+
+        var envelopesByWebhookEventId = envelopes.ToDictionary(e => e.WebhookEventId);
+        foreach (var item in results)
+        {
+            if (item.PermanentlyRejected)
+            {
+                continue;
+            }
+            if (envelopesByWebhookEventId.TryGetValue(item.WebhookEventId, out var envelope))
+            {
+                IngestSideEffects.Apply(envelope, new IngestResult(item.ContentId), downloadQueue, profileRefreshQueue);
+            }
+        }
+
+        return Ok(results);
+    }
+
     // === 媒體下載（Line:OutboundHere=true 時，Line 端的 ApiContentWorkSource 打這幾支） ===
 
     [HttpGet("content-work")]

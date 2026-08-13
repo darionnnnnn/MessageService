@@ -186,20 +186,46 @@ public class OutboxForwarderServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task ProcessBatchAsync_OneEntryThrows_OthersInSameBatchStillProcessed()
+    public async Task ProcessBatchAsync_OneEntryThrowsTransiently_EntireBatchRetriedAtBackoff()
     {
+        // 問題9：批次改一次 HTTP 請求送整批（見 IIngestSink.SubmitBatchAsync），中途遇到暫時性
+        // 失敗（非 PermanentIngestException）視為整批這次沒處理完，不像舊版逐筆各自獨立重試——
+        // 已成功的項目重送是安全的（冪等），下次整批重試即可，不需要逐筆記錄處理到哪
         await SeedEntryAsync(SampleEnvelope("evt-fails"));
         await SeedEntryAsync(SampleEnvelope("evt-ok"));
-        // Dictionary/List 順序取決於 Id 遞增，Id 較小的（先插入的）先跑到；讓先跑到的那個失敗
+        // Dictionary/List 順序取決於 Id 遞增，Id 較小的（先插入的）先跑到；讓先跑到的那個失敗，
+        // 預設的 SubmitBatchAsync 逐筆呼叫在這裡就中止，evt-ok 完全不會被嘗試
         _sink.ThrowOnNextSubmit = new InvalidOperationException("boom");
         var forwarder = CreateForwarder();
 
         await forwarder.ProcessBatchAsync(CancellationToken.None);
 
-        var submitted = Assert.Single(_sink.Submitted);
-        Assert.Equal("evt-ok", submitted.WebhookEventId);
+        Assert.Empty(_sink.Submitted);
+        var remaining = await GetRemainingEntriesAsync();
+        Assert.Equal(2, remaining.Count);
+        Assert.All(remaining, e => Assert.Equal(1, e.Attempts));
+        Assert.All(remaining, e => Assert.NotNull(e.NextAttemptAt));
+    }
+
+    [Fact]
+    public async Task ProcessBatchAsync_MiddleEntryPermanentlyRejected_OthersInBatchStillProcessed()
+    {
+        // PermanentIngestException 不會中止整批（跟暫時性失敗不同，見上一個測試）——
+        // 中間那筆判定死信，前後兩筆照常落地並從 outbox 移除
+        await SeedEntryAsync(SampleEnvelope("evt-before"));
+        await SeedEntryAsync(SampleEnvelope("evt-rejected"));
+        await SeedEntryAsync(SampleEnvelope("evt-after"));
+        _sink.ThrowForWebhookEventId["evt-rejected"] = new PermanentIngestException("malformed payload");
+        var forwarder = CreateForwarder();
+
+        var processedAny = await forwarder.ProcessBatchAsync(CancellationToken.None);
+
+        Assert.True(processedAny);
+        Assert.Equal(["evt-before", "evt-after"], _sink.Submitted.Select(e => e.WebhookEventId));
         var remaining = Assert.Single(await GetRemainingEntriesAsync());
-        Assert.Equal("evt-fails", remaining.WebhookEventId);
+        Assert.Equal("evt-rejected", remaining.WebhookEventId);
+        Assert.NotNull(remaining.DeadLetteredAt);
+        Assert.Contains("malformed payload", remaining.LastError);
     }
 
     [Fact]
