@@ -16,6 +16,11 @@ public class NullContentDownloadQueue : IContentDownloadQueue
         // 刻意什麼都不做
     }
 
+    public void EnqueueDelayed(long messageContentId, TimeSpan delay, CancellationToken cancellationToken)
+    {
+        // 刻意什麼都不做——理論上不會被呼叫（沒有 ContentDownloadService 在跑）
+    }
+
 #pragma warning disable CS1998 // 沒有 await 是刻意的——永遠不產出任何項目
     public async IAsyncEnumerable<long> ReadAllAsync([EnumeratorCancellation] CancellationToken cancellationToken)
     {

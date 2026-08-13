@@ -41,8 +41,13 @@ public class ContentDownloadServiceTests : IDisposable
     }
 
     private ContentDownloadService CreateService(ContentDownloadOptions? options = null) =>
-        new(
-            new FakeContentDownloadQueue(),
+        CreateServiceWithQueue(out _, options);
+
+    private ContentDownloadService CreateServiceWithQueue(out FakeContentDownloadQueue queue, ContentDownloadOptions? options = null)
+    {
+        queue = new FakeContentDownloadQueue();
+        return new ContentDownloadService(
+            queue,
             _provider.GetRequiredService<IServiceScopeFactory>(),
             OptionsFactory.Create(options ?? new ContentDownloadOptions
             {
@@ -52,6 +57,7 @@ public class ContentDownloadServiceTests : IDisposable
                 TranscodingMaxPolls = 5
             }),
             NullLogger<ContentDownloadService>.Instance);
+    }
 
     private async Task<long> SeedPendingContentAsync(string messageType, string lineMessageId = "line-msg-1")
     {
@@ -99,22 +105,85 @@ public class ContentDownloadServiceTests : IDisposable
     [Theory]
     [InlineData("video")]
     [InlineData("audio")]
-    public async Task ProcessAsync_VideoOrAudio_WaitsForTranscodingThenDownloads(string messageType)
+    public async Task ProcessAsync_VideoOrAudio_TranscodingAlreadySucceeded_DownloadsImmediately(string messageType)
     {
         var contentId = await SeedPendingContentAsync(messageType);
-        var callCount = 0;
-        _contentClient.OnGetTranscodingStatus = _ =>
-        {
-            callCount++;
-            return Task.FromResult(callCount < 2 ? TranscodingStatus.Processing : TranscodingStatus.Succeeded);
-        };
+        _contentClient.OnGetTranscodingStatus = _ => Task.FromResult(TranscodingStatus.Succeeded);
 
         var service = CreateService();
         await service.ProcessAsync(contentId, CancellationToken.None);
 
         var content = await ReloadContentAsync(contentId);
         Assert.Equal(DownloadStatus.Completed, content.DownloadStatus);
-        Assert.True(callCount >= 2);
+        Assert.Single(_contentClient.ContentCalls);
+    }
+
+    [Theory]
+    [InlineData("video")]
+    [InlineData("audio")]
+    public async Task ProcessAsync_TranscodingStillProcessing_ReturnsImmediately_EnqueuesDelayedRecheck_DoesNotDownload(string messageType)
+    {
+        // 問題5：查一次就回去服務下一筆，不該在這裡原地睡等——worker 才不會被一支還在轉檔的
+        // 影片卡住，見 ContentDownloadServiceConcurrencyTests 的並發回歸測試
+        var contentId = await SeedPendingContentAsync(messageType);
+        _contentClient.OnGetTranscodingStatus = _ => Task.FromResult(TranscodingStatus.Processing);
+
+        var service = CreateServiceWithQueue(out var queue, new ContentDownloadOptions
+        {
+            TranscodingPollSeconds = 7,
+            TranscodingMaxPolls = 24,
+        });
+        await service.ProcessAsync(contentId, CancellationToken.None);
+
+        var content = await ReloadContentAsync(contentId);
+        Assert.Equal(DownloadStatus.Pending, content.DownloadStatus); // 還沒下載，也還沒 Fail
+        Assert.Empty(_contentClient.ContentCalls);
+        var delayed = Assert.Single(queue.EnqueuedDelayed);
+        Assert.Equal(contentId, delayed.MessageContentId);
+        Assert.Equal(TimeSpan.FromSeconds(7), delayed.Delay);
+        Assert.Single(_contentClient.TranscodingCalls);
+    }
+
+    [Fact]
+    public async Task ProcessAsync_TranscodingStillProcessing_ReachesPollLimit_MarksFailed()
+    {
+        var contentId = await SeedPendingContentAsync("video");
+        _contentClient.OnGetTranscodingStatus = _ => Task.FromResult(TranscodingStatus.Processing);
+        var service = CreateServiceWithQueue(out var queue, new ContentDownloadOptions { TranscodingMaxPolls = 3 });
+
+        // 模擬同一個 messageContentId 被重排回來查詢三次（達到上限），
+        // 直接重複呼叫 ProcessAsync 模擬 EnqueueDelayed 觸發後 worker 再次撿到同一筆
+        for (var i = 0; i < 3; i++)
+        {
+            await service.ProcessAsync(contentId, CancellationToken.None);
+        }
+
+        var content = await ReloadContentAsync(contentId);
+        Assert.Equal(DownloadStatus.Failed, content.DownloadStatus);
+        Assert.Empty(_contentClient.ContentCalls);
+        // 第三次（達到上限）直接判定 Failed，不會再排一次延遲重查
+        Assert.Equal(2, queue.EnqueuedDelayed.Count);
+    }
+
+    [Fact]
+    public async Task ProcessAsync_TranscodingSucceedsAfterPriorStillProcessingCalls_Downloads()
+    {
+        // 同一顆 messageContentId 先被查到 Processing（poll count 累加），下一次 worker
+        // 撿回來查到 Succeeded——驗證 poll 計數本身不影響「轉檔成功就正常下載」這條路徑
+        var contentId = await SeedPendingContentAsync("video");
+        var callCount = 0;
+        _contentClient.OnGetTranscodingStatus = _ =>
+        {
+            callCount++;
+            return Task.FromResult(callCount < 2 ? TranscodingStatus.Processing : TranscodingStatus.Succeeded);
+        };
+        var service = CreateService();
+
+        await service.ProcessAsync(contentId, CancellationToken.None); // Processing
+        await service.ProcessAsync(contentId, CancellationToken.None); // Succeeded → 下載
+
+        var content = await ReloadContentAsync(contentId);
+        Assert.Equal(DownloadStatus.Completed, content.DownloadStatus);
         Assert.Single(_contentClient.ContentCalls);
     }
 

@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using MessageService.Options;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
@@ -13,6 +14,11 @@ public class ContentDownloadService(
     ILogger<ContentDownloadService> logger) : BackgroundService
 {
     private readonly ContentDownloadOptions _options = options.Value;
+
+    /// <summary>每個 messageContentId 目前查了幾次轉檔狀態——單例服務的生命週期內有效，行程
+    /// 重啟會歸零，等同重新給滿額度：重啟後由 RequeuePendingAsync 撈回，語意跟現狀一致，
+    /// 不需要跨重啟持久化。查詢達到 Succeeded／Failed 或門檻上限時務必移除，防止洩漏。</summary>
+    private readonly ConcurrentDictionary<long, int> _transcodingPollCounts = new();
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -101,19 +107,28 @@ public class ContentDownloadService(
         var item = await workSource.GetAsync(messageContentId, cancellationToken);
         if (item is null)
         {
+            _transcodingPollCounts.TryRemove(messageContentId, out _);
             return;
         }
 
         // 影片與語音在 LINE 端都要等轉檔完成才能下載原檔，圖片/檔案不需要
         if (item.MessageType is "video" or "audio")
         {
-            var transcoded = await WaitForTranscodingAsync(contentClient, item.LineMessageId, cancellationToken);
-            if (!transcoded)
+            var outcome = await CheckTranscodingAsync(contentClient, messageContentId, item.LineMessageId, cancellationToken);
+            switch (outcome)
             {
-                logger.LogWarning("Transcoding did not succeed for message {LineMessageId}, marking content {MessageContentId} as Failed",
-                    item.LineMessageId, messageContentId);
-                await workSource.FailAsync(messageContentId, cancellationToken);
-                return;
+                case TranscodingCheckOutcome.StillProcessing:
+                    // 查一次就回去服務佇列裡下一個項目，不要睡在原地等——這支還在轉檔的期間，
+                    // worker 才能繼續處理排在後面的圖片/檔案，見 IContentDownloadQueue.EnqueueDelayed
+                    queue.EnqueueDelayed(messageContentId, TimeSpan.FromSeconds(_options.TranscodingPollSeconds), cancellationToken);
+                    return;
+                case TranscodingCheckOutcome.Failed:
+                    _transcodingPollCounts.TryRemove(messageContentId, out _);
+                    await workSource.FailAsync(messageContentId, cancellationToken);
+                    return;
+                case TranscodingCheckOutcome.Succeeded:
+                    _transcodingPollCounts.TryRemove(messageContentId, out _);
+                    break; // 繼續往下走下載邏輯
             }
         }
 
@@ -173,23 +188,38 @@ public class ContentDownloadService(
         }
     }
 
-    private async Task<bool> WaitForTranscodingAsync(ILineContentClient contentClient, string lineMessageId, CancellationToken cancellationToken)
+    private enum TranscodingCheckOutcome
     {
-        for (var poll = 0; poll < _options.TranscodingMaxPolls; poll++)
-        {
-            var status = await contentClient.GetTranscodingStatusAsync(lineMessageId, cancellationToken);
-            switch (status)
-            {
-                case TranscodingStatus.Succeeded:
-                    return true;
-                case TranscodingStatus.Failed:
-                    return false;
-                default:
-                    await Task.Delay(TimeSpan.FromSeconds(_options.TranscodingPollSeconds), cancellationToken);
-                    break;
-            }
-        }
+        Succeeded,
+        Failed,
+        StillProcessing,
+    }
 
-        return false;
+    /// <summary>只查一次，不在這裡迴圈等待——還在處理中時交給呼叫端用 EnqueueDelayed
+    /// 延遲重排，worker 才能立刻回去服務佇列裡的下一個項目（見類別註解／ProcessAsync）。</summary>
+    private async Task<TranscodingCheckOutcome> CheckTranscodingAsync(
+        ILineContentClient contentClient, long messageContentId, string lineMessageId, CancellationToken cancellationToken)
+    {
+        var status = await contentClient.GetTranscodingStatusAsync(lineMessageId, cancellationToken);
+        switch (status)
+        {
+            case TranscodingStatus.Succeeded:
+                return TranscodingCheckOutcome.Succeeded;
+            case TranscodingStatus.Failed:
+                logger.LogWarning(
+                    "Transcoding failed for message {LineMessageId}, marking content {MessageContentId} as Failed",
+                    lineMessageId, messageContentId);
+                return TranscodingCheckOutcome.Failed;
+            default:
+                var pollCount = _transcodingPollCounts.AddOrUpdate(messageContentId, 1, static (_, count) => count + 1);
+                if (pollCount >= _options.TranscodingMaxPolls)
+                {
+                    logger.LogWarning(
+                        "Transcoding did not succeed for message {LineMessageId} after {MaxPolls} polls, marking content {MessageContentId} as Failed",
+                        lineMessageId, _options.TranscodingMaxPolls, messageContentId);
+                    return TranscodingCheckOutcome.Failed;
+                }
+                return TranscodingCheckOutcome.StillProcessing;
+        }
     }
 }
