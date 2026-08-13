@@ -15,6 +15,25 @@
 
 ---
 
+## 執行進度
+
+- **階段1（專案合併）已完成並 commit**（`801b728`，分支 `feature/deployment-consolidation`）。
+  全 solution 建置 0 警告 0 錯誤，447 測試全綠。
+  實作期間相對本文件原稿的兩個調整：
+  1. **AllowedClientIps 拆分提前到階段1執行**（原規劃放階段2）：規劃階段沒注意到合併成單一
+     `appsettings.json` 後，若檢視端與 ingest 白名單中介層還讀同一個 key，兩種網段完全不同的
+     白名單會被迫共用同一份清單——這在分離部署（Edge+Core 合一）下是真的安全問題，不是
+     「反正還沒到那步」可以延後的瑕疵，所以趁合併中介層順手拆成
+     `Viewer:AllowedClientIps`／`Ingest:AllowedClientIps`。階段2不用再處理這件事。
+  2. **發現一個合併的結構性副作用**：`MapStaticAssets()`／`.WithStaticAssets()` 的靜態資源後援
+     endpoint（`{**path:file}`，只接受 GET/HEAD）合併後與 ingest／webhook 路由共用同一個
+     endpoint routing 表。在 viewerEnabled 的模式下，對「模式排除掉的路由」送出非 GET/HEAD
+     請求（例如 Db 模式 POST `/api/line/webhook`），會被路由層判定為「路徑有東西 match、方法
+     不對」而回 405，不再是純粹的 404。已確認這只影響 webhook 路徑本身（`/api/ingest/*` 有
+     `IngestApiKeyMiddleware` 在金鑰未設定時的顯式 404 短路，不受影響），且 405 與 404
+     對「webhook controller 沒被路由到」這件事的驗證強度等價（都不是 401）。調整了對應測試
+     的斷言並在測試內加註解，未動 pipeline 設計。
+
 ## 零、查證結果對照表（回饋 vs 原始碼）
 
 | # | 回饋主張 | 查證 | 出處 |
