@@ -208,14 +208,18 @@ dotnet user-secrets set "Line:ChannelAccessToken" "<你的 access token>"
 "Viewer": {
   "AllowedClientIps": [ "127.0.0.1", "::1", "10.1.0.0/24" ]  // 支援單一 IP 與 CIDR 網段
 },
-"UseForwardedHeaders": false  // 部署在反向代理（IIS/nginx）後面時才需要開啟
+"UseForwardedHeaders": false,  // 部署在反向代理（IIS/nginx）後面時才需要開啟
+"ForwardedHeaders": {
+  "KnownProxies": [ "10.0.0.5" ],       // 反向代理本身的 IP（單一位址）
+  "KnownNetworks": [ "10.0.0.0/24" ]    // 或反向代理所在的網段（CIDR，主機位元須全為 0）
+}
 ```
 
 放行與拒絕的來源 IP 都會記 NLog。若部署在反向代理後面卻沒開 `UseForwardedHeaders`，中介層看到的會是代理的 IP 而非真實來源，白名單會失效——這是最容易忘記的坑。
 
 **部署預設值**：檢視端預設部署在 **IIS in-process 託管模式**，此模式下 ASP.NET Core Module 直接跑在 IIS 工作處理序內、沒有經過 Kestrel 反向代理這一層，`Connection.RemoteIpAddress` 拿到的就是真實來源 IP，**不需要開 `UseForwardedHeaders`**（也不應該開，開了反而會信任錯誤的標頭來源）。
 
-只有在 IIS 前面又疊了一層獨立反向代理（例如 nginx、雲端負載平衡器，或改用 out-of-process 託管模式）時才需要開 `UseForwardedHeaders`；此時**務必同時設定 ASP.NET Core `ForwardedHeadersOptions.KnownProxies`/`KnownNetworks`**——預設只信任 loopback，不設定的話中介層會直接忽略上游代理送來的 `X-Forwarded-For`，等同白開關。本輪僅補上這段說明，實際的 `KnownProxies` 設定與程式碼串接留待有真實反向代理部署需求時再做。
+只有在 IIS 前面又疊了一層獨立反向代理（例如 nginx、雲端負載平衡器，或改用 out-of-process 託管模式）時才需要開 `UseForwardedHeaders`；此時**務必同時設定 `ForwardedHeaders:KnownProxies` 或 `ForwardedHeaders:KnownNetworks` 其中一項**——ASP.NET Core 預設只信任 loopback，不設定的話中介層會直接忽略上游代理送來的 `X-Forwarded-For`，等同白開關（開啟卻兩者皆空時啟動會記一則警告提醒這件事）。`KnownProxies` 填反向代理本身的單一 IP；`KnownNetworks` 填反向代理所在的 CIDR 網段（跟 `Viewer:AllowedClientIps` 一樣要求主機位元全為 0，解析失敗會直接擋啟動）。
 
 ### 資料庫存取
 
@@ -227,7 +231,7 @@ dotnet user-secrets set "Line:ChannelAccessToken" "<你的 access token>"
 |---|---|
 | `Database:Provider` / `ConnectionStrings:*` | 與其他直連資料庫的主機指向同一顆資料庫 |
 | `Viewer:AllowedClientIps` | IP 白名單，見上 |
-| `UseForwardedHeaders` | 反向代理後方時開啟；IIS in-process（預設部署方式）不要開，見上 |
+| `UseForwardedHeaders` / `ForwardedHeaders:KnownProxies` / `KnownNetworks` | 反向代理後方時開啟並設定其中一項；IIS in-process（預設部署方式）不要開，見上 |
 | `Encryption:Enabled` / `Key` / `SearchWindowDays` | **所有直連資料庫的主機必須完全一致**，否則訊息會顯示成 `ENC1:` 密文、媒體一律回 404，見 [docs/ENCRYPTION.md](docs/ENCRYPTION.md) |
 
 ---

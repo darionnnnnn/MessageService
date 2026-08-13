@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     把 IIS 應用程式集區設成「一直開著」，避免背景服務（保留期清除／outbox 排空／
     媒體下載／頭貼刷新）被閒置逾時或固定間隔回收殺掉——這幾個是 BackgroundService，
@@ -54,9 +54,15 @@ Set-ItemProperty -Path $poolPath -Name "processModel.idleTimeout" -Value ([TimeS
 # 回收當下如果剛好在下載大檔案或跑保留期清除，會被腰斬重來
 Set-ItemProperty -Path $poolPath -Name "recycling.periodicRestart.time" -Value ([TimeSpan]::Zero)
 
+# 關閉重疊回收：即使其他原因觸發回收（設定變更、記憶體上限），IIS 預設仍會在新舊兩個
+# worker process 重疊執行的那段期間同時跑兩份 OutboxForwarderService／ContentDownloadService。
+# 落地端冪等所以不會產生髒資料，但會重複下載媒體、也會放大 migration mutex 的競爭視窗
+Set-ItemProperty -Path $poolPath -Name "recycling.disallowOverlappingRotation" -Value $true
+
 Write-Host "  startMode = AlwaysRunning" -ForegroundColor Green
 Write-Host "  processModel.idleTimeout = 0（關閉閒置回收）" -ForegroundColor Green
 Write-Host "  recycling.periodicRestart.time = 0（關閉固定間隔回收）" -ForegroundColor Green
+Write-Host "  recycling.disallowOverlappingRotation = true（關閉重疊回收）" -ForegroundColor Green
 
 if ($SiteName) {
     $sitePath = "IIS:\Sites\$SiteName"
@@ -76,10 +82,14 @@ try {
     Import-Module ServerManager -ErrorAction Stop
     $feature = Get-WindowsFeature -Name Web-AppInit -ErrorAction Stop
     if ($feature -and -not $feature.Installed) {
-        Write-Warning "尚未安裝 IIS 的 Application Initialization 角色服務（Web-AppInit）——" +
+        # 字串必須先組好再傳給 Write-Warning——PowerShell 5.1 會把「"字串" + "字串"」解析成
+        # 多個位置參數而不是字串串接運算，直接傳會丟參數繫結錯誤；這段包在外層 try/catch 裡，
+        # 錯誤被 Write-Verbose 那個 catch 悄悄吞掉，導致這則警告一直印不出來
+        $appInitWarning = "尚未安裝 IIS 的 Application Initialization 角色服務（Web-AppInit）——" +
             "preloadEnabled 不會真正生效，集區仍會等第一個請求才啟動應用程式。" +
             "可用「Install-WindowsFeature Web-AppInit」安裝，或透過『新增角色及功能』精靈勾選" +
             "『應用程式初始設定』。"
+        Write-Warning $appInitWarning
     }
 }
 catch {
