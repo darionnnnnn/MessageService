@@ -207,8 +207,11 @@ public class MessageSearchTests : IDisposable
     }
 
     [Fact]
-    public async Task GetMessages_AroundId_ReturnsWindowCenteredOnAnchor()
+    public async Task GetMessages_AroundId_ReturnsWindowCenteredOnAnchor_IgnoringDaysParam()
     {
+        // 問題6修正後 aroundId 改成純粹依 Id 兩側各查一次，不再套用 days 天數視窗——
+        // 時間上很久遠的訊息只要 Id 落在半窗額度內一樣會回傳，跟 days 參數無關
+        // （這點跟 afterId 分頁本來就不套用 days 一致，見 GetMessages 的分支邏輯）
         var now = DateTimeOffset.UtcNow;
         long anchorId = 0;
         await _fixture.SeedAsync(async dbContext =>
@@ -225,7 +228,7 @@ public class MessageSearchTests : IDisposable
 
         var page = await _fixture.Client.GetFromJsonAsync<MessagesPageDto>($"/api/groups/G1/messages?aroundId={anchorId}&days=3");
 
-        Assert.Equal(["before-anchor", "anchor", "after-anchor"], page!.Messages.Select(m => m.Text));
+        Assert.Equal(["too-old", "before-anchor", "anchor", "after-anchor", "too-new"], page!.Messages.Select(m => m.Text));
         Assert.Null(page.LatestId);
     }
 
