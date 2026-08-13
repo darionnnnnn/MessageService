@@ -163,6 +163,40 @@ public class DeploymentModeTests : IDisposable
     }
 
     [Fact]
+    public async Task ViewerMode_IngestPath_DoesNotExist_AndIsNotGatedByIngestAllowlist()
+    {
+        // 階段7體檢輪抓到的真 bug：ingest 中介層（白名單＋金鑰）掛載條件原本只看
+        // HasDatabaseAccess，Viewer 也在這個能力集合裡，但 Viewer 結構上永遠不會有 ingest
+        // 路由（IngestApiEnabled 的推導式排除了 Viewer，不像 AllInOne/Core 是「看有沒有設金鑰」）。
+        // 修正前：Viewer 主機會在啟動時印出「Ingest:AllowedClientIps is empty」的誤導性 Warning
+        // （ingest 對 Viewer 根本不相關），命中 /api/ingest/* 也是被空白名單擋成 403，而不是
+        // 「路由真的不存在」該有的 404/405——這裡刻意不設 Ingest:AllowedClientIps
+        // （allowLocalhost:false）也不設 Ingest:ApiKey，確認中介層完全沒有掛載
+        using var factory = CreateFactory(builder =>
+        {
+            builder.UseSetting("Deployment:Mode", "Viewer");
+            builder.UseSetting("ConnectionStrings:Sqlite", $"Data Source={_dbPath}");
+            builder.UseSetting("ConnectionStrings:Outbox", $"Data Source={_outboxPath}");
+            builder.UseSetting("Viewer:AllowedClientIps:0", "127.0.0.1");
+            // 故意只讓「檢視端」看起來是從允許的來源打進來，Ingest:AllowedClientIps 保持完全
+            // 沒設定——如果 ingest 中介層還是掛著，空白名單只會把請求擋成 403；要證明它根本
+            // 沒掛載，就不能靠 ingest 白名單本身放行
+            builder.ConfigureServices(services =>
+                services.AddSingleton<IStartupFilter>(new FakeRemoteIpStartupFilter(IPAddress.Parse("127.0.0.1"))));
+        }, allowLocalhost: false);
+        using var client = factory.CreateClient();
+
+        var groupsResponse = await client.GetAsync("/api/groups");
+        var ingestResponse = await client.PostAsJsonAsync("/api/ingest/events-batch", new { events = Array.Empty<object>() });
+
+        Assert.Equal(HttpStatusCode.OK, groupsResponse.StatusCode);
+        Assert.NotEqual(HttpStatusCode.Forbidden, ingestResponse.StatusCode);
+        Assert.True(
+            ingestResponse.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.MethodNotAllowed,
+            $"預期 404 或 405（ingest 路由與中介層在 Viewer 模式下都不該存在），實際是 {ingestResponse.StatusCode}");
+    }
+
+    [Fact]
     public void LineMode_WithoutIngestConfig_FailsToStart()
     {
         using var factory = CreateFactory(builder =>

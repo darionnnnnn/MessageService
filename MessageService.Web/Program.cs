@@ -342,11 +342,15 @@ if (capabilities.ViewerEnabled)
 app.UseMiddleware<CancelledRequestMiddleware>();
 
 // ingest API 的守門只掛在 /api/ingest 路徑，不影響 LINE webhook 端點（webhook 靠簽章驗證，
-// 兩者是完全獨立的防護層）。只在 HasDatabaseAccess（IngestController 可能存在的模式）
-// 才註冊，不是更窄的 IngestApiEnabled——維持掛著才能讓 IngestApiKeyMiddleware 在金鑰未設定時
-// 顯式回 404（見該類別），沒有金鑰時如果連中介層都不掛，請求會落到端點路由的靜態資源
-// 後援上，對非 GET/HEAD 方法回應 405 而不是 404，行為不一致
-if (capabilities.HasDatabaseAccess)
+// 兩者是完全獨立的防護層）。掛載條件用 HasDatabaseAccess 而非更窄的 IngestApiEnabled，
+// 是為了讓 AllInOne／Core 在沒設 Ingest:ApiKey 時，IngestApiKeyMiddleware 能顯式回 404
+// （見該類別）——沒有金鑰時如果連中介層都不掛，請求會落到端點路由的靜態資源後援上，
+// 對非 GET/HEAD 方法回應 405 而不是 404，行為不一致。但 Viewer 模式排除在外：
+// IngestApiEnabled 的推導式排除了 Viewer（見 DeploymentCapabilities），不像 AllInOne／Core
+// 是「看有沒有設金鑰」才決定，Viewer 是結構上永遠不會有 ingest 路由——掛這層中介層對它
+// 只有壞處：白名單空清單的啟動 Warning 對 Viewer 主機是誤導（ingest 根本用不到），
+// 命中 /api/ingest/* 回的 403 也只是白名單擋下的假象，不是「路由真的不存在」該有的 404/405
+if (capabilities.HasDatabaseAccess && deploymentMode is not DeploymentMode.Viewer)
 {
     app.UseWhen(
         context => context.Request.Path.StartsWithSegments("/api/ingest"),

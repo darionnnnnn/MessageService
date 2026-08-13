@@ -17,6 +17,51 @@
 
 ## 執行進度
 
+- **階段7（全案體檢輪）已完成並 commit**，分支 `feature/deployment-consolidation`。
+  494 測試全綠（較階段6新增 1 個：Viewer 模式 ingest 閘門守門測試）。
+  - **全測試綠**：既有 493 全過，無回歸。
+  - **雙行程實測（Edge＋Core，真的起兩個 `dotnet` 行程互打，非 in-memory TestServer）**：
+    Edge（`ASPNETCORE_URLS=http://localhost:5302`）收簽章驗證過的模擬 LINE webhook →
+    outbox → `OutboxForwarderService` 真的以背景服務身分打 HTTP 到 Core
+    （`http://localhost:5301`）的 `/api/ingest/events-batch` → `DirectIngestSink` 落地 →
+    Core 的檢視端 API 讀回同一筆訊息，side 欄 `LastMessageId`/`LastMessageAt`
+    （階段4a）正確更新。同時驗證 Core 不暴露 webhook（405，屬階段1已知並接受的
+    405/404 等價結構性瑕疵）、Edge 不暴露檢視端／ingest（404）、ingest API 金鑰與
+    IP 白名單正確擋下未授權請求。
+  - **三台拓撲實測（Edge＋Core[`Viewer:Enabled=false`]＋Viewer，共用同一顆 SQLite 檔）**：
+    Viewer 主機正確讀到 Core 寫入的資料（多行程共用同一檔案的讀取路徑驗證），
+    Core 關掉檢視端後路由正確消失。**這一輪抓到一個真 bug**：Viewer 模式主機的
+    ingest 中介層（IP 白名單＋金鑰）沿用階段2「掛載條件用 `HasDatabaseAccess`
+    而非 `IngestApiEnabled`」的決定，但 Viewer 在 `HasDatabaseAccess` 集合裡卻永遠
+    不可能有 `IngestApiEnabled`（結構性排除，不像 AllInOne／Core 取決於有沒有設金鑰）
+    ——後果是每一台 Viewer 主機啟動都會印出誤導性的
+    `Ingest:AllowedClientIps is empty` 警告（ingest 對 Viewer 根本不相關），命中
+    `/api/ingest/*` 也回誤導性的 403（白名單擋下）而不是「路由真的不存在」該有的
+    404/405。修正：`Program.cs` 的 ingest 中介層掛載條件加上
+    `deploymentMode is not DeploymentMode.Viewer`，保留 AllInOne／Core 原本的
+    404-vs-405 一致性理由不變。新增整合測試
+    `DeploymentModeTests.ViewerMode_IngestPath_DoesNotExist_AndIsNotGatedByIngestAllowlist`
+    把關（原本完全沒有 Viewer 模式的即時 host 整合測試覆蓋這塊，只有純函式層級的
+    `DeploymentCapabilitiesTests`）。
+  - **SQLite 升級實測（真實 AllInOne 行程，非單元測試呼叫 `EnsureBaseline`）**：用
+    `EnsureCreated()` 建出目前完整模型再手動砍掉三批較晚欄位／表（複用
+    `LegacySqliteBaselinerTests` 的既有手法）模擬舊檔，指向這顆檔案啟動 AllInOne
+    行程，觀察到 log 正確印出「偵測到既有 SQLite 檔案沒有 migrations 歷史紀錄，
+    開始一次性橋接」→「橋接完成，交給 Database.Migrate() 收尾」，舊訊息完整保留；
+    送一則簽章驗證過的貼圖 webhook（`stickerId`/`packageId`），確認新欄位真的能用
+    （問題3的兩個缺漏——StickerId/PackageId 與 AnonymousIdentities——在升級後的
+    真實資料庫上都驗證：貼圖訊息正確帶出 `stickerId`，`avatarIcon` 由
+    `AnonymousIdentities` 正確指派，不是只靠單元測試斷言 schema 相等）。
+  - **IIS 實機測試：未執行**——這一步需要在真的 Windows Server 上安裝並設定 IIS
+    應用程式集區（`Set-AppPool.ps1`），屬於系統服務／集區設定變更，不在自動化
+    工具可以自行執行的範圍內（即使取得授權也一樣，這類系統設定變更定義上排除在
+    自動可執行動作外）。請依 `docs/DEPLOYMENT-GUIDE.md` 的 Part D／H 章節在目標主機上
+    手動跑一次，包含驗收清單的「隔天早上確認 log 出現 Retention cleanup」哨兵。
+  - **平行審查**：pipeline 順序、模式閘門完整性（本輪的即時多行程測試即是逐模式枚舉
+    存活 endpoint 的實作方式，非紙上審查）、Baseliner 與兩套 migrations 的 schema
+    等價性（既有 `EnsureBaseline_ThenMigrate_ProducesSameSchemaAsFreshMigrate` 測試
+    把關，本輪額外用真實行程再驗證一次功能面）。
+
 - **階段6（文件收尾）已完成並 commit**，分支 `feature/deployment-consolidation`。純文件異動，
   不影響程式碼，493 測試維持全綠。
   - `DEPLOYMENT-GUIDE.md`／`DEPLOYMENT-MODES.md`：依規劃全面改寫（單一成品流程、四模式
