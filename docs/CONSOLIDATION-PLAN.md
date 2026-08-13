@@ -17,6 +17,23 @@
 
 ## 執行進度
 
+- **階段6（文件收尾）已完成並 commit**，分支 `feature/deployment-consolidation`。純文件異動，
+  不影響程式碼，493 測試維持全綠。
+  - `DEPLOYMENT-GUIDE.md`／`DEPLOYMENT-MODES.md`：依規劃全面改寫（單一成品流程、四模式
+    `appsettings.Production.json` 樣板複製表、集區指令稿、能力矩陣、設定 key 升級對照表、
+    批次 ingest 端點與升級順序、擴充後的驗收清單與疑難排解表）。
+  - `README.md`：專案結構樹、收錄／檢視段落、設定表、資料庫初始化段（改寫為
+    Migrate()＋Baseliner 敘述）、測試段兩則覆蓋率描述，均改用針對性 `Edit`（非全面改寫）
+    ——已用 Grep 確認無殘留的 `MessageDbSchemaUpgrader`／「手動刪除」／
+    `MessageService.Tests` 舊稱呼。
+  - `ENCRYPTION.md`：把「收錄端與檢視端 appsettings.json 必須完全一樣」的兩專案舊框架，
+    改成「每一台直連資料庫的主機（AllInOne／Core／Viewer）`Encryption:Key` 必須逐字一致」；
+    拆機例外段與部署檢查清單同步改用 Edge/Core/AllInOne/Viewer 新名，並把清單第 5 點的
+    「透過環境變數或密鑰管理服務覆蓋」改成呼應階段5設計的「直接寫在各主機的
+    `appsettings.Production.json`，本身就不進版控」。
+  - 本規劃檔的「已定案」戳記與本節逐階段記錄即是階段6第5項要求的「完成戳記與實際 commit
+    對照」，隨這次 commit 一併補上。
+
 - **階段4（效能與行為修正，問題4/5/6/9）已全部完成並 commit**，分支
   `feature/deployment-consolidation`，拆成四個子 commit（4a~4d）。全 solution 建置
   0 警告 0 錯誤，最終 493 測試全綠（較階段3新增 29 個）。

@@ -1,38 +1,43 @@
 # MessageService
 
-LINE 群組訊息收錄與檢視系統，兩個獨立部署的 ASP.NET Core 專案共用同一顆資料庫：
+LINE 群組訊息收錄與檢視系統，單一 ASP.NET Core 專案，依部署模式決定角色：
 
-- **MessageService**（收錄端）：LINE bot webhook，收訊息、下載媒體、每日清除逾期資料。只寫不查。
-- **MessageService.Web**（檢視端）：唯讀網頁，把收錄到的對話用類似 LINE 聊天視窗的介面呈現，並提供關鍵字/名稱遮蔽設定。
+- **收錄**：LINE bot webhook，收訊息、下載媒體、每日清除逾期資料。
+- **檢視**：唯讀網頁，把收錄到的對話用類似 LINE 聊天視窗的介面呈現，並提供關鍵字/名稱遮蔽設定。
+
+兩者可以是同一台主機（單機部署，一次收齊），也可以拆成兩三台各自負責一部分——同一份程式碼、
+同一份發佈成品，角色只是設定差異，見 [docs/DEPLOYMENT-MODES.md](docs/DEPLOYMENT-MODES.md)。
 
 ```
 MessageService.sln
-├── MessageService/          # 收錄端（webhook + 背景服務）
-├── MessageService.Data/     # 共用：實體、DbContext、EF Core migrations
-├── MessageService.Web/      # 檢視端（MVC + API + 前端）
-├── MessageService.Tests/
-└── MessageService.Web.Tests/
+├── MessageService.Data/       # 共用：實體、DbContext、EF Core migrations（Sqlite／SqlServer 各一套）
+├── MessageService.Web/        # 唯一的可發佈專案：webhook + 背景服務 + MVC + API + 前端
+└── MessageService.Web.Tests/  # 唯一的測試專案
 ```
+
+> 2026-08-13 之前這是兩個各自發佈的專案（`MessageService` 收錄端＋`MessageService.Web`
+> 檢視端），部署收斂輪合併成一個，理由與過程見
+> [docs/CONSOLIDATION-PLAN.md](docs/CONSOLIDATION-PLAN.md)。
 
 **其他文件**：[docs/DEPLOYMENT-GUIDE.md](docs/DEPLOYMENT-GUIDE.md)（從零上線的部署操作手冊：IIS、SQL Server／SQLite、LINE 設定，第一次接觸本專案的人從這份開始）、
 [docs/LINE-BOT-SETUP.md](docs/LINE-BOT-SETUP.md)（建立 Bot 與串接的逐步操作、疑難排解）、
 [docs/WEB-UI-DESIGN-NOTES.md](docs/WEB-UI-DESIGN-NOTES.md)（檢視端歷次改版的設計決策理由與放棄的替代方案）、
-[docs/DEPLOYMENT-MODES.md](docs/DEPLOYMENT-MODES.md)（收錄端三種部署模式：架構、設定、決策理由、目前進度）、
+[docs/DEPLOYMENT-MODES.md](docs/DEPLOYMENT-MODES.md)（四種部署角色：架構、設定、決策理由、目前進度）、
 [docs/ENCRYPTION.md](docs/ENCRYPTION.md)（應用層欄位加密：範圍、金鑰設定、搜尋限制）。
 
 ---
 
-## MessageService（收錄端）
+## 收錄
 
-bot 加入群組後，透過 LINE webhook 接收群組內的訊息並寫入資料庫。職責只有三件事：**收 webhook → 落地資料庫 → 每日清除逾期資料**，不提供查詢 API。
+bot 加入群組後，透過 LINE webhook 接收群組內的訊息並寫入資料庫。職責只有三件事：**收 webhook → 落地資料庫 → 每日清除逾期資料**。
 
-支援三種部署模式（`Deployment:Mode`：`Full`／`Line`／`Db`），因應收 webhook 的主機未必碰得到
-資料庫的情況；預設 `Full` 就是下面這張圖。三種模式**功能完全對等**（訊息收送、媒體下載、
-頭貼快取皆已用真實雙行程端到端驗證過，差別只在資料流經過幾台機器），媒體下載與頭貼快取
-獨立於模式、只看 `Line:OutboundHere` 這台主機要不要對外連 LINE，
+支援四種部署角色（`Deployment:Mode`：`AllInOne`／`Edge`／`Core`／`Viewer`），因應收 webhook 的
+主機未必碰得到資料庫的情況；預設 `AllInOne` 就是下面這張圖。四種角色**功能完全對等**
+（訊息收送、媒體下載、頭貼快取皆已用真實雙行程端到端驗證過，差別只在資料流經過幾台機器），
+媒體下載與頭貼快取獨立於模式、只看 `Line:OutboundHere` 這台主機要不要對外連 LINE，
 詳見 [docs/DEPLOYMENT-MODES.md](docs/DEPLOYMENT-MODES.md)。
 
-### 架構（`Full` 模式）
+### 架構（`AllInOne` 模式）
 
 ```
 LINE Platform ──POST──▶ LineWebhookController
@@ -75,14 +80,17 @@ RetentionCleanupService（每日固定時間讀取檢視端設定頁存的保留
 
 | 設定鍵 | 說明 |
 |---|---|
-| `Deployment:Mode` | `Full`（預設）／`Line`／`Db`，見 [docs/DEPLOYMENT-MODES.md](docs/DEPLOYMENT-MODES.md) |
-| `Database:Provider` | `SqlServer`（正式，appsettings.json 預設）或 `Sqlite`（開發，appsettings.Development.json 預設） |
+| `Deployment:Mode` | `AllInOne`（預設）／`Edge`／`Core`／`Viewer`（舊名 `Full`／`Line`／`Db` 相容），見 [docs/DEPLOYMENT-MODES.md](docs/DEPLOYMENT-MODES.md) |
+| `Database:Provider` | `Sqlite`（預設）或 `SqlServer` |
 | `ConnectionStrings:SqlServer` / `Sqlite` | 連線字串 |
 | `ConnectionStrings:Outbox` | 本機 outbox 的 SQLite 檔，預設 `Data Source=outbox.db` |
-| `Line:ChannelSecret` | 簽章驗證用。**勿進版控**，開發用 user-secrets、正式用環境變數 |
+| `Database:AutoMigrate` | 啟動時是否自動跑 `Database.Migrate()`，預設 `true` |
+| `Line:ChannelSecret` | 簽章驗證用。**勿進版控**，開發用 user-secrets、正式用站台目錄下不進版控的 `appsettings.Production.json` |
 | `Line:ChannelAccessToken` | 內容下載與 profile API 用，同上 |
-| `Line:OutboundHere` | 這台要不要對外呼叫 LINE API（預設 `true`＝`Full` 模式恆用），見 [docs/DEPLOYMENT-MODES.md](docs/DEPLOYMENT-MODES.md) |
-| `Ingest:BaseUrl` / `Ingest:ApiKey` | `Line`／`Db` 模式拆機用，`Full` 模式不需要 |
+| `Line:OutboundHere` | `bool?`，這台要不要對外呼叫 LINE API（未設定時依模式推導），見 [docs/DEPLOYMENT-MODES.md](docs/DEPLOYMENT-MODES.md) |
+| `Viewer:Enabled` | `bool?`，這台要不要開檢視端（未設定時依模式推導），三台拓撲用 |
+| `Viewer:AllowedClientIps` | 檢視端頁面／API 的 IP 白名單，空白名單視為全拒 |
+| `Ingest:BaseUrl` / `Ingest:ApiKey` | `Edge`／`Core` 拆機用，`AllInOne` 模式不需要 |
 | `Outbox:PollIntervalSeconds` / `BatchSize` | outbox 排空節奏，預設 5／50 |
 | `Outbox:BaseRetryDelaySeconds` / `MaxRetryDelaySeconds` | 指數退避（第 N 次失敗延遲 Base×2^(N-1)，封頂 Max），預設 5／300。暫時性失敗永遠重試、沒有死信門檻——只有 `PermanentIngestException`（如 ingest API 判定 payload 格式不合）第一次遇到就直接死信 |
 | `Retention:CleanupTimeOfDay` | 每日清除時間（本地時間，預設 03:00:00）。**保留天數本身不在這裡**——已搬進檢視端設定頁（`ViewerSettings.RetentionDays`，預設 1095 天＝3 年），`RetentionCleanupService` 每次執行時讀 DB |
@@ -116,9 +124,9 @@ dotnet user-secrets set "Line:ChannelAccessToken" "<你的 access token>"
 
 ---
 
-## MessageService.Web（檢視端）
+## 檢視
 
-唯讀網頁，值班/維運人員用來瀏覽 LINE 群組對話。除了讀取訊息，**設定會寫入自己的設定資料**（遮蔽規則、名稱顯示模式、別名），這是本專案唯一會寫資料庫的地方。
+唯讀網頁，值班/維運人員用來瀏覽 LINE 群組對話。除了讀取訊息，**設定會寫入自己的設定資料**（遮蔽規則、名稱顯示模式、別名），這是收錄以外唯一會寫資料庫的地方。
 
 ### 頁面與 API
 
@@ -264,18 +272,34 @@ dotnet user-secrets set "Line:ChannelAccessToken" "<你的 access token>"
 
 ## 資料庫初始化
 
-Migrations 統一放在 `MessageService.Data`，用 `MessageService` 當 startup project：
+Migrations 放在 `MessageService.Data`，**每個 provider 一套獨立的 migrations 集合**
+（`Data/Migrations/Sqlite/`、`Data/Migrations/SqlServer/`）——`MessageDbContext` 有兩個空殼
+衍生類別 `SqliteMessageDbContext`／`SqlServerMessageDbContext`，純粹讓 EF 的 migrations 工具
+能區分兩套集合，模型建構邏輯完全共用不重複。
 
-- **SQLite（開發）**：**只有收錄端**啟動時會 `EnsureCreated()` 建表（`MessageService/Program.cs`），檢視端完全不建 schema、假設收錄端已經建好。**注意**：`EnsureCreated()` 只在資料庫檔案完全不存在時依目前模型建表，對已存在的 SQLite 檔案不會補新表/新欄位——加了新表（例如 `AnonymousIdentities`）後，既有的本機 `messages.db` 要手動刪除讓它重建，或改走 migration。收錄端另外會在 `EnsureCreated()` 之後執行 `MessageDbSchemaUpgrader.EnsureSchema()`，用 `ALTER TABLE`/`CREATE INDEX IF NOT EXISTS` 的方式把既有 SQLite 檔案追加同步到最新欄位/索引（不需要整檔重建）；**這支只掛在收錄端啟動流程**，只跑檢視端（不啟動收錄端）的舊 `messages.db` 檔案不會被升級，直接連線會因缺欄位噴 SQL 錯誤。
+程式啟動時（`Database:AutoMigrate` 預設 `true`）自動呼叫 `Database.Migrate()`，兩個 provider
+都適用，不需要手動跑指令：
 
-  > **升級順序（SQLite 環境的部署約束，不只是本機開發的注意事項）**：一定要**先重啟收錄端、再重啟檢視端**。反過來的話，檢視端會連上還沒補欄位的 `messages.db`，而 `ViewerSettings` 的新欄位是每個訊息／群組／設定請求都會讀到的——結果不是漸進劣化，是對話頁、側欄、搜尋、設定全部 500，直到有人想起要去把收錄端重啟一次。SQL Server 環境同理：忘了跑 `dotnet ef database update` 就會是同樣的結果。
-- **SQL Server（正式）**：
+- **既有的 SQLite 檔案**（`EnsureCreated()` 時代建立、沒有 migrations 歷史的舊 `messages.db`）：
+  `LegacySqliteBaseliner` 會偵測到「有資料表但沒有 `__EFMigrationsHistory`」，一次性補齊
+  幾批分屬不同時期新增、只跑過部分手動 schema 升級的欄位／表（含 `StickerId`／`PackageId`／
+  `AnonymousIdentities`），再標記為已套用到 baseline，之後 `Database.Migrate()`
+  接手處理更新的 migrations——**既有部署升級不需要手動刪檔重建**。
+- **全新的 SQLite 檔案**：`Database.Migrate()` 直接從頭建表。
+- **SQL Server**：正式環境若不想在伺服器上安裝 SDK 執行 `dotnet ef`，把 `AutoMigrate` 留
+  預設值 `true` 讓應用程式自己跑；想手動控制的話：
 
-```bash
-ASPNETCORE_ENVIRONMENT=Production dotnet ef database update --project MessageService.Data --startup-project MessageService
-```
+  ```bash
+  ASPNETCORE_ENVIRONMENT=Production dotnet ef database update --project MessageService.Data --context SqlServerMessageDbContext --startup-project MessageService.Web
+  ```
 
-> 注意：`dotnet ef` 指令預設會讀 `MessageService/Properties/launchSettings.json` 的 `ASPNETCORE_ENVIRONMENT=Development`，套到 SQLite 設定。操作 SQL Server migration（`migrations add`/`database update`）時必須顯式指定 `ASPNETCORE_ENVIRONMENT=Production`，否則會產生 SQLite 語法的 migration。
+多實例（同機多站台，或未來多 worker）同時啟動時，`Database.Migrate()` 前會取一個具名
+mutex，避免兩邊同時建 `__EFMigrationsHistory` 互相打架。
+
+> 改了 `MessageDbContext` 的模型之後，要對**兩個 provider 都**跑
+> `dotnet ef migrations add <Name> --context SqliteMessageDbContext` 與
+> `--context SqlServerMessageDbContext`——`MessageDbMigrationsConsistencyTests` 會在只改了
+> 一邊時紅燈提醒，不用等到真的部署到某個 provider 才發現漏了一邊。
 
 ## 設計決策備忘
 
@@ -308,7 +332,10 @@ ASPNETCORE_ENVIRONMENT=Production dotnet ef database update --project MessageSer
 dotnet test
 ```
 
-- `MessageService.Tests`：webhook 事件解析（五種型別分流含 audio、過濾規則）、outbox 落地（`DirectIngestSink` 的防重送——`WebhookEventId` 唯一索引、撞鍵與暫時性儲存失敗以回查分辨〔前者當重複成功、後者拋回 outbox 重試不掉訊息〕、change tracker 不污染同批後續、各型別存檔行為、重複情境也正確回傳既有 ContentId）、outbox 排空（到期判斷、批次上限、指數退避與封頂、單筆失敗不影響同批其他筆、暫時性失敗永遠重試不死信、僅 `PermanentIngestException` 立即死信且死信項目不再被撿起、成功後依 IngestSideEffects 決定要不要入列本機佇列、每小時死信計數記錄）、outbox schema 升級（既有 outbox.db 補欄位不動既有資料、啟用 WAL、新舊 schema 皆冪等）、部署模式（convention 單元行為＋真實 host 整合驗證：三模式路由閘門、Line／Db 啟動驗證缺漏擋下、OutboundHere 與 ChannelAccessToken 的啟動驗證、ingest API 認證〔缺金鑰 404／錯金鑰 401／IP 不在白名單 403／正確金鑰經真實 DirectIngestSink 寫入並確認去重〕、content-work 與 profiles 端點的真實 HTTP 生命週期）、`HttpIngestSink`（狀態碼分流：2xx 成功並解析回應帶出 ContentId、400 永久失敗、其餘與連線層錯誤皆可重試）、`IContentWorkSource`／`IProfileStore` 兩套實作、Null 佇列（入列後 ReadAllAsync 永不產出）、`IngestSideEffects`（依 ContentId 有無決定要不要入列、Null 佇列搭配無錯誤）、**兩套 IIngestSink 落地路徑的等價性測試**（同一 envelope 分別走 DirectIngestSink 與 HttpIngestSink→真實 Db 模式 host，斷言產生的 GroupMessages／MessageContents 完全相同，含重複送出時兩邊都回傳同一個 ContentId）、背景下載（成功/轉檔輪詢/轉檔失敗/重試耗盡/啟動接續/**多 worker 並行下載**〔gate 機制證明同時有多筆在下載〕/**Failed 重試視窗**〔超過 `FailedRetryWindowDays` 或 `MaxFailedRetries` 不再撿回〕）、`LineContentClient`（狀態碼分流、失敗時不洩漏連線；**「不預先緩衝整包內容」這件事本身沒有被測試釘住**——測試用的假 handler 回的是已經 buffer 完的內容，同樣的斷言在舊實作下也會通過）、`DbContentWorkSource`（SQLite 的 `zeroblob`/`SqliteBlob` 分塊寫入路徑、寫入長度與宣稱長度不符時拒絕標成 Completed；**SQL Server 的串流寫入路徑目前沒有自動化測試覆蓋**——測試一律跑 SQLite，那條路要靠實機驗證）、群組/成員名稱快取（新增/過期更新/API 失敗 fallback/失敗冷卻期內不重複呼叫）、保留期清除（DB 讀取保留天數、分批刪除、含 CASCADE 驗證）、`MessageDbSchemaUpgrader`（既有 SQLite 檔案追加欄位/索引冪等）、Controller 整合測試（401/200/畸形 body 仍 200 但 outbox 寫入失敗回 500、webhook 經真實 outbox＋背景排空落地資料庫）、加密（`FieldCipher` 整值加解密/`ENC1:` 前綴/舊明文混讀、`ChunkedBlobCipher`/`ChunkedEncryptingStream` 分塊格式與邊界情況、`MessageDbContext` 不同 `FieldCipher` 狀態間的模型快取隔離）
-- `MessageService.Web.Tests`：Groups/Messages API（分頁游標、hasMore、空視窗仍回 latestId、沉寂期長於視窗仍能翻頁、遮蔽套用、視窗上限 500 筆與 `Truncated` 旗標、側欄未讀數〔依 `?read=` 基準計數、上限 100、畸形參數容錯、未帶參數為 0〕）、訊息搜尋（文字/名稱各自 50 筆配額獨立生效）、內容串流（200/206/304/416/malformed Range、無 Range 直讀、XSS 白名單 MIME 判定、RFC5987 檔名編碼、ETag 產生與 `If-None-Match` 命中）、Settings API（CRUD、群組範圍替換、單列設定被刪後補建、保留天數驗證範圍、PII 遮蔽開關讀寫）、`/api/users`（Anonymous 模式回代號不觸發新指派、其他模式回真實姓名）、`MaskingService`/`MaskingRuleSet`（含名稱遮蔽邊界情況、四種台灣個資 regex 含 CJK 緊鄰英數字元的真實場景）、IP 白名單 middleware（允許/拒絕/空白名單/CIDR）、加密端到端（開啟加密後整個請求生命週期的文字與 blob 加解密、Range 請求跨分塊邊界）
+只有一個測試專案 `MessageService.Web.Tests`（2026-08-13 部署收斂輪合併前是
+`MessageService.Tests`＋`MessageService.Web.Tests` 兩個），依原本各自的職責分兩段列：
+
+- **收錄相關**：webhook 事件解析（五種型別分流含 audio、過濾規則）、outbox 落地（`DirectIngestSink` 的防重送——`WebhookEventId` 唯一索引、撞鍵與暫時性儲存失敗以回查分辨〔前者當重複成功、後者拋回 outbox 重試不掉訊息〕、change tracker 不污染同批後續、各型別存檔行為、重複情境也正確回傳既有 ContentId、側欄 Groups.LastMessageId／LastMessageAt 追蹤）、outbox 批次排空（到期判斷、批次上限、指數退避與封頂、批次中途暫時性失敗整批重試、僅 `PermanentIngestException` 那一筆立即死信其餘照常、成功後依 IngestSideEffects 決定要不要入列本機佇列、每小時死信計數記錄）、outbox schema 升級（既有 outbox.db 補欄位不動既有資料、啟用 WAL、新舊 schema 皆冪等）、部署角色（能力推導單元測試＋真實 host 整合驗證：四種角色的路由閘門、Edge／Core 啟動驗證缺漏擋下、OutboundHere 與 ChannelAccessToken 的啟動驗證、ingest API 認證〔缺金鑰 404／錯金鑰 401／IP 不在白名單 403／正確金鑰經真實 DirectIngestSink 寫入並確認去重〕、content-work 與 profiles 端點的真實 HTTP 生命週期、批次端點）、`HttpIngestSink`（狀態碼分流：2xx 成功並解析回應帶出 ContentId、400 永久失敗、其餘與連線層錯誤皆可重試；批次端點 404 時自動退回逐筆模式）、`IContentWorkSource`／`IProfileStore` 兩套實作、Null 佇列（入列後 ReadAllAsync 永不產出）、`IngestSideEffects`（依 ContentId 有無決定要不要入列、Null 佇列搭配無錯誤）、**兩套 IIngestSink 落地路徑的等價性測試**（同一批 envelope 分別走 DirectIngestSink 與 HttpIngestSink→真實 Core 模式 host，斷言產生的 GroupMessages／MessageContents 完全相同，含重複送出時兩邊都回傳同一個 ContentId、批次落地路徑也逐欄位比對）、背景下載（成功/轉檔延遲重排/轉檔輪詢上限/重試耗盡/啟動接續/**多 worker 並行下載**〔gate 機制證明同時有多筆在下載〕/**轉檔中的影片不擋住排在後面的圖片**〔並發回歸測試〕/**Failed 重試視窗**〔超過 `FailedRetryWindowDays` 或 `MaxFailedRetries` 不再撿回〕）、`LineContentClient`（狀態碼分流、失敗時不洩漏連線）、`DbContentWorkSource`（SQLite 的 `zeroblob`/`SqliteBlob` 分塊寫入路徑、寫入長度與宣稱長度不符時拒絕標成 Completed）、群組/成員名稱快取（新增/過期更新/API 失敗 fallback/失敗冷卻期內不重複呼叫）、保留期清除（DB 讀取保留天數、分批刪除、含 CASCADE 驗證、清除後重算 Groups 側欄指標）、`LegacySqliteBaseliner`（既有 SQLite 檔案橋接到 migrations baseline，含「橋接後 Migrate() 跟全新 Migrate() 逐欄位等價」的關鍵測試）、兩個 provider 的 migrations 一致性守門測試、Controller 整合測試（401/200/畸形 body 仍 200 但 outbox 寫入失敗回 500、webhook 經真實 outbox＋背景排空落地資料庫）、加密（`FieldCipher` 整值加解密/`ENC1:` 前綴/舊明文混讀、`ChunkedBlobCipher`/`ChunkedEncryptingStream` 分塊格式與邊界情況、`MessageDbContext` 不同 `FieldCipher` 狀態間的模型快取隔離）
+- **檢視相關**：Groups/Messages API（分頁游標、hasMore、空視窗仍回 latestId、沉寂期長於視窗仍能翻頁、遮蔽套用、視窗上限 500 筆與 `Truncated` 旗標、`aroundId` 雙段查詢〔錨點在群組最舊訊息時另一側不借用未用完額度、兩側都不足半窗不截斷〕、側欄未讀數〔依 `?read=` 基準計數、上限 100、畸形參數容錯、未帶參數為 0〕、側欄 Groups 指標漂移回退並順手修正）、訊息搜尋（文字/名稱各自 50 筆配額獨立生效）、內容串流（200/206/304/416/malformed Range、無 Range 直讀、XSS 白名單 MIME 判定、RFC5987 檔名編碼、ETag 產生與 `If-None-Match` 命中）、Settings API（CRUD、群組範圍替換、單列設定被刪後補建、保留天數驗證範圍、PII 遮蔽開關讀寫）、`/api/users`（Anonymous 模式回代號不觸發新指派、其他模式回真實姓名）、`MaskingService`/`MaskingRuleSet`（含名稱遮蔽邊界情況、四種台灣個資 regex 含 CJK 緊鄰英數字元的真實場景）、IP 白名單 middleware（允許/拒絕/空白名單/CIDR，檢視端與 ingest 端各自獨立設定）、加密端到端（開啟加密後整個請求生命週期的文字與 blob 加解密、Range 請求跨分塊邊界）
 
 測試都使用 SQLite（in-memory 或暫存檔），Web 端整合測試用 `IStartupFilter` 在 TestServer 補一個固定來源 IP（TestServer 的請求沒有真正 TCP 連線，`Connection.RemoteIpAddress` 預設是 null）。
