@@ -1,0 +1,399 @@
+using MessageService.Options;
+using MessageService.Outbox;
+using MessageService.Services;
+using MessageService.Tests.TestSupport;
+using Microsoft.Data.Sqlite;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging.Abstractions;
+using OptionsFactory = Microsoft.Extensions.Options.Options;
+
+namespace MessageService.Tests.Outbox;
+
+public class OutboxForwarderServiceTests : IDisposable
+{
+    private readonly SqliteConnection _connection;
+    private readonly ServiceProvider _provider;
+    private readonly FakeIngestSink _sink = new();
+    private readonly FakeContentDownloadQueue _downloadQueue = new();
+    private readonly FakeProfileRefreshQueue _profileRefreshQueue = new();
+
+    public OutboxForwarderServiceTests()
+    {
+        _connection = SqliteTestDatabase.CreateOpenConnection();
+
+        var services = new ServiceCollection();
+        services.AddDbContext<OutboxDbContext>(o => o.UseSqlite(_connection));
+        services.AddSingleton<IIngestSink>(_sink);
+        _provider = services.BuildServiceProvider();
+
+        using var scope = _provider.CreateScope();
+        scope.ServiceProvider.GetRequiredService<OutboxDbContext>().Database.EnsureCreated();
+    }
+
+    public void Dispose()
+    {
+        _provider.Dispose();
+        _connection.Dispose();
+    }
+
+    private OutboxForwarderService CreateForwarder(OutboxOptions? options = null) =>
+        new(
+            _provider.GetRequiredService<IServiceScopeFactory>(),
+            new FakeOutboxSignal(),
+            _downloadQueue,
+            _profileRefreshQueue,
+            OptionsFactory.Create(options ?? new OutboxOptions
+            {
+                BatchSize = 50,
+                BaseRetryDelaySeconds = 5,
+                MaxRetryDelaySeconds = 300
+            }),
+            NullLogger<OutboxForwarderService>.Instance);
+
+    private static IngestEnvelope SampleEnvelope(string webhookEventId = "evt-1") => new(
+        WebhookEventId: webhookEventId,
+        LineMessageId: "m1",
+        GroupId: "G1",
+        UserId: "U1",
+        MessageType: "text",
+        Text: "hello",
+        StickerId: null,
+        PackageId: null,
+        EventTimestamp: DateTimeOffset.FromUnixTimeMilliseconds(1700000000000),
+        ReceivedAt: DateTimeOffset.UtcNow,
+        HasContent: false,
+        ContentFileName: null);
+
+    private async Task<OutboxEntry> SeedEntryAsync(IngestEnvelope? envelope = null, DateTimeOffset? nextAttemptAt = null, int attempts = 0)
+    {
+        using var scope = _provider.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<OutboxDbContext>();
+
+        var entry = new OutboxEntry
+        {
+            WebhookEventId = (envelope ?? SampleEnvelope()).WebhookEventId,
+            PayloadJson = System.Text.Json.JsonSerializer.Serialize(envelope ?? SampleEnvelope()),
+            CreatedAt = DateTimeOffset.UtcNow,
+            NextAttemptAt = nextAttemptAt,
+            Attempts = attempts
+        };
+        dbContext.Entries.Add(entry);
+        await dbContext.SaveChangesAsync();
+        return entry;
+    }
+
+    private async Task<List<OutboxEntry>> GetRemainingEntriesAsync()
+    {
+        using var scope = _provider.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<OutboxDbContext>();
+        return await dbContext.Entries.ToListAsync();
+    }
+
+    [Fact]
+    public async Task ProcessBatchAsync_EmptyOutbox_ReturnsFalse()
+    {
+        var forwarder = CreateForwarder();
+
+        var processedAny = await forwarder.ProcessBatchAsync(CancellationToken.None);
+
+        Assert.False(processedAny);
+    }
+
+    [Fact]
+    public async Task ProcessBatchAsync_DueEntry_SubmitsToSinkAndRemovesFromOutbox()
+    {
+        await SeedEntryAsync(SampleEnvelope("evt-1"));
+        var forwarder = CreateForwarder();
+
+        var processedAny = await forwarder.ProcessBatchAsync(CancellationToken.None);
+
+        Assert.True(processedAny);
+        var submitted = Assert.Single(_sink.Submitted);
+        Assert.Equal("evt-1", submitted.WebhookEventId);
+        Assert.Empty(await GetRemainingEntriesAsync());
+    }
+
+    [Fact]
+    public async Task ProcessBatchAsync_SinkReturnsContentId_EnqueuesLocalDownload()
+    {
+        // Stage 3：forwarder 拿到 IngestResult 後要用「這台主機自己的」佇列呼叫
+        // IngestSideEffects——這是拆機模式下 Line 端知道要下載哪筆媒體的唯一管道
+        _sink.NextContentId = 99;
+        await SeedEntryAsync(SampleEnvelope("evt-media"));
+        var forwarder = CreateForwarder();
+
+        await forwarder.ProcessBatchAsync(CancellationToken.None);
+
+        Assert.Equal(99, Assert.Single(_downloadQueue.Enqueued));
+    }
+
+    [Fact]
+    public async Task ProcessBatchAsync_TextMessage_DoesNotEnqueueDownloadButEnqueuesProfileRefresh()
+    {
+        await SeedEntryAsync(SampleEnvelope("evt-text"));
+        var forwarder = CreateForwarder();
+
+        await forwarder.ProcessBatchAsync(CancellationToken.None);
+
+        Assert.Empty(_downloadQueue.Enqueued);
+        var task = Assert.Single(_profileRefreshQueue.Enqueued);
+        Assert.Equal("G1", task.GroupId); // SampleEnvelope 的預設 GroupId
+    }
+
+    [Fact]
+    public async Task ProcessBatchAsync_SinkThrows_KeepsEntryAndSchedulesRetry()
+    {
+        await SeedEntryAsync(SampleEnvelope("evt-1"));
+        _sink.ThrowOnNextSubmit = new InvalidOperationException("backend unreachable");
+        var forwarder = CreateForwarder(new OutboxOptions { BatchSize = 50, BaseRetryDelaySeconds = 5, MaxRetryDelaySeconds = 300 });
+
+        var before = DateTimeOffset.UtcNow;
+        var processedAny = await forwarder.ProcessBatchAsync(CancellationToken.None);
+
+        Assert.True(processedAny); // 有嘗試處理，即使失敗——"processedAny" 代表這輪不是空手而回
+        Assert.Empty(_sink.Submitted);
+        var remaining = Assert.Single(await GetRemainingEntriesAsync());
+        Assert.Equal(1, remaining.Attempts);
+        Assert.NotNull(remaining.NextAttemptAt);
+        Assert.True(remaining.NextAttemptAt > before, "重試時間應該被排到未來，不是立刻可再處理");
+        Assert.Contains("backend unreachable", remaining.LastError);
+    }
+
+    [Fact]
+    public async Task ProcessBatchAsync_EntryNotYetDue_IsNotPickedUp()
+    {
+        await SeedEntryAsync(SampleEnvelope("evt-1"), nextAttemptAt: DateTimeOffset.UtcNow.AddMinutes(10));
+        var forwarder = CreateForwarder();
+
+        var processedAny = await forwarder.ProcessBatchAsync(CancellationToken.None);
+
+        Assert.False(processedAny);
+        Assert.Empty(_sink.Submitted);
+        Assert.Single(await GetRemainingEntriesAsync());
+    }
+
+    [Fact]
+    public async Task ProcessBatchAsync_EntryPastDue_IsPickedUp()
+    {
+        await SeedEntryAsync(SampleEnvelope("evt-1"), nextAttemptAt: DateTimeOffset.UtcNow.AddSeconds(-1), attempts: 2);
+        var forwarder = CreateForwarder();
+
+        var processedAny = await forwarder.ProcessBatchAsync(CancellationToken.None);
+
+        Assert.True(processedAny);
+        Assert.Single(_sink.Submitted);
+    }
+
+    [Fact]
+    public async Task ProcessBatchAsync_OneEntryThrowsTransiently_EntireBatchRetriedAtBackoff()
+    {
+        // 問題9：批次改一次 HTTP 請求送整批（見 IIngestSink.SubmitBatchAsync），中途遇到暫時性
+        // 失敗（非 PermanentIngestException）視為整批這次沒處理完，不像舊版逐筆各自獨立重試——
+        // 已成功的項目重送是安全的（冪等），下次整批重試即可，不需要逐筆記錄處理到哪
+        await SeedEntryAsync(SampleEnvelope("evt-fails"));
+        await SeedEntryAsync(SampleEnvelope("evt-ok"));
+        // Dictionary/List 順序取決於 Id 遞增，Id 較小的（先插入的）先跑到；讓先跑到的那個失敗，
+        // 預設的 SubmitBatchAsync 逐筆呼叫在這裡就中止，evt-ok 完全不會被嘗試
+        _sink.ThrowOnNextSubmit = new InvalidOperationException("boom");
+        var forwarder = CreateForwarder();
+
+        await forwarder.ProcessBatchAsync(CancellationToken.None);
+
+        Assert.Empty(_sink.Submitted);
+        var remaining = await GetRemainingEntriesAsync();
+        Assert.Equal(2, remaining.Count);
+        Assert.All(remaining, e => Assert.Equal(1, e.Attempts));
+        Assert.All(remaining, e => Assert.NotNull(e.NextAttemptAt));
+    }
+
+    [Fact]
+    public async Task ProcessBatchAsync_EntryMissingFromBatchResponse_GetsBackoff_NotImmediateRerun()
+    {
+        // 對端行為異常的防禦：批次回應沒提到某個項目時（現有兩套 sink 實作都不會這樣，
+        // 走到這裡代表對端有 bug），該項目必須照退避排程——「原樣不動」的話 NextAttemptAt
+        // 沒推進，ProcessBatchAsync 又回報有處理到東西，ExecuteAsync 會立刻重跑同一批，
+        // 變成無退避的熱迴圈
+        await SeedEntryAsync(SampleEnvelope("evt-mentioned"));
+        await SeedEntryAsync(SampleEnvelope("evt-forgotten"));
+        _sink.BatchResultsOverride = [new IngestBatchItemResult("evt-mentioned", null, false, null)];
+        var forwarder = CreateForwarder();
+
+        await forwarder.ProcessBatchAsync(CancellationToken.None);
+
+        var remaining = Assert.Single(await GetRemainingEntriesAsync());
+        Assert.Equal("evt-forgotten", remaining.WebhookEventId);
+        Assert.Equal(1, remaining.Attempts);
+        Assert.NotNull(remaining.NextAttemptAt);
+        Assert.True(remaining.NextAttemptAt > DateTimeOffset.UtcNow);
+    }
+
+    [Fact]
+    public async Task ProcessBatchAsync_MiddleEntryPermanentlyRejected_OthersInBatchStillProcessed()
+    {
+        // PermanentIngestException 不會中止整批（跟暫時性失敗不同，見上一個測試）——
+        // 中間那筆判定死信，前後兩筆照常落地並從 outbox 移除
+        await SeedEntryAsync(SampleEnvelope("evt-before"));
+        await SeedEntryAsync(SampleEnvelope("evt-rejected"));
+        await SeedEntryAsync(SampleEnvelope("evt-after"));
+        _sink.ThrowForWebhookEventId["evt-rejected"] = new PermanentIngestException("malformed payload");
+        var forwarder = CreateForwarder();
+
+        var processedAny = await forwarder.ProcessBatchAsync(CancellationToken.None);
+
+        Assert.True(processedAny);
+        Assert.Equal(["evt-before", "evt-after"], _sink.Submitted.Select(e => e.WebhookEventId));
+        var remaining = Assert.Single(await GetRemainingEntriesAsync());
+        Assert.Equal("evt-rejected", remaining.WebhookEventId);
+        Assert.NotNull(remaining.DeadLetteredAt);
+        Assert.Contains("malformed payload", remaining.LastError);
+    }
+
+    [Fact]
+    public async Task ProcessBatchAsync_RespectsBatchSize()
+    {
+        for (var i = 0; i < 5; i++)
+        {
+            await SeedEntryAsync(SampleEnvelope($"evt-{i}"));
+        }
+        var forwarder = CreateForwarder(new OutboxOptions { BatchSize = 2, BaseRetryDelaySeconds = 5, MaxRetryDelaySeconds = 300 });
+
+        var processedAny = await forwarder.ProcessBatchAsync(CancellationToken.None);
+
+        Assert.True(processedAny);
+        Assert.Equal(2, _sink.Submitted.Count);
+        Assert.Equal(3, (await GetRemainingEntriesAsync()).Count);
+    }
+
+    [Fact]
+    public async Task ProcessBatchAsync_RetryDelay_IsCappedAtMax()
+    {
+        // 第 100 次嘗試：BaseRetryDelaySeconds(5) × 2^99 遠超過 MaxRetryDelaySeconds(300)，應該封頂。
+        // 暫時性失敗永遠重試（見 OutboxOptions 說明），這裡要測的純粹是退避時間的封頂算法
+        await SeedEntryAsync(SampleEnvelope("evt-1"), attempts: 99);
+        _sink.ThrowOnNextSubmit = new InvalidOperationException("still down");
+        var forwarder = CreateForwarder(new OutboxOptions
+        {
+            BatchSize = 50, BaseRetryDelaySeconds = 5, MaxRetryDelaySeconds = 300
+        });
+
+        var before = DateTimeOffset.UtcNow;
+        await forwarder.ProcessBatchAsync(CancellationToken.None);
+
+        var remaining = Assert.Single(await GetRemainingEntriesAsync());
+        var delay = remaining.NextAttemptAt!.Value - before;
+        Assert.True(delay.TotalSeconds <= 300 + 2, $"延遲應該被封頂在約 300 秒，實際 {delay.TotalSeconds}");
+    }
+
+    [Fact]
+    public async Task ProcessBatchAsync_RetryDelay_GrowsExponentially()
+    {
+        // 第 3 次嘗試：BaseRetryDelaySeconds(5) × 2^(3-1) = 20 秒，遠低於封頂值，驗證真的是指數成長
+        // 而不是線性成長（線性算法會給 15 秒，指數給 20 秒）
+        await SeedEntryAsync(SampleEnvelope("evt-1"), attempts: 2);
+        _sink.ThrowOnNextSubmit = new InvalidOperationException("still down");
+        var forwarder = CreateForwarder(new OutboxOptions
+        {
+            BatchSize = 50, BaseRetryDelaySeconds = 5, MaxRetryDelaySeconds = 300
+        });
+
+        var before = DateTimeOffset.UtcNow;
+        await forwarder.ProcessBatchAsync(CancellationToken.None);
+
+        var remaining = Assert.Single(await GetRemainingEntriesAsync());
+        var delay = remaining.NextAttemptAt!.Value - before;
+        Assert.InRange(delay.TotalSeconds, 18, 22);
+    }
+
+    // ==== 死信：HTTP 帶進了 Stage 1 沒有的永久性失敗（例如 400＝payload 格式不合，
+    // 重試一萬次也一樣），這組測試釘住「不再無限重試」與「不能刪除資料」兩個要求 ====
+
+    [Fact]
+    public async Task ProcessBatchAsync_SinkThrowsPermanentIngestException_DeadLettersImmediately_RegardlessOfAttemptCount()
+    {
+        // attempts=0（第一次遇到）就要死信，不等到 MaxAttempts——重試不會讓格式錯誤的 payload 變合法
+        await SeedEntryAsync(SampleEnvelope("evt-permanent"));
+        _sink.ThrowOnNextSubmit = new PermanentIngestException("malformed payload");
+        var forwarder = CreateForwarder();
+
+        var before = DateTimeOffset.UtcNow;
+        var processedAny = await forwarder.ProcessBatchAsync(CancellationToken.None);
+
+        Assert.True(processedAny);
+        Assert.Empty(_sink.Submitted);
+        // 仍在 outbox 裡（不刪除資料），但已標記死信——訊息還在，只是不再自動重試
+        var remaining = Assert.Single(await GetRemainingEntriesAsync());
+        Assert.NotNull(remaining.DeadLetteredAt);
+        Assert.True(remaining.DeadLetteredAt >= before);
+        Assert.Null(remaining.NextAttemptAt);
+        Assert.Contains("malformed payload", remaining.LastError);
+    }
+
+    [Fact]
+    public async Task ProcessBatchAsync_TransientFailure_AlwaysSchedulesRetry_NeverDeadLetters()
+    {
+        // 決策：暫時性失敗永遠重試，不再有 MaxAttempts 門檻——即使已經失敗了很多次
+        // （模擬長時間停機後持續重試），也只會排下一次重試，不會被標記死信
+        await SeedEntryAsync(SampleEnvelope("evt-persistent"), attempts: 500);
+        _sink.ThrowOnNextSubmit = new InvalidOperationException("still down");
+        var forwarder = CreateForwarder();
+
+        await forwarder.ProcessBatchAsync(CancellationToken.None);
+
+        var remaining = Assert.Single(await GetRemainingEntriesAsync());
+        Assert.Equal(501, remaining.Attempts);
+        Assert.Null(remaining.DeadLetteredAt);
+        Assert.NotNull(remaining.NextAttemptAt);
+    }
+
+    [Fact]
+    public async Task ProcessBatchAsync_DeadLetteredEntry_NeverPickedUpAgain()
+    {
+        var entry = await SeedEntryAsync(SampleEnvelope("evt-dead"), nextAttemptAt: DateTimeOffset.UtcNow.AddSeconds(-1));
+        using (var scope = _provider.CreateScope())
+        {
+            var dbContext = scope.ServiceProvider.GetRequiredService<OutboxDbContext>();
+            var tracked = await dbContext.Entries.SingleAsync(e => e.Id == entry.Id);
+            tracked.DeadLetteredAt = DateTimeOffset.UtcNow.AddMinutes(-1);
+            await dbContext.SaveChangesAsync();
+        }
+        var forwarder = CreateForwarder();
+
+        var processedAny = await forwarder.ProcessBatchAsync(CancellationToken.None);
+
+        Assert.False(processedAny);
+        Assert.Empty(_sink.Submitted);
+        Assert.Single(await GetRemainingEntriesAsync()); // 還在（沒被刪），但沒被送去 sink
+    }
+
+    // ==== 死信計數檢查：搬進 forwarder 迴圈每小時報一次，不再只在啟動時報一次 ====
+
+    [Fact]
+    public async Task LogDeadLetterCountAsync_NoDeadLetters_DoesNotThrow()
+    {
+        await SeedEntryAsync(SampleEnvelope("evt-1"));
+        var forwarder = CreateForwarder();
+
+        var ex = await Record.ExceptionAsync(() => forwarder.LogDeadLetterCountAsync(CancellationToken.None));
+
+        Assert.Null(ex);
+    }
+
+    [Fact]
+    public async Task LogDeadLetterCountAsync_HasDeadLetters_DoesNotThrow()
+    {
+        var entry = await SeedEntryAsync(SampleEnvelope("evt-dead"));
+        using (var scope = _provider.CreateScope())
+        {
+            var dbContext = scope.ServiceProvider.GetRequiredService<OutboxDbContext>();
+            var tracked = await dbContext.Entries.SingleAsync(e => e.Id == entry.Id);
+            tracked.DeadLetteredAt = DateTimeOffset.UtcNow;
+            await dbContext.SaveChangesAsync();
+        }
+        var forwarder = CreateForwarder();
+
+        var ex = await Record.ExceptionAsync(() => forwarder.LogDeadLetterCountAsync(CancellationToken.None));
+
+        Assert.Null(ex);
+    }
+}

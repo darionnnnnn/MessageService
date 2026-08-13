@@ -532,4 +532,60 @@ public class MessagesControllerTests : IDisposable
         Assert.True(page.Truncated);
         Assert.Contains(page.Messages, m => m.Text == "anchor");
     }
+
+    [Fact]
+    public async Task GetMessages_AroundId_AnchorAtOldestMessage_OtherSideDoesNotBorrowUnusedQuota()
+    {
+        // 錨點在群組最早的訊息：older 側只有錨點本身（1 則），newer 側即使有超過半窗
+        // 額度的訊息可撈，也只能拿到自己那一半（MessageWindowLimit/2），不會把 older 側沒用完
+        // 的額度借過來——這是問題6兩段式查詢刻意的語意差異，見 GetMessagesAroundAnchorAsync 註解
+        var now = DateTimeOffset.UtcNow;
+        const int halfWindow = MessagesController.MessageWindowLimit / 2;
+        long anchorId = 0;
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            var anchor = TextMessage("anchor", "U1", now, "anchor");
+            dbContext.GroupMessages.Add(anchor);
+            await dbContext.SaveChangesAsync();
+            anchorId = anchor.Id;
+
+            for (var i = 0; i < halfWindow + 50; i++)
+            {
+                dbContext.GroupMessages.Add(TextMessage($"after-{i}", "U1", now.AddSeconds(i + 1), $"after-{i}"));
+            }
+            await dbContext.SaveChangesAsync();
+        });
+
+        var page = await _fixture.Client.GetFromJsonAsync<MessagesPageDto>(
+            $"/api/groups/{GroupId}/messages?aroundId={anchorId}");
+
+        // older 側：只有錨點本身 1 則。newer 側：截斷到半窗，不因為 older 側只用了 1 則
+        // 就多給 newer 側 (halfWindow - 1) 則的補償額度
+        Assert.Equal(1 + halfWindow, page!.Messages.Count);
+        Assert.True(page.Truncated);
+        Assert.Equal("anchor", page.Messages[0].Text);
+    }
+
+    [Fact]
+    public async Task GetMessages_AroundId_FewMessagesOnBothSides_ReturnsAllWithoutTruncation()
+    {
+        var now = DateTimeOffset.UtcNow;
+        long anchorId = 0;
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            dbContext.GroupMessages.Add(TextMessage("before-1", "U1", now.AddMinutes(-2), "before-1"));
+            dbContext.GroupMessages.Add(TextMessage("before-2", "U1", now.AddMinutes(-1), "before-2"));
+            var anchor = TextMessage("anchor", "U1", now, "anchor");
+            dbContext.GroupMessages.Add(anchor);
+            dbContext.GroupMessages.Add(TextMessage("after-1", "U1", now.AddMinutes(1), "after-1"));
+            await dbContext.SaveChangesAsync();
+            anchorId = anchor.Id;
+        });
+
+        var page = await _fixture.Client.GetFromJsonAsync<MessagesPageDto>(
+            $"/api/groups/{GroupId}/messages?aroundId={anchorId}");
+
+        Assert.Equal(["before-1", "before-2", "anchor", "after-1"], page!.Messages.Select(m => m.Text));
+        Assert.False(page.Truncated);
+    }
 }

@@ -1,13 +1,16 @@
 using MessageService.Data;
 using MessageService.Models;
+using MessageService.Services;
 using MessageService.Web.Dtos;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 
 namespace MessageService.Web.Controllers.Api;
 
+// 只在檢視端能力開啟時才存在（見 DeploymentCapabilities.ViewerEnabled／DeploymentModeConvention）
 [ApiController]
 [Route("api/settings")]
+[RequiresCapability(Capability.Viewer)]
 public class SettingsController(MessageDbContext dbContext) : ControllerBase
 {
     [HttpGet("display")]

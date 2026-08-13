@@ -1,6 +1,8 @@
+using System.Linq.Expressions;
 using MessageService.Data;
 using MessageService.Data.Crypto;
 using MessageService.Models;
+using MessageService.Services;
 using MessageService.Web.Dtos;
 using MessageService.Web.Services;
 using Microsoft.AspNetCore.Mvc;
@@ -9,7 +11,9 @@ using Microsoft.Extensions.Options;
 
 namespace MessageService.Web.Controllers.Api;
 
+// 只在檢視端能力開啟時才存在（見 DeploymentCapabilities.ViewerEnabled／DeploymentModeConvention）
 [ApiController]
+[RequiresCapability(Capability.Viewer)]
 public class MessagesController(
     MessageDbContext dbContext,
     ContentStreamService contentStreamService,
@@ -36,96 +40,79 @@ public class MessagesController(
         // 靠放大天數視窗也一定能觸及所有仍保留的訊息
         days = Math.Clamp(days, 1, MaxDays);
 
-        IQueryable<GroupMessage> query = dbContext.GroupMessages.Where(m => m.GroupId == groupId);
+        List<MessageRow> rows;
+        bool truncated;
 
         if (aroundId is { } around)
         {
-            // 訊息搜尋結果跳轉用：以目標訊息的時間為錨點，前後各開 days 天的視窗；
-            // 回應本身不含 latestId（跳轉後是歷史檢視，不需要輪詢基準），hasMore 仍照算，
-            // 讓使用者從跳轉點繼續按「載入更早」時走一般的 beforeId 分頁，不需要特殊處理
-            var anchor = await dbContext.GroupMessages
-                .Where(m => m.Id == around && m.GroupId == groupId)
-                .Select(m => new { m.EventTimestamp })
-                .FirstOrDefaultAsync(cancellationToken);
-
-            if (anchor is null)
+            var aroundResult = await GetMessagesAroundAnchorAsync(groupId, around, cancellationToken);
+            if (aroundResult is null)
             {
                 return NotFound();
             }
-
-            var lower = anchor.EventTimestamp.AddDays(-days);
-            var upper = anchor.EventTimestamp.AddDays(days);
-            query = query.Where(m => m.EventTimestamp >= lower && m.EventTimestamp <= upper);
-        }
-        else if (afterId is { } after)
-        {
-            query = query.Where(m => m.Id > after);
-        }
-        else if (beforeId is { } before)
-        {
-            var cursor = await dbContext.GroupMessages
-                .Where(m => m.Id == before)
-                .Select(m => new { m.EventTimestamp })
-                .FirstOrDefaultAsync(cancellationToken);
-
-            if (cursor is null)
-            {
-                return NotFound();
-            }
-
-            // 下一則更早訊息（依 Id，即實際到達順序）。若它跟游標之間的空窗比 days 還長，
-            // 就改以它為基準開窗；否則群組沉寂超過一個視窗時，查詢永遠回空、游標不會前進，
-            // 使用者會一直按「載入更早」卻什麼都不會出現
-            var nextOlder = await dbContext.GroupMessages
-                .Where(m => m.GroupId == groupId && m.Id < before)
-                .OrderByDescending(m => m.Id)
-                .Select(m => new { m.EventTimestamp })
-                .FirstOrDefaultAsync(cancellationToken);
-
-            var anchor = cursor.EventTimestamp;
-            var plainCutoff = anchor.AddDays(-days);
-            if (nextOlder is not null && nextOlder.EventTimestamp < plainCutoff)
-            {
-                anchor = nextOlder.EventTimestamp;
-            }
-
-            var cutoff = anchor.AddDays(-days);
-            query = query.Where(m => m.Id < before && m.EventTimestamp >= cutoff);
+            (rows, truncated) = aroundResult.Value;
         }
         else
         {
-            var cutoff = DateTimeOffset.UtcNow.AddDays(-days);
-            query = query.Where(m => m.EventTimestamp >= cutoff);
-        }
+            IQueryable<GroupMessage> query = dbContext.GroupMessages.Where(m => m.GroupId == groupId);
 
-        // 截斷方向依查詢意圖而定：afterId（輪詢）要保留離游標最近、時間上最早的那批，往前追趕；
-        // aroundId（搜尋跳轉）以錨點為中心，離錨點越近優先權越高；初載／beforeId 都是「往回看」
-        // 的視窗，越接近游標（或現在）越優先，被丟的是視窗裡更久遠的那一批。多撈一筆
-        // （MessageWindowLimit + 1）用來判斷是否真的被截斷，不必另外一次 COUNT 查詢。
-        IOrderedQueryable<GroupMessage> capOrdered = aroundId is { } anchorId
-            ? query.OrderBy(m => Math.Abs(m.Id - anchorId))
-            : afterId is not null
+            if (afterId is { } after)
+            {
+                query = query.Where(m => m.Id > after);
+            }
+            else if (beforeId is { } before)
+            {
+                var cursor = await dbContext.GroupMessages
+                    .Where(m => m.Id == before)
+                    .Select(m => new { m.EventTimestamp })
+                    .FirstOrDefaultAsync(cancellationToken);
+
+                if (cursor is null)
+                {
+                    return NotFound();
+                }
+
+                // 下一則更早訊息（依 Id，即實際到達順序）。若它跟游標之間的空窗比 days 還長，
+                // 就改以它為基準開窗；否則群組沉寂超過一個視窗時，查詢永遠回空、游標不會前進，
+                // 使用者會一直按「載入更早」卻什麼都不會出現
+                var nextOlder = await dbContext.GroupMessages
+                    .Where(m => m.GroupId == groupId && m.Id < before)
+                    .OrderByDescending(m => m.Id)
+                    .Select(m => new { m.EventTimestamp })
+                    .FirstOrDefaultAsync(cancellationToken);
+
+                var anchor = cursor.EventTimestamp;
+                var plainCutoff = anchor.AddDays(-days);
+                if (nextOlder is not null && nextOlder.EventTimestamp < plainCutoff)
+                {
+                    anchor = nextOlder.EventTimestamp;
+                }
+
+                var cutoff = anchor.AddDays(-days);
+                query = query.Where(m => m.Id < before && m.EventTimestamp >= cutoff);
+            }
+            else
+            {
+                var cutoff = DateTimeOffset.UtcNow.AddDays(-days);
+                query = query.Where(m => m.EventTimestamp >= cutoff);
+            }
+
+            // 截斷方向依查詢意圖而定：afterId（輪詢）要保留離游標最近、時間上最早的那批，往前追趕；
+            // 初載／beforeId 都是「往回看」的視窗，越接近游標（或現在）越優先，被丟的是視窗裡
+            // 更久遠的那一批。多撈一筆（MessageWindowLimit + 1）用來判斷是否真的被截斷，
+            // 不必另外一次 COUNT 查詢。
+            IOrderedQueryable<GroupMessage> capOrdered = afterId is not null
                 ? query.OrderBy(m => m.Id)
                 : query.OrderByDescending(m => m.Id);
 
-        var capped = await capOrdered
-            .Take(MessageWindowLimit + 1)
-            .Select(m => new
-            {
-                m.Id,
-                m.MessageType,
-                m.Text,
-                m.UserId,
-                m.StickerId,
-                m.EventTimestamp,
-                Content = m.Content == null
-                    ? null
-                    : new { m.Content.Id, m.Content.FileName, m.Content.ContentType, m.Content.DownloadStatus }
-            })
-            .ToListAsync(cancellationToken);
+            var capped = await capOrdered
+                .Take(MessageWindowLimit + 1)
+                .Select(MessageRow.Projection)
+                .ToListAsync(cancellationToken);
 
-        var truncated = capped.Count > MessageWindowLimit;
-        var rows = capped.Take(MessageWindowLimit).OrderBy(r => r.Id).ToList();
+            truncated = capped.Count > MessageWindowLimit;
+            rows = capped.Take(MessageWindowLimit).OrderBy(r => r.Id).ToList();
+        }
 
         var userIds = rows.Select(r => r.UserId).Where(id => id is not null).Cast<string>().Distinct().ToList();
         var members = await dbContext.GroupMembers
@@ -197,6 +184,66 @@ public class MessagesController(
         }
 
         return Ok(new MessagesPageDto(messages, hasMore, latestId, truncated));
+    }
+
+    private record MessageContentRow(long Id, string? FileName, string? ContentType, DownloadStatus DownloadStatus);
+
+    private record MessageRow(
+        long Id, string MessageType, string? Text, string? UserId, string? StickerId,
+        DateTimeOffset EventTimestamp, MessageContentRow? Content)
+    {
+        public static readonly Expression<Func<GroupMessage, MessageRow>> Projection = m => new MessageRow(
+            m.Id, m.MessageType, m.Text, m.UserId, m.StickerId, m.EventTimestamp,
+            m.Content == null
+                ? null
+                : new MessageContentRow(m.Content.Id, m.Content.FileName, m.Content.ContentType, m.Content.DownloadStatus));
+    }
+
+    /// <summary>問題6：aroundId 原本是 `OrderBy(Math.Abs(Id - anchor))`，翻成 SQL 是
+    /// `ORDER BY ABS(Id - @anchor)`——非 sargable，資料庫得把整個候選集排序一次才能取出最接近
+    /// 錨點的那批，錨點落在大群組舊訊息時會明顯變慢。改成錨點兩側各查一次，各自走
+    /// `(GroupId, Id)` 索引直接 Take，不需要排序整個候選集。
+    ///
+    /// 語意差異：舊版是「整體最近 MessageWindowLimit 則」，錨點在視窗邊緣時可以整批都在
+    /// 同一側（例如錨點是群組最早的訊息，500 則全部來自較新的那一側）；新版是「兩側各最多
+    /// MessageWindowLimit/2 則」，任一側不足額不會把配額讓給另一側。對搜尋跳轉場景（使用者
+    /// 從搜尋結果跳到某則訊息，通常想看的是它前後的對話脈絡）這個差異感覺不出來，換到的是
+    /// 兩段查詢都能用索引。
+    ///
+    /// 回傳 null 代表錨點不存在（呼叫端應回 404）。</summary>
+    private async Task<(List<MessageRow> Rows, bool Truncated)?> GetMessagesAroundAnchorAsync(
+        string groupId, long around, CancellationToken cancellationToken)
+    {
+        var anchorExists = await dbContext.GroupMessages
+            .AnyAsync(m => m.Id == around && m.GroupId == groupId, cancellationToken);
+        if (!anchorExists)
+        {
+            return null;
+        }
+
+        var halfWindow = MessageWindowLimit / 2;
+
+        var olderOrEqual = await dbContext.GroupMessages
+            .Where(m => m.GroupId == groupId && m.Id <= around)
+            .OrderByDescending(m => m.Id)
+            .Take(halfWindow + 1)
+            .Select(MessageRow.Projection)
+            .ToListAsync(cancellationToken);
+
+        var newer = await dbContext.GroupMessages
+            .Where(m => m.GroupId == groupId && m.Id > around)
+            .OrderBy(m => m.Id)
+            .Take(halfWindow + 1)
+            .Select(MessageRow.Projection)
+            .ToListAsync(cancellationToken);
+
+        var truncated = olderOrEqual.Count > halfWindow || newer.Count > halfWindow;
+        var rows = olderOrEqual.Take(halfWindow)
+            .Concat(newer.Take(halfWindow))
+            .OrderBy(r => r.Id)
+            .ToList();
+
+        return (rows, truncated);
     }
 
     public const int SearchResultLimit = 100;

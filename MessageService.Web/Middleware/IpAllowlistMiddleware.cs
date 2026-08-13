@@ -2,25 +2,36 @@ using System.Net;
 
 namespace MessageService.Web.Middleware;
 
-/// <summary>
-/// 全站 IP 白名單守門（沒有登入機制時的最低防護）。空白名單視為全拒，寧嚴勿鬆。
-/// 支援單一 IP（"127.0.0.1"）與 CIDR 網段（"10.1.0.0/24"）。
-/// </summary>
+/// <summary>設定要讀哪個 config section、log 訊息要用哪個標籤——同一顆中介層類別同時服務
+/// 檢視端白名單（Viewer:AllowedClientIps）與 ingest API 白名單（Ingest:AllowedClientIps）。
+/// 合併前這是兩個專案（各自一份 appsettings.json）裡幾乎一模一樣的複本；合併成單一專案、
+/// 單一 appsettings.json 之後，如果兩處還讀同一個 key，viewer 與 ingest 的白名單會被迫共用
+/// 同一份清單——這在真實拆機拓撲下是錯的（office LAN 不該同時也是 ingest 的允許來源），
+/// 所以趁合併順手把 key 拆開，不留到 Stage 2 才處理。</summary>
+public record IpAllowlistOptions(string ConfigSectionName, string Label);
+
+/// <summary>沒有登入機制時的最低防護。空白名單視為全拒，寧嚴勿鬆。
+/// 支援單一 IP（"127.0.0.1"）與 CIDR 網段（"10.1.0.0/24"）。</summary>
 public class IpAllowlistMiddleware
 {
     private readonly RequestDelegate _next;
     private readonly ILogger<IpAllowlistMiddleware> _logger;
+    private readonly IpAllowlistOptions _options;
     private readonly List<IPNetwork> _allowedNetworks;
 
-    public IpAllowlistMiddleware(RequestDelegate next, IConfiguration configuration, ILogger<IpAllowlistMiddleware> logger)
+    public IpAllowlistMiddleware(
+        RequestDelegate next, IConfiguration configuration, ILogger<IpAllowlistMiddleware> logger, IpAllowlistOptions options)
     {
         _next = next;
         _logger = logger;
-        _allowedNetworks = ParseAllowedIps(configuration.GetSection("AllowedClientIps").Get<string[]>() ?? []);
+        _options = options;
+        _allowedNetworks = ParseAllowedIps(configuration.GetSection(options.ConfigSectionName).Get<string[]>() ?? []);
 
         if (_allowedNetworks.Count == 0)
         {
-            _logger.LogWarning("AllowedClientIps is empty — all requests will be rejected until it is configured");
+            _logger.LogWarning(
+                "{Label}: {Section} is empty — all requests will be rejected until it is configured",
+                _options.Label, _options.ConfigSectionName);
         }
     }
 
@@ -33,7 +44,9 @@ public class IpAllowlistMiddleware
             return;
         }
 
-        _logger.LogWarning("Rejected request from {RemoteIp} to {Path} (not in AllowedClientIps)", remoteIp, context.Request.Path);
+        _logger.LogWarning(
+            "{Label}: rejected request from {RemoteIp} to {Path} (not in {Section})",
+            _options.Label, remoteIp, context.Request.Path, _options.ConfigSectionName);
         context.Response.StatusCode = StatusCodes.Status403Forbidden;
         await context.Response.WriteAsync("Forbidden");
     }
@@ -44,19 +57,34 @@ public class IpAllowlistMiddleware
         return _allowedNetworks.Any(network => network.Contains(normalizedIp));
     }
 
-    private static List<IPNetwork> ParseAllowedIps(IReadOnlyList<string> entries)
+    private List<IPNetwork> ParseAllowedIps(IReadOnlyList<string> entries)
     {
         var networks = new List<IPNetwork>();
         foreach (var entry in entries)
         {
-            if (entry.Contains('/') && IPNetwork.TryParse(entry, out var network))
+            if (entry.Contains('/'))
             {
+                if (!IPNetwork.TryParse(entry, out var network))
+                {
+                    // .NET 的 IPNetwork.TryParse 要求主機位元全為 0（嚴格 CIDR），「10.1.0.5/24」
+                    // 這種很常見的打字習慣會 parse 失敗——過去這裡直接把整條無聲丟掉，使用者被
+                    // 403 之後 log 只會說「not in AllowedClientIps」，完全查不出是設定寫錯。
+                    // 這是安全設定，寧可啟動失敗也不要一條規則悄悄失效
+                    throw new InvalidOperationException(
+                        $"{_options.Label}: {_options.ConfigSectionName} 有一條 CIDR 網段解析失敗：\"{entry}\"。" +
+                        "IPNetwork 要求主機位元全為 0，例如 \"10.1.0.5/24\" 請改成 \"10.1.0.0/24\"" +
+                        "（若只要允許單一位址則改成 \"10.1.0.5/32\"）。");
+                }
                 networks.Add(network);
+                continue;
             }
-            else if (IPAddress.TryParse(entry, out var address))
+
+            if (!IPAddress.TryParse(entry, out var address))
             {
-                networks.Add(new IPNetwork(address, address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork ? 32 : 128));
+                throw new InvalidOperationException(
+                    $"{_options.Label}: {_options.ConfigSectionName} 有一條設定值不是合法的 IP 或 CIDR 網段：\"{entry}\"。");
             }
+            networks.Add(new IPNetwork(address, address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork ? 32 : 128));
         }
 
         return networks;

@@ -7,8 +7,12 @@
 
 ## 設定
 
-收錄端（`MessageService`）與檢視端（`MessageService.Web`）的 `appsettings.json` **必須設成
-完全一樣**：
+**每一台直連資料庫的主機**（`AllInOne`／`Core`／`Viewer`）的 `Encryption:Key` **必須設成
+完全一樣**——合併成單一專案之後消除的是 AllInOne 模式「收錄與檢視兩份設定各自維護」的
+不一致風險，但多台拓撲下這個約束本質沒變：任何兩台各自加解密同一份資料的主機，金鑰
+不一致都會讓其中一端寫入的密文另一端解不開。三台拓撲（Edge + Core + Viewer）時，
+Core 與 Viewer 兩台都要設同一把金鑰；Edge 從不直連資料庫，不需要設定這個值（見下方
+拆機部署的例外說明）。
 
 ```json
 "Encryption": {
@@ -36,11 +40,11 @@ $bytes = New-Object byte[] 32
 `Key` 缺漏或格式不對（不是合法 base64、解碼後不是 32 bytes）時，兩邊的服務都會在啟動當下
 直接失敗（`FieldCipher` 建構子拋例外），不會等到第一則訊息進來才在背景任務裡出錯。
 
-> **拆機部署（`Deployment:Mode=Line`）的例外**：加解密只發生在**碰得到資料庫的那一端**
-> （`Full`／`Db` 模式的收錄端，以及檢視端）。`Line` 模式的主機沒有 `MessageDbContext`
+> **拆機部署（`Deployment:Mode=Edge`）的例外**：加解密只發生在**碰得到資料庫的那一端**
+> （`AllInOne`／`Core` 模式，以及 `Viewer` 模式）。`Edge` 模式的主機沒有 `MessageDbContext`
 > 也沒有 `DbContentWorkSource`，金鑰對它毫無用途——**請維持 `Encryption:Enabled=false`，
 > 不要把金鑰放到這台直接對 LINE 曝露的最外緣主機上**，那只是白白多一個外洩面。反過來說，
-> 在 `Line` 端誤設 `Enabled=true` 卻沒給合法金鑰，服務會在啟動時直接失敗。
+> 在 `Edge` 端誤設 `Enabled=true` 卻沒給合法金鑰，服務會在啟動時直接失敗。
 
 ## 加密範圍
 
@@ -117,10 +121,12 @@ $bytes = New-Object byte[] 32
 
 ## 部署檢查清單
 
-1. 產生一把金鑰，收錄端與檢視端 `appsettings.json` 的 `Encryption:Key` 設成完全一樣的值。
-2. 兩邊都設 `Encryption:Enabled=true`。
+1. 產生一把金鑰，每一台直連資料庫的主機（`AllInOne`／`Core`／`Viewer`，見上方拓撲說明）的
+   `appsettings.Production.json` 都設成完全一樣的 `Encryption:Key`。
+2. 這些主機都設 `Encryption:Enabled=true`；`Edge` 主機維持 `false`。
 3. 先在測試環境驗證：送一則訊息、上傳一張圖片，確認檢視端顯示正常、資料庫裡的
    `Text`／`Content` 欄位是看不懂的密文。
 4. 妥善保管金鑰——遺失金鑰等於遺失所有已加密的訊息與媒體，沒有復原機制。
-5. 金鑰不要進版本控制；透過環境變數或密鑰管理服務（Azure Key Vault、AWS Secrets Manager
-   等）覆蓋 `appsettings.json` 的預留空值，是比直接寫進設定檔更穩妥的做法。
+5. 金鑰不要進版本控制——`appsettings.Production.json` 本身就不進 repo（見
+   `deploy/README.md`），把實際金鑰值直接寫在部署到各主機的那份 `appsettings.Production.json`
+   裡即可，不需要額外透過環境變數或密鑰管理服務覆蓋。

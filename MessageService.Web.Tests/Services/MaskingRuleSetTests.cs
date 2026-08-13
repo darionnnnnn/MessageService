@@ -283,7 +283,7 @@ public class MaskingRuleSetTests
     public void MaskText_DefaultPiiSettings_WhenNotSpecified_IsAllEnabled()
     {
         // MaskingRuleSet 建構子沒帶 PiiMaskingSettings 時預設全開，跟 ViewerSettings 欄位的
-        // 資料庫預設值（見 MessageDbSchemaUpgrader／migration）一致
+        // 資料庫預設值（見 MessageDbContext 的 model／migration）一致
         var rules = CreateRuleSet(pii: null);
 
         Assert.Equal(MaskMiddleExpected("A123456789"), rules.MaskText("G1", "A123456789"));

@@ -1,21 +1,37 @@
 <Project Sdk="Microsoft.NET.Sdk.Web">
 
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <!-- 沿用原收錄端專案的 UserSecretsId：這台開發機的 user-secrets 底下存著真的 LINE
+         Channel Access Token，換成新 Id 會讓那組密鑰在合併後的專案裡讀不到 -->
+    <UserSecretsId>1f3ab1c0-802e-4264-af84-80a368a8bcb9</UserSecretsId>
+  </PropertyGroup>
+
   <ItemGroup>
     <ProjectReference Include="..\MessageService.Data\MessageService.Data.csproj" />
   </ItemGroup>
 
   <ItemGroup>
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.10">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
     <PackageReference Include="NLog.Web.AspNetCore" Version="6.1.4" />
+    <PackageReference Include="Swashbuckle.AspNetCore" Version="6.6.2" />
   </ItemGroup>
 
   <ItemGroup>
     <None Update="nlog.config" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
-  <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
-    <Nullable>enable</Nullable>
-    <ImplicitUsings>enable</ImplicitUsings>
-  </PropertyGroup>
+  <ItemGroup>
+    <!-- appsettings.Production.json 絕不進版控（見 .gitignore）、也絕不該被 publish 打包進去——
+         它只活在站台目錄，內容含明文機密，理當隨每台主機各自維護。萬一有人在專案資料夾裡
+         放了這個檔案測試（例如想在本機模擬 Production 設定），SDK 預設會把任何符合
+         appsettings*.json 的檔案自動當內容項目打包，這裡明確排除避免不小心把它發布出去。 -->
+    <Content Remove="appsettings.Production.json" />
+  </ItemGroup>
 
 </Project>
