@@ -316,4 +316,94 @@ public class IngestControllerTests
         // Edge 不碰加密金鑰——不能拿 Core 自己的指紋去填 Edge 那列，否則「金鑰不一致」比對失效
         Assert.Null(fingerprint);
     }
+
+    [Theory]
+    [InlineData("Full")]
+    [InlineData("Line")]
+    [InlineData("Db")]
+    public async Task ReportHeartbeat_LegacyRoleNames_AreAccepted(string legacyRole)
+    {
+        // Role 直接寫進主鍵欄位，驗證只要求「能解析成 DeploymentMode」——舊名稱是合法的別名
+        // （Full/Line/Db），跟 Deployment:Mode 設定鍵本身的相容性一致，不該被擋
+        var store = new FakeHeartbeatStore();
+        var controller = CreateController(heartbeatStore: store);
+        var request = new HeartbeatRequest(legacyRole, "host-1", null, null);
+
+        var result = await controller.ReportHeartbeat(request, CancellationToken.None);
+
+        Assert.IsType<NoContentResult>(result);
+    }
+
+    [Fact]
+    public async Task ReportHeartbeat_UnknownRole_ReturnsBadRequest()
+    {
+        var store = new FakeHeartbeatStore();
+        var controller = CreateController(heartbeatStore: store);
+        var request = new HeartbeatRequest("NotARealRole", "host-1", null, null);
+
+        var result = await controller.ReportHeartbeat(request, CancellationToken.None);
+
+        Assert.IsType<BadRequestObjectResult>(result);
+        Assert.Empty(store.Upserted);
+    }
+
+    [Theory]
+    [InlineData("0")]
+    [InlineData("99")]
+    [InlineData("-1")]
+    public async Task ReportHeartbeat_NumericRole_ReturnsBadRequest(string numericRole)
+    {
+        // Enum.TryParse<DeploymentMode> 是廣為人知的陷阱：只要字串能轉成底層 int，即使沒有
+        // 對應具名成員也會回傳 true（"0" 甚至恰好等於 AllInOne 的底層值，但寫進 DB 的是原始
+        // 字串 "0" 而不是 "AllInOne"，一樣是垃圾值）——驗證必須比對宣告的名稱本身，不能用
+        // Enum.TryParse
+        var store = new FakeHeartbeatStore();
+        var controller = CreateController(heartbeatStore: store);
+        var request = new HeartbeatRequest(numericRole, "host-1", null, null);
+
+        var result = await controller.ReportHeartbeat(request, CancellationToken.None);
+
+        Assert.IsType<BadRequestObjectResult>(result);
+        Assert.Empty(store.Upserted);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public async Task ReportHeartbeat_EmptyMachineName_ReturnsBadRequest(string machineName)
+    {
+        var store = new FakeHeartbeatStore();
+        var controller = CreateController(heartbeatStore: store);
+        var request = new HeartbeatRequest("Edge", machineName, null, null);
+
+        var result = await controller.ReportHeartbeat(request, CancellationToken.None);
+
+        Assert.IsType<BadRequestObjectResult>(result);
+        Assert.Empty(store.Upserted);
+    }
+
+    [Fact]
+    public async Task ReportHeartbeat_MachineNameTooLong_ReturnsBadRequest()
+    {
+        var store = new FakeHeartbeatStore();
+        var controller = CreateController(heartbeatStore: store);
+        var request = new HeartbeatRequest("Edge", new string('x', 129), null, null);
+
+        var result = await controller.ReportHeartbeat(request, CancellationToken.None);
+
+        Assert.IsType<BadRequestObjectResult>(result);
+        Assert.Empty(store.Upserted);
+    }
+
+    [Fact]
+    public async Task ReportHeartbeat_MachineNameAtMaxLength_Succeeds()
+    {
+        var store = new FakeHeartbeatStore();
+        var controller = CreateController(heartbeatStore: store);
+        var request = new HeartbeatRequest("Edge", new string('x', 128), null, null);
+
+        var result = await controller.ReportHeartbeat(request, CancellationToken.None);
+
+        Assert.IsType<NoContentResult>(result);
+    }
 }
