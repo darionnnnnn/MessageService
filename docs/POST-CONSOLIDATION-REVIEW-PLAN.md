@@ -1,9 +1,10 @@
 # 部署收斂後外部審查回饋輪——實作規劃
 
-> 狀態：規劃完成，待實作。
+> 狀態：**全案 A～G 完成**（含批次G體檢輪，2026-08-13）。
 > 依據：外部審查（針對 dev@9b2451c）逐項查證結果——P0、B1～B7 與「其他觀察」全數屬實。
 > 已定案的四個方向：健康監測採「DB 心跳＋設定頁顯示」；ENC1/MSE1 現在加 key id；
 > UseForwardedHeaders 實作 KnownProxies；本輪全包含文件。
+> 體檢輪結果與已知限制見文末「批次G執行結果」。
 
 ## 查證結論與審查修法的三處修正
 
@@ -38,19 +39,20 @@
 **A3　`SqliteOutboxWriter.EnqueueAsync` 撞唯一索引＝已在 outbox，視為成功**
 `catch (DbUpdateException)` 後直接 return（不 `NotifyNewEntry`——該事件已有既存項目在排程中）。
 只攔唯一索引衝突情境；其他 `DbUpdateException`（磁碟滿等）原樣往外拋維持回 500 讓 LINE 重送。
-判斷方式：檢查 inner `SqliteException.SqliteErrorCode == 19`（SQLITE_CONSTRAINT）。
+判斷方式（體檢輪修正）：比對 `SqliteException.SqliteExtendedErrorCode == 2067`
+（SQLITE_CONSTRAINT_UNIQUE）——不是規劃原寫的主碼 19，主碼連 NOT NULL／CHECK 違反
+也涵蓋，會把非撞鍵的約束失敗誤吞成「已在佇列中」。
 
-**A4　`OutboxForwarderService.ProcessBatchAsync` 改 group 語意**
-`entriesByWebhookEventId` 由 `Dictionary<string, OutboxEntry>`（索引子覆寫、首列被靜默丟出批次）
-改為 `Dictionary<string, List<OutboxEntry>>`：結果回來時同 id 的所有列一起處理
-（成功→全部 Remove；永久拒絕→全部死信；未提及→全部退避），一輪自癒。
-`envelopes` 對重複 id 只送一份（去重後再送），減少無謂流量。
+**A4　`OutboxForwarderService.ProcessBatchAsync`**——**實作與規劃不同**：規劃原本要改
+group 語意（`Dictionary<string, List<OutboxEntry>>`），實作時發現 A2 的唯一索引已讓
+同批不可能出現重複 `WebhookEventId`（DB 層面保證，含既有檔案的升級去重），為理論上
+不會發生的情境加 group 層屬過度設計，維持索引子賦值並補註解說明依據即可。
 
 **A5　測試**
 - `IngestControllerTests`：一批含兩筆相同 `WebhookEventId` → 斷言 200 且回應含該 id（現有等價性測試全是唯一 id，蓋不到）。
-- `SqliteOutboxWriter`：同 id 入列兩次 → 表內只有一列、不拋例外。
-- `OutboxSchemaUpgrader`：預先塞入重複列的舊 schema 檔案 → 升級後只剩最小 Id 那列且唯一索引存在。
-- forwarder：預先繞過 writer 塞兩列同 id（模擬升級前殘留）→ 一輪批次後兩列都清掉。
+- `SqliteOutboxWriter`：同 id 入列兩次 → 表內只有一列、不拋例外、不重複叫醒 forwarder。
+- `OutboxSchemaUpgrader`：預先塞入重複列的舊 schema 檔案 → 升級後只剩最小 Id 那列且唯一索引存在、冪等。
+- forwarder 的重複列測試隨 A4 的決策一併取消（重複列已被 DB 層擋掉，無情境可測）。
 
 **相容性**：A1 讓新 Core 對舊 Edge 完全相容；舊 Core 對新 Edge 仍有原 bug，
 升級順序維持既有指引「先升 Core 再升 Edge」，於文件重申（見批次F）。
@@ -224,6 +226,35 @@ ENCRYPTION.md 同步更新格式說明。
 全案完成後照慣例：建置＋全測試套件（現況 502 綠，本輪淨增測試）、
 平行審查（重點：A4 group 語意的邊界、C1 認領與重啟接續的競態、D2 Edge 心跳的
 認證標頭與閘門、E2/E3 雙格式讀取的相容矩陣），修正後再終檢一次。
+
+### 批次G執行結果（2026-08-13）
+
+8 個獨立審查角度（正確性×3、重用、簡化、效率、抽象層次、CLAUDE.md 規範）平行審查
+整條分支 diff，**修正 4 個真 bug**（詳見各 commit 訊息）：
+
+1. `CompleteAsync` 認領失敗未回退（3 個角度交叉確認，最嚴重）——寫入失敗時狀態卡在
+   `Downloading`，`ProcessAsync` 重試會靜默 no-op 誤判成功；修法：任何失敗先回退成
+   `Pending` 再往外拋（`RevertClaimAsync`）。
+2. `chat.js` 未跟上 `Downloading` 狀態——破圖／不輪詢／誤判失敗三處，統一用
+   `isDownloadInProgress()` 修正。
+3. `ContentStreamService` 快取標頭誤看 `cipher.Enabled` 而非 `isEncrypted`——舊明文內容
+   會被事後開啟的加密設定連坐斷快取。
+4. `SqliteOutboxWriter` 撞鍵判斷改比對 `SQLITE_CONSTRAINT_UNIQUE` 延伸碼（2067），
+   不再用會涵蓋 NOT NULL／CHECK 的通用主碼 19（防禦性加固，現行不可觸發）。
+
+### 已知限制（評估後刻意不修，留待需要時另開規劃）
+
+- **`GetPendingIdsAsync` 的多行程競態**：啟動接續無條件把所有 `Downloading` 重設回
+  `Pending`，兩個下載行程對同一顆資料庫時（Core 誤設兩台、IIS 重疊回收視窗）可能搶走
+  另一行程正在寫入的認領。徹底解需要認領時間戳／擁有者欄位（新 migration）；批次B的
+  `disallowOverlappingRotation` 已關掉最常見的觸發情境。
+- **`MatchesKeyId` 只比對 1 byte**（blob 表頭空間限制，刻意不擴表頭以保護 Range 位移
+  數學）：未來金鑰輪替時有 1/256 機率誤判放行、退回「串流中途才失敗」的舊行為；
+  文字欄位是全 8 hex 比對不受影響。多金鑰解密本來就延後實作，屆時一併評估。
+- **mutex ACL、`Heartbeat:Enabled` 測試旗標、認領不擋 LINE 重複下載、CIDR 解析與
+  `IpAllowlistMiddleware` 重複**：皆為規劃階段已權衡的 KISS 取捨，審查角度有列出更深的
+  作法（MutexAcl／ConfigureTestServices 移除註冊／消費端 claim-release 生命週期／
+  抽共用 parser），記錄於此供日後參考。
 
 ## 實作順序與依賴
 

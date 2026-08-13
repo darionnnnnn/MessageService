@@ -166,8 +166,18 @@ public class DbContentWorkSource(MessageDbContext dbContext, IOptions<ContentDow
             // CompleteAsync 會因為 WHERE DownloadStatus==Pending 認領不到（claimed==0）而
             // 直接靜默 return，既不寫入也不拋例外，重試迴圈會把這次失敗誤判成功，
             // 這顆內容永遠卡在 Downloading（見 DownloadStatus.Downloading 的回收說明，
-            // 只有整個行程重啟才會被 GetPendingIdsAsync 撿回）
-            await RevertClaimAsync(contentId, cancellationToken);
+            // 只有整個行程重啟才會被 GetPendingIdsAsync 撿回）。
+            // 回退本身失敗（多半跟原始失敗同因，例如資料庫斷線）就放手讓原始例外照常往外拋，
+            // 不讓回退的例外把真正的失敗原因蓋掉——這種情況下狀態留在 Downloading，
+            // 由啟動接續的掃描當最後防線
+            try
+            {
+                await RevertClaimAsync(contentId, cancellationToken);
+            }
+            catch
+            {
+                // 保留原始例外
+            }
             throw;
         }
         finally
