@@ -1,9 +1,10 @@
 # 部署收斂與體檢回饋實作規劃（CONSOLIDATION-PLAN）
 
-> 狀態：規劃完成、未實作。2026-08-13 依外部體檢回饋（九項問題）＋使用者需求（第三節四項）逐條
-> 對原始碼查證後產出。查證結論：九項全部屬實。
+> 狀態：**全案完成（階段1~7，含體檢輪），僅 IIS 實機驗收待手動執行**——逐階段進度見下方
+> 「執行進度」節。本文件其餘部分保留規劃原文作為歷史紀錄。原規劃 2026-08-13 依外部體檢回饋
+> （九項問題）＋使用者需求（第三節四項）逐條對原始碼查證後產出，查證結論：九項全部屬實。
 >
-> 已定案的四個方向（使用者 2026-08-13 決定）：
+> 已定案的五個方向（使用者 2026-08-13 決定）：
 > 1. 合併成單一專案，**以 `MessageService.Web` 為存續主體**，收錄端 `MessageService` 專案退場。
 > 2. 部署模式**支援到三台主機**（LINE 端／DB+API 端／純檢視端）。
 > 3. Migrations **每個 provider 一套**（SQLite／SQL Server 分開產生與維護）。
@@ -16,6 +17,52 @@
 ---
 
 ## 執行進度
+
+- **終檢輪（全案 vs 規劃比對＋程式碼平行審查＋文件普查）已完成並 commit**。三路平行審查
+  （規劃完整性、程式碼 bug/過度設計、文件一致性）交叉查證全分支 13 個 commit，本輪修正：
+  - **程式碼真 bug 三件**：
+    1. （中高）**批次整包 400 永不死信**：批次端點對整個請求回 400（ASP.NET Core 模型驗證
+       分不出是哪一筆有問題）時，`HttpIngestSink` 原本對整批擲 `PermanentIngestException`，
+       但 forwarder 的批次層級 catch 不分型別、把它當暫時性失敗無限退避重試——毒項目
+       永不死信、還連坐同批健康項目，是階段4d 相對合併前逐筆版的語意回歸。修正：整包
+       400 退回逐筆模式隔離毒項目（比照 404 fallback 手法），毒項目單獨拿到 400 → 死信、
+       健康項目照常落地；同場加映堵掉兩個熱迴圈入口（batch 回應 200 但 body 為 null 改為
+       往外拋、forwarder 對「批次結果沒提到的項目」改為照退避而非原樣不動）。三個新測試釘住。
+    2. （中）**LegacySqliteBaseliner 跑在具名 mutex 之外**：同機多站台同時首次啟動升級
+       舊檔時，兩個行程可能同時通過偵測、同時 ALTER TABLE 而其中一邊炸掉——這正是 mutex
+       要防的場景但橋接沒被包進去。修正：Baseliner 移入 mutex 區塊；並補
+       `AbandonedMutexException` 處理（前一持鎖行程被強殺時該例外代表「已取得鎖」，照常
+       續跑）。審查另指出 EF 10 的 `Migrate()` 已內建跨行程 migration lock、mutex 對
+       Migrate 本身是冗餘——但 Baseliner 的偵測→補齊不是原子操作且不在 EF 鎖的保護範圍，
+       mutex 因此保留（保護對象改為以 Baseliner 為主）。
+    3. （低）**Edge 顯式設 `Viewer:Enabled=true` 炸出難懂的 DI 錯誤**：能力推導照單全收
+       會讓服務註冊矩陣註冊出缺 `MessageDbContext` 的相依。修正：推導端夾住
+       （`viewerEnabled` 需同時 `hasDatabaseAccess`）＋ `DeploymentValidator` 補人話啟動
+       錯誤，兩個新測試釘住。
+  - **審查判定不修、記為已知限制**：`GroupLastMessageTracker` 的讀-改-寫在兩筆訊息併發
+    落地時可能讓側欄「最後訊息」短暫倒退（下一則訊息自癒、只影響顯示）——修正需要
+    concurrency token 或條件式 UPDATE，複雜度與影響面不成比例。
+  - **規劃缺漏補齊三件**：(1) 第一節 Override 定義的「Core/Viewer 顯式設 `OutboundHere=true`
+    記重複下載 Warning」原本程式與 GUIDE 驗收清單兩頭都落空——validator 補 Warning（三個
+    新測試，含用捕捉式 logger 驗證真的有記）、GUIDE Part H 補組合檢查那條；(2) 階段4a 規劃
+    明文要求的 Groups 主鍵撞鍵併發測試——用 interceptor 精確重現「頭貼快取先插入 Groups
+    列」補上；(3) `MessageService.http` 依退場明細移除（先前被搬進 Web 專案保留且內容過時，
+    未記錄）。另補 `IngestOptions.MaxContentBytes` 與 web.config 的互相註記（風險6原本只有
+    web.config 單邊有）。
+  - **規劃偏離補記錄**（實作正確、僅先前未記錄）：(a) pipeline 實際順序與階段1「定案」
+    順序不同（Swagger/ExceptionHandler/HSTS 在前、`UseHsts` 無條件掛而非 viewer 啟用時；
+    功能面無害——ForwardedHeaders 仍在白名單之前）；(b) 階段4d 規劃寫 Core 端「單一交易」
+    落地，實作是逐筆 SaveChanges 靠冪等唯一索引保證整批重試安全，實質等價；(c) 第一節
+    模式矩陣寫 AllInOne 的 `/api/ingest/*`＝✗，實作是「設了 `Ingest:ApiKey` 才開」
+    （`DeploymentCapabilities` 含 AllInOne）——矩陣以 DEPLOYMENT-MODES.md 的新表為準。
+  - **文件缺漏修正**：`docs/LINE-BOT-SETUP.md` 整份漏掉沒跟上收斂輪（兩專案舊框架、
+    `cd MessageService`、環境變數機密、`SqlServer` 預設、雙行程驗收、以及一條照做會直接
+    擋啟動的舊 `AllowedClientIps` 指引），已全面更新；README.md 八處殘留（user-secrets
+    目錄、jsonc 範例的舊 key、設定表、NLog 檔名、「兩個專案」句式等）；本檔狀態戳
+    「規劃完成、未實作」與進度節矛盾已改；`deploy/README.md` 與 GUIDE Part C 幾乎逐字
+    重複的流程段落收斂為指向 GUIDE。
+  - 全 solution 建置 0 警告 0 錯誤，502 測試全綠（較階段7淨增 8 個：新增 9 個、批次 400
+    的舊語意測試改寫併入新測試 1 個）。
 
 - **階段7（全案體檢輪）已完成並 commit**，分支 `feature/deployment-consolidation`。
   494 測試全綠（較階段6新增 1 個：Viewer 模式 ingest 閘門守門測試）。
@@ -126,7 +173,7 @@
     （SchemaHardeningRound1／StickerId＋PackageId／AnonymousIdentities），再用 EF 自己的
     `IHistoryRepository` API 產生正確的歷史表建表／插入 SQL（不手刻，避免跟 EF 內部實際期待的
     欄位型別有出入），寫入一筆 InitialCreate 已套用的紀錄。測試裡最重要的一個案例
-    `EnsureBaseline_ThenMigrate_ProducesSameSchemaAsFreshMigrate`：拿「舊схема橋接完再
+    `EnsureBaseline_ThenMigrate_ProducesSameSchemaAsFreshMigrate`：拿「舊 schema 橋接完再
     Migrate()」跟「全新資料庫直接 Migrate()」兩邊逐表逐欄位比對，證明橋接後的最終結果
     跟全新安裝完全一致，不是只驗證「沒有丟例外」。
   - `outbox.db` 依規劃維持現狀（`EnsureCreated()`＋`OutboxSchemaUpgrader`），沒有跟著這輪改。

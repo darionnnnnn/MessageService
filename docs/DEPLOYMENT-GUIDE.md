@@ -234,6 +234,9 @@ Edge 端的 outbox 排空預設會打 Core 的批次 ingest 端點（`POST /api/
 - [ ] （拆機模式）暫時關掉 Core 端，Edge 端連續發幾則訊息，確認 webhook 仍回 200
       且沒有出現簽章錯誤；重新啟動 Core 端後，觀察 Edge 端的 outbox 自動排空、
       訊息補齊且不重複
+- [ ] （拆機模式）檢查 Edge／Core 兩端的 `Line:OutboundHere` 組合：預設值（Edge=true、
+      Core=false）不用動；若把媒體下載搬到 Core（Core 顯式設 true），Edge 必須同步顯式
+      設 false，否則兩台會重複下載同一批媒體（Core 端啟動 log 會有一則提醒 Warning）
 - [ ] **應用程式集區常駐設定已套用**（`Set-AppPool.ps1` 跑過）——**隔天早上**檢查 log
       有沒有出現 `Retention cleanup removed ...`，確認保留期清除真的在半夜跑過，
       不是行程被 IIS 回收沒排到

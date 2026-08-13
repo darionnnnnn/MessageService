@@ -208,6 +208,27 @@ public class OutboxForwarderServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task ProcessBatchAsync_EntryMissingFromBatchResponse_GetsBackoff_NotImmediateRerun()
+    {
+        // 對端行為異常的防禦：批次回應沒提到某個項目時（現有兩套 sink 實作都不會這樣，
+        // 走到這裡代表對端有 bug），該項目必須照退避排程——「原樣不動」的話 NextAttemptAt
+        // 沒推進，ProcessBatchAsync 又回報有處理到東西，ExecuteAsync 會立刻重跑同一批，
+        // 變成無退避的熱迴圈
+        await SeedEntryAsync(SampleEnvelope("evt-mentioned"));
+        await SeedEntryAsync(SampleEnvelope("evt-forgotten"));
+        _sink.BatchResultsOverride = [new IngestBatchItemResult("evt-mentioned", null, false, null)];
+        var forwarder = CreateForwarder();
+
+        await forwarder.ProcessBatchAsync(CancellationToken.None);
+
+        var remaining = Assert.Single(await GetRemainingEntriesAsync());
+        Assert.Equal("evt-forgotten", remaining.WebhookEventId);
+        Assert.Equal(1, remaining.Attempts);
+        Assert.NotNull(remaining.NextAttemptAt);
+        Assert.True(remaining.NextAttemptAt > DateTimeOffset.UtcNow);
+    }
+
+    [Fact]
     public async Task ProcessBatchAsync_MiddleEntryPermanentlyRejected_OthersInBatchStillProcessed()
     {
         // PermanentIngestException 不會中止整批（跟暫時性失敗不同，見上一個測試）——

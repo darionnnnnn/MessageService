@@ -1,8 +1,10 @@
 # LINE Bot 建立與串接指南
 
-從零把一個 LINE Bot 接上本專案的收錄端（MessageService）並完成實機測試。四個階段：**建立 Bot → 綁定金鑰 → 設定 Webhook → 測試驗證**。
+從零把一個 LINE Bot 接上本專案並完成實機測試。四個階段：**建立 Bot → 綁定金鑰 → 設定 Webhook → 測試驗證**。
 
-> 全程只會用到收錄端 `MessageService`。檢視端 `MessageService.Web` 不需要接 LINE，它只讀資料庫。
+> 收 webhook 的是 `Deployment:Mode=AllInOne` 或 `Edge` 角色的主機（見
+> [DEPLOYMENT-MODES.md](DEPLOYMENT-MODES.md)）。本機開發用預設的 AllInOne 模式即可，
+> 收錄與檢視在同一個行程裡。
 
 ---
 
@@ -93,7 +95,7 @@ Channel 就是實際的 Bot。
 **開發環境**用 user-secrets（存在專案外的使用者設定檔，不會進版控）：
 
 ```bash
-cd MessageService
+cd MessageService.Web
 dotnet user-secrets init
 dotnet user-secrets set "Line:ChannelSecret" "貼上你的 channel secret"
 dotnet user-secrets set "Line:ChannelAccessToken" "貼上你的 access token"
@@ -105,18 +107,9 @@ dotnet user-secrets set "Line:ChannelAccessToken" "貼上你的 access token"
 dotnet user-secrets list
 ```
 
-**正式環境**用環境變數（`__` 兩個底線代表設定階層的冒號）：
-
-```bash
-setx Line__ChannelSecret "你的 channel secret"
-setx Line__ChannelAccessToken "你的 access token"
-```
-
-正式環境同時要設定資料庫連線（預設 `Database:Provider` 已是 `SqlServer`）：
-
-```bash
-setx ConnectionStrings__SqlServer "Server=...;Database=MessageService;..."
-```
+**正式環境**把這兩個值（連同連線字串等其他機密）寫進站台目錄的
+`appsettings.Production.json`——該檔不進版控、發佈成品也不含它，重佈不會被覆蓋。
+完整做法見 [DEPLOYMENT-GUIDE.md](DEPLOYMENT-GUIDE.md) 的 Part C 與 `deploy/` 目錄的樣板。
 
 ---
 
@@ -124,15 +117,19 @@ setx ConnectionStrings__SqlServer "Server=...;Database=MessageService;..."
 
 LINE 只會把訊息推送到**公開的 HTTPS 網址**，所以本機測試需要一條對外通道。
 
-### 3-1. 啟動收錄端服務
+### 3-1. 啟動服務
 
 **用 HTTP-only 啟動**，這點很重要：
 
 ```bash
-dotnet run --project MessageService --urls http://localhost:5072
+dotnet run --project MessageService.Web --urls http://localhost:5072
 ```
 
-> **為什麼要指定 HTTP-only？** 專案管線裡有 `app.UseHttpsRedirection()`。如果同時掛了 HTTPS port，它會把進來的 HTTP 請求回 307 轉址——而 **LINE 的 webhook 不會跟隨轉址**，會直接判定失敗。只掛 HTTP 網址時，這個中介層找不到 HTTPS port 會自動失效（log 會出現一行 `Failed to determine the https port for redirect.` 的警告，那是預期的、可以忽略），請求就能正常進到 controller。TLS 交由通道那一端處理。
+> **為什麼要指定 HTTP-only？** 應用層的 HTTPS 轉址由 `Http:UseHttpsRedirection` 控制，
+> **預設已是 false**（IIS 綁 HTTPS 的部署不需要應用層轉址）——但如果你在設定裡開了它
+> 又同時掛了 HTTPS port，進來的 HTTP 請求會被回 307 轉址，而 **LINE 的 webhook 不會
+> 跟隨轉址**，會直接判定失敗。維持預設、只掛 HTTP 網址，請求就能正常進到 controller，
+> TLS 交由通道那一端處理。
 
 開發環境預設用 SQLite（`appsettings.Development.json` 指定），啟動時會自動建好資料庫檔 `messages.db`，不需要手動建表。
 
@@ -231,7 +228,7 @@ INFO|RetentionCleanupService|Next retention cleanup scheduled at 2026-07-30 03:0
 
 ### 4-4. 查資料庫確認
 
-開發環境的 SQLite 檔在 `MessageService/messages.db`（或執行目錄下）。
+開發環境的 SQLite 檔在 repo 根目錄的 `messages.db`（`appsettings.Development.json` 指定的路徑）。
 
 ```sql
 -- 收到的訊息
@@ -255,15 +252,11 @@ SELECT * FROM GroupMembers;
 
 ### 4-5. 用檢視端看畫面（端到端驗收）
 
-讓檢視端指向同一個資料庫：
+AllInOne 模式下收錄與檢視在同一個行程——直接開瀏覽器連步驟 3-1 啟動的網址
+（<http://localhost:5072>），應該看到剛才發的訊息以 LINE 對話樣式呈現，圖片可點開、
+影片可播放、檔案可下載。
 
-```bash
-dotnet run --project MessageService.Web --ConnectionStrings:Sqlite="Data Source=完整路徑/messages.db"
-```
-
-開啟 <http://localhost:5106>，應該看到剛才發的訊息以 LINE 對話樣式呈現，圖片可點開、影片可播放、檔案可下載。
-
-> 檢視端有 IP 白名單，本機開發用的 `appsettings.Development.json` 已預設放行 `127.0.0.1` 與 `::1`。正式環境記得設定 `AllowedClientIps`，**留空等於全部拒絕**。
+> 檢視端有 IP 白名單，本機開發用的 `appsettings.Development.json` 已預設放行 `127.0.0.1` 與 `::1`。正式環境記得設定 `Viewer:AllowedClientIps`，**留空等於全部拒絕**（舊的無前綴 `AllowedClientIps` key 已停用，設了會直接擋啟動並提示新 key 名）。
 
 ---
 
@@ -303,11 +296,11 @@ channel secret 不正確。重新從 **Basic settings** 分頁複製（不要複
 
 ### 正式環境部署注意
 
-- 資料表要先建立：`ASPNETCORE_ENVIRONMENT=Production dotnet ef database update --project MessageService.Data --startup-project MessageService`
+- 資料表預設由啟動時的 `Database.Migrate()` 自動建立與升級（`Database:AutoMigrate`，預設 true）；嚴管環境要手動跑的話：`dotnet ef database update --project MessageService.Data --startup-project MessageService.Web --context SqlServerMessageDbContext`（SQLite 換 `--context SqliteMessageDbContext`），見 DEPLOYMENT-GUIDE.md
 - Webhook URL 改成正式網域，一個 channel **只能設定一個** webhook URL（開發與正式不能共用同一個 channel，建議各自建立 channel）
 - 檢視端的 IP 白名單：本專案預設的 **IIS in-process 託管不要開** `UseForwardedHeaders`——那個模式下中介層看到的已經是真實來源 IP，開了反而會去信任偽造得了的標頭。只有 IIS 前面又疊了獨立反向代理（nginx／雲端 LB）或改用 out-of-process 託管時才需要開，而且必須同時設定 `KnownProxies`／`KnownNetworks`，否則上游送來的 `X-Forwarded-For` 會被忽略，等於白開。詳見 README 的「IP 白名單」段
 - **Webhook redelivery 建議開啟**（Messaging API 分頁，預設關閉）：收錄端只有在「本機 outbox 寫不進去」時才會回 500，靠 LINE 重送把那則事件補回來（重送造成的重複由 `WebhookEventId` 唯一索引擋掉）。沒開這個選項的話，那類失敗就等於直接掉那則訊息
-- 若啟用了應用層加密，收錄端與檢視端的 `Encryption:Key` 必須完全一致，見 [ENCRYPTION.md](ENCRYPTION.md)
+- 若啟用了應用層加密，每一台直連資料庫的主機（AllInOne／Core／Viewer）的 `Encryption:Key` 必須完全一致，見 [ENCRYPTION.md](ENCRYPTION.md)
 
 ---
 

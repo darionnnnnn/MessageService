@@ -1,11 +1,28 @@
 using MessageService.Options;
 using MessageService.Services;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace MessageService.Tests.Services;
 
 public class DeploymentValidatorTests
 {
+    /// <summary>Warning 類規則的驗證要看「真的有記」而不只是「沒丟例外」——NullLogger
+    /// 驗不出後者與「整條規則被刪掉」的差別。</summary>
+    private sealed class CapturingLogger : ILogger
+    {
+        public List<string> Warnings { get; } = [];
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            if (logLevel == LogLevel.Warning)
+            {
+                Warnings.Add(formatter(state, exception));
+            }
+        }
+    }
+
     // OutboundHere 預設 true（LineOptions 的類別預設值），這裡測試的重點大多不是
     // OutboundHere 本身，所以預設 LineOptions 一律關掉它並補上一個測試用的
     // ChannelAccessToken，避免每個不相關的測試都要自己顧到這條新規則。
@@ -153,6 +170,41 @@ public class DeploymentValidatorTests
         Assert.Null(ex);
     }
 
+    [Theory]
+    [InlineData(DeploymentMode.Core)]
+    [InlineData(DeploymentMode.Viewer)]
+    public void CoreOrViewer_ExplicitOutboundHereTrue_WarnsAboutDuplicateDownload(DeploymentMode mode)
+    {
+        // Core/Viewer 顯式開 OutboundHere 是合法的（把媒體下載搬離 Edge），但 Edge 端沒同步
+        // 設 false 的話兩台會重複下載——跨主機組合錯誤單機驗證不出來，只能提醒
+        var logger = new CapturingLogger();
+
+        DeploymentValidator.Validate(
+            new DeploymentOptions { Mode = mode },
+            Line(channelSecret: "", outboundHere: true, channelAccessToken: "token"),
+            new ViewerOptions(),
+            new IngestOptions { ApiKey = "key" },
+            logger);
+
+        Assert.Contains(logger.Warnings, w => w.Contains("重複下載"));
+    }
+
+    [Fact]
+    public void EdgeMode_ExplicitOutboundHereTrue_DoesNotWarnAboutDuplicateDownload()
+    {
+        // Edge 本來就是 OutboundHere 的預設歸屬，顯式設 true 只是把預設寫出來，不該被警告
+        var logger = new CapturingLogger();
+
+        DeploymentValidator.Validate(
+            new DeploymentOptions { Mode = DeploymentMode.Edge },
+            Line(channelSecret: "secret", outboundHere: true, channelAccessToken: "token"),
+            new ViewerOptions(),
+            new IngestOptions { BaseUrl = "https://core-host", ApiKey = "key" },
+            logger);
+
+        Assert.DoesNotContain(logger.Warnings, w => w.Contains("重複下載"));
+    }
+
     // ==== Stage 2：新舊模式名稱等價、Viewer 模式、Core+檢視端組合 ====
 
     [Fact]
@@ -170,6 +222,19 @@ public class DeploymentValidatorTests
         Assert.Null(exAllInOne);
         Assert.Null(exEdge);
         Assert.Null(exCore);
+    }
+
+    [Fact]
+    public void EdgeMode_ViewerExplicitlyEnabled_ThrowsWithClearMessage()
+    {
+        // Edge 沒有資料庫連線，Viewer:Enabled=true 不可能生效（capabilities 推導端會夾住）——
+        // 但「以為檢視端有開、實際上沒有」比多餘設定嚴重，要在啟動關卡用人話擋下來
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            Validate(DeploymentMode.Edge, Line(channelSecret: "secret"),
+                new IngestOptions { BaseUrl = "https://core-host", ApiKey = "key" },
+                new ViewerOptions { Enabled = true }));
+
+        Assert.Contains("Viewer:Enabled", ex.Message);
     }
 
     [Fact]

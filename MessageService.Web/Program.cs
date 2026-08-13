@@ -252,19 +252,30 @@ if (capabilities.HasDatabaseAccess && builder.Configuration.GetValue("Database:A
     var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
     var migrationLogger = scope.ServiceProvider.GetRequiredService<ILogger<Program>>();
 
-    if (databaseProvider == "Sqlite")
-    {
-        var messageDbConnectionString = builder.Configuration.GetConnectionString("Sqlite") ?? "Data Source=messages.db";
-        LegacySqliteBaseliner.EnsureBaseline(messageDbConnectionString, migrationLogger);
-    }
-
-    // 同機多站台（或同一台上多個 worker process）同時啟動時，兩邊都跑 Migrate() 有機會撞在一起：
-    // 一邊建 __EFMigrationsHistory 表、一邊也在建，SQLite 的檔案鎖會讓其中一邊直接炸掉。
-    // 具名 mutex 讓它們排隊而不是打架——單一實例的情況下這裡幾乎瞬間就能拿到鎖，沒有實際延遲。
+    // 同機多站台（或同一台上多個 worker process）同時啟動時，兩邊都跑橋接／Migrate() 有機會
+    // 撞在一起：Baseliner 兩邊同時通過「無 __EFMigrationsHistory」檢查後同時 ALTER TABLE／插
+    // baseline 紀錄，或 Migrate() 一邊建 __EFMigrationsHistory 表、一邊也在建，其中一邊會直接
+    // 炸掉。具名 mutex 讓它們排隊而不是打架——Baseliner 必須也包在裡面（它的偵測→補齊不是
+    // 原子操作，正是最需要排隊的那段）。單一實例的情況下這裡幾乎瞬間就能拿到鎖，沒有實際延遲。
     using var migrationMutex = new Mutex(initiallyOwned: false, @"Global\MessageService.Migrate");
-    migrationMutex.WaitOne();
     try
     {
+        migrationMutex.WaitOne();
+    }
+    catch (AbandonedMutexException)
+    {
+        // 前一個持鎖行程沒釋放就死掉（IIS 回收逾時強殺、當機）——這個例外拋出時鎖其實
+        // 「已經取得」，照常往下走即可；對方沒做完的部分由 Baseliner 的偵測與 Migrate()
+        // 的冪等性自然補齊
+    }
+    try
+    {
+        if (databaseProvider == "Sqlite")
+        {
+            var messageDbConnectionString = builder.Configuration.GetConnectionString("Sqlite") ?? "Data Source=messages.db";
+            LegacySqliteBaseliner.EnsureBaseline(messageDbConnectionString, migrationLogger);
+        }
+
         dbContext.Database.Migrate();
     }
     finally

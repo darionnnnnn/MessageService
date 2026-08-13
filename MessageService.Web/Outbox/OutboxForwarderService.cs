@@ -154,8 +154,10 @@ public class OutboxForwarderService(
 
         if (results is not null)
         {
+            var mentioned = new HashSet<string>();
             foreach (var item in results)
             {
+                mentioned.Add(item.WebhookEventId);
                 if (!entriesByWebhookEventId.TryGetValue(item.WebhookEventId, out var entry))
                 {
                     continue;
@@ -183,9 +185,19 @@ public class OutboxForwarderService(
                 dbContext.Entries.Remove(entry);
             }
 
-            // 批次結果沒提到的項目（SubmitBatchAsync 處理到一半遇到暫時性失敗而整批中止，
-            // 只回傳處理到那筆為止的結果）維持原樣不動——下次整批重試，對已經處理過的
-            // 項目安全（IIngestSink 的冪等保證）
+            // 批次結果沒提到的項目：現有兩套實作都會完整回覆整批（暫時性失敗是整批往外拋，
+            // 不會只回部分結果），走到這裡代表對端行為異常——照暫時性失敗給退避，不能
+            // 「原樣不動」：NextAttemptAt 沒推進的話這批會立刻重跑，變成無退避的熱迴圈。
+            // 重試對已處理過的項目安全（IIngestSink 的冪等保證）
+            foreach (var entry in entriesByWebhookEventId.Values.Where(e => !mentioned.Contains(e.WebhookEventId)))
+            {
+                entry.Attempts++;
+                entry.LastError = "Batch response did not mention this entry";
+                entry.NextAttemptAt = now + ComputeBackoff(entry.Attempts);
+                logger.LogWarning(
+                    "Outbox entry {Id} (WebhookEventId {WebhookEventId}) was not mentioned in the batch response, retrying at backoff",
+                    entry.Id, entry.WebhookEventId);
+            }
         }
         else
         {

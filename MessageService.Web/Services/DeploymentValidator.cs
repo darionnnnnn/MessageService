@@ -26,6 +26,16 @@ public static class DeploymentValidator
                 "Deployment:Mode=Core 需要設定 Ingest:ApiKey 以驗證 /api/ingest/* 進來的請求。");
         }
 
+        // Edge 沒有資料庫連線，檢視端整組服務都開不起來——顯式設 true 多半是從別台主機複製
+        // appsettings 忘記清（跟下面 Viewer 模式殘留設定的警告同一種失誤），但這個設錯不是
+        // 「多餘設定」而是「期待的功能不會存在」，寧可啟動失敗講清楚，不要讓人以為檢視端有開
+        if (!capabilities.HasDatabaseAccess && viewer.Enabled == true)
+        {
+            throw new InvalidOperationException(
+                "Deployment:Mode=Edge 沒有資料庫連線，無法啟用檢視端（Viewer:Enabled=true）。" +
+                "請移除這個設定，或改用 AllInOne／Core／Viewer 模式。");
+        }
+
         if (capabilities.ReceivesWebhook && string.IsNullOrWhiteSpace(line.ChannelSecret))
         {
             throw new InvalidOperationException(
@@ -41,6 +51,16 @@ public static class DeploymentValidator
             throw new InvalidOperationException(
                 "這台主機會對外呼叫 LINE API（Line:OutboundHere 判定為 true），需要設定 " +
                 "Line:ChannelAccessToken，否則媒體下載與頭貼快取會在背景服務啟動後持續打 401。");
+        }
+
+        // Core／Viewer 顯式把 OutboundHere 開成 true 表示「由這台打 LINE 內容／profile API」，
+        // 此時 Edge 端必須顯式設 false，否則兩台都會下載同一批媒體（LINE 內容 API 不冪等計費、
+        // 也浪費頻寬）。這種跨主機的組合錯誤單機驗證不出來，只能提醒
+        if (mode is DeploymentMode.Core or DeploymentMode.Viewer && line.OutboundHere == true)
+        {
+            logger.LogWarning(
+                "Deployment:Mode={Mode} 顯式設定了 Line:OutboundHere=true：請確認 Edge 端主機已顯式設 " +
+                "Line:OutboundHere=false，否則兩台會重複下載同一批媒體內容。", mode);
         }
 
         // AllInOne 模式關掉媒體下載／頭貼快取是可疑的設定組合（單機部署通常沒有理由要這樣做），

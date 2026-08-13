@@ -16,6 +16,8 @@ public class IngestOptions
 
     /// <summary>PUT /api/ingest/content/{id} 單次上傳允許的最大位元組數。Kestrel 預設請求主體
     /// 上限是 30MB，擋得住 LINE 的大型影片／檔案，這裡放寬（見 IngestController 如何套用）。
-    /// 預設 300MB，實際要多大依部署會經手的最大檔案而定，寫進部署文件。</summary>
+    /// 預設 300MB，實際要多大依部署會經手的最大檔案而定，寫進部署文件。
+    /// IIS 部署時 web.config 的 requestLimits maxAllowedContentLength（同為 300MB）會先擋——
+    /// 改這裡的值要同步改 MessageService.Web/web.config 那一處，反之亦然。</summary>
     public long MaxContentBytes { get; set; } = 300L * 1024 * 1024;
 }

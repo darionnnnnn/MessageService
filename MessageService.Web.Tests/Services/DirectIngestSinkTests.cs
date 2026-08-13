@@ -261,6 +261,39 @@ public class DirectIngestSinkTests : IDisposable
     }
 
     [Fact]
+    public async Task GroupRowInsertedConcurrentlyByProfileCache_TrackingRetriesAsUpdate()
+    {
+        // 側欄反正規化的併發縫隙：訊息落地後的 Groups 追蹤（TrackGroupLastMessageAsync）跟
+        // 頭貼快取（DbProfileStore）的寫入路徑併發時，兩邊都判定「這個群組還沒有列」同時插入，
+        // 後到的那邊會撞 Groups 主鍵。這裡讓第一次 SaveChanges（訊息本身）放行，把「對手先
+        // 插入 Groups 列」排到第二次 SaveChanges（側欄追蹤）之前，精確打中撞鍵 → 清 tracker →
+        // 改走 UPDATE 的重試路徑——撞鍵不能讓 ingest 失敗，也不能把對手已寫入的資料蓋掉
+        var (sink, dbContext, interceptor) = CreateSinkWithInterceptor();
+        using var _ = dbContext;
+        interceptor.BeforeSaveOnce = () =>
+        {
+            // 第一次（訊息）放行，同時把對手插隊排到下一次（側欄追蹤）的儲存之前
+            interceptor.BeforeSaveOnce = async () =>
+            {
+                var rivalOptions = new DbContextOptionsBuilder<MessageDbContext>().UseSqlite(_connection).Options;
+                using var rival = new MessageDbContext(rivalOptions);
+                rival.Groups.Add(new Group { GroupId = "G1", GroupName = "頭貼快取先寫入", UpdatedAt = DateTimeOffset.UtcNow });
+                await rival.SaveChangesAsync();
+            };
+            return Task.CompletedTask;
+        };
+
+        var result = await sink.SubmitAsync(Envelope(webhookEventId: "evt-group-race"), CancellationToken.None);
+
+        Assert.Null(result.ContentId); // 文字訊息，且 ingest 本身必須成功
+        var saved = await dbContext.GroupMessages.AsNoTracking().SingleAsync(m => m.WebhookEventId == "evt-group-race");
+        var group = Assert.Single(await dbContext.Groups.AsNoTracking().Where(g => g.GroupId == "G1").ToListAsync());
+        Assert.Equal("頭貼快取先寫入", group.GroupName); // 對手已寫入的資料保留，不被 stub 蓋掉
+        Assert.Equal(saved.Id, group.LastMessageId);     // 重試改走 UPDATE，側欄指標仍補上
+        Assert.Equal(saved.EventTimestamp, group.LastMessageAt);
+    }
+
+    [Fact]
     public async Task UniqueConstraintViolationDuringSave_RivalHasContent_ReturnsRivalContentId()
     {
         // 同上，但 rival 這次帶媒體內容——驗證回查那段投影（new { m.Id, ContentId = ... }）

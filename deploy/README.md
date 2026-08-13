@@ -14,16 +14,9 @@
 | `appsettings.Production.Core.json` | 拆機：Core | 直連資料庫＋ingest API＋檢視端（兩台拆機時） |
 | `appsettings.Production.Viewer.json` | 三台拓撲：Viewer | 純檢視端，不收 webhook、不開 ingest API |
 
-部署到某台主機時：把對應的樣板複製到該主機的站台目錄，改名成 `appsettings.Production.json`，
-填上機密（`Line:ChannelSecret`／`ChannelAccessToken`、`Ingest:ApiKey`、連線字串、
-`Encryption:Key`）與該主機實際的白名單網段。這個檔案本身不進版控（見根目錄 `.gitignore`），
-`ASPNETCORE_ENVIRONMENT=Production`（`web.config` 裡設的）會讓 ASP.NET Core 自動載入它、
-疊加在 repo 內 `appsettings.json` 的開發預設值之上。
-
-三台拓撲（Edge + Core + Viewer 各一台）時，Core 那台要另外在複製出來的
-`appsettings.Production.json` 裡加一行 `"Viewer": { "Enabled": false }`，把檢視端交給
-獨立的 Viewer 主機負責——樣板檔本身沒有內建這個 override，因為兩台／三台拓撲哪個更常見
-依部署而定。
+複製樣板、改名成 `appsettings.Production.json`、填機密的完整步驟（含三台拓撲時 Core 端
+要加的 `Viewer:Enabled=false` override）見 `docs/DEPLOYMENT-GUIDE.md` 的 Part C，
+這裡不重複寫一份——兩處各寫一份日後會失同步。
 
 ## Set-AppPool.ps1
 

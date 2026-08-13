@@ -85,6 +85,17 @@ public class DeploymentCapabilitiesTests
     }
 
     [Fact]
+    public void Edge_ViewerExplicitlyEnabled_IsClampedToFalse()
+    {
+        // Edge 沒有 MessageDbContext，檢視端整組服務開不起來——顯式 override 若照單全收，
+        // 服務註冊矩陣會註冊出解析不了的相依、炸出難懂的 DI 錯誤。推導端夾住讓註冊矩陣
+        // 保持一致；「這個設定不會生效」的人話錯誤由 DeploymentValidator 在啟動時擋下
+        var capabilities = DeploymentCapabilities.Derive(DeploymentMode.Edge, Line(), Viewer(enabled: true), Ingest("key"));
+
+        Assert.False(capabilities.ViewerEnabled);
+    }
+
+    [Fact]
     public void Viewer_ExplicitlyDisabled_IsAnInvalidButNonCrashingConfiguration()
     {
         // 沒有實際部署理由會這樣設（Viewer 模式關掉檢視端等於什麼都不做），但推導邏輯本身

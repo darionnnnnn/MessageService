@@ -173,16 +173,46 @@ public class HttpIngestSinkTests
     }
 
     [Fact]
-    public async Task SubmitBatchAsync_400Response_ThrowsPermanentIngestException()
+    public async Task SubmitBatchAsync_400Response_FallsBackToOneByOne_IsolatingThePoisonItem()
     {
-        var (sink, _) = CreateSink(_ => new HttpResponseMessage(HttpStatusCode.BadRequest)
+        // 體檢輪抓到的真 bug 的釘子：整包 400（ASP.NET Core 模型驗證對整個請求回 400，分不出
+        // 是哪一筆有問題）原本擲 PermanentIngestException——但 forwarder 的批次層級 catch 不分
+        // 型別，會把它當暫時性失敗無限退避重試：毒項目永不死信、還連坐同批健康項目。
+        // 正確行為是退回逐筆隔離：毒項目單獨拿到 400 → PermanentlyRejected（forwarder 據此
+        // 死信），健康項目照常落地——恢復合併前逐筆版「單筆死信、其餘照走」的語意
+        var envelopes = new List<IngestEnvelope> { SampleEnvelope("evt-good"), SampleEnvelope("evt-poison") };
+        var (sink, _) = CreateSink(request =>
         {
-            Content = new StringContent("invalid batch shape")
+            if (request.RequestUri!.AbsolutePath.EndsWith("events-batch"))
+            {
+                return new HttpResponseMessage(HttpStatusCode.BadRequest) { Content = new StringContent("invalid batch shape") };
+            }
+            var body = request.Content!.ReadAsStringAsync().Result;
+            return body.Contains("evt-poison")
+                ? new HttpResponseMessage(HttpStatusCode.BadRequest) { Content = new StringContent("bad envelope") }
+                : OkWithBody();
         });
 
-        var ex = await Assert.ThrowsAsync<PermanentIngestException>(
+        var results = await sink.SubmitBatchAsync(envelopes, CancellationToken.None);
+
+        Assert.Equal(2, results.Count);
+        Assert.False(results.Single(r => r.WebhookEventId == "evt-good").PermanentlyRejected);
+        Assert.True(results.Single(r => r.WebhookEventId == "evt-poison").PermanentlyRejected);
+    }
+
+    [Fact]
+    public async Task SubmitBatchAsync_2xxWithNullBody_ThrowsRetryableException_NotEmptyList()
+    {
+        // 200 但空 body（Core 端 bug 才會發生）不能回空清單——空清單對 forwarder 代表
+        // 「這批誰都沒被處理到」，項目原樣留著會立刻重跑，變成無退避的熱迴圈打爆 Core
+        var (sink, _) = CreateSink(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("null", System.Text.Encoding.UTF8, "application/json")
+        });
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
             () => sink.SubmitBatchAsync([SampleEnvelope()], CancellationToken.None));
-        Assert.Contains("invalid batch shape", ex.Message);
+        Assert.IsNotType<PermanentIngestException>(ex);
     }
 
     [Theory]

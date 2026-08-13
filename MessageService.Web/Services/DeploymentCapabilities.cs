@@ -24,7 +24,11 @@ public record DeploymentCapabilities(
         var ingestApiEnabled = mode is DeploymentMode.AllInOne or DeploymentMode.Core
             && !string.IsNullOrWhiteSpace(ingest.ApiKey);
 
-        var viewerEnabled = viewer.Enabled ?? hasDatabaseAccess;
+        // 夾住 hasDatabaseAccess：檢視端整組服務都要 MessageDbContext，Edge 顯式設
+        // Viewer:Enabled=true（多半是從別台主機複製設定忘記清）若照單全收，服務註冊矩陣會
+        // 註冊出解析不了的相依、炸出難懂的 DI 錯誤——這裡先夾住讓註冊矩陣保持一致，
+        // 人話版的啟動錯誤由 DeploymentValidator 負責
+        var viewerEnabled = (viewer.Enabled ?? hasDatabaseAccess) && hasDatabaseAccess;
         var outboundHere = line.OutboundHere ?? (mode is DeploymentMode.AllInOne or DeploymentMode.Edge);
 
         // 保留期清除只在 AllInOne／Core 跑——三台拓撲下恰好一台（Core）負責，Viewer 模式

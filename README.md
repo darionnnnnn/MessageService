@@ -101,9 +101,9 @@ RetentionCleanupService（每日固定時間讀取檢視端設定頁存的保留
 | `ContentDownload:FailedRetryWindowDays` / `MaxFailedRetries` | Failed 內容只在訊息到達後這麼多天內（預設 7）、且累計失敗次數未達上限（預設 10）才會被重新撿回，避免 LINE 內容過期後每次重啟都無限重跑 |
 | `ProfileCache:RefreshAfter` | 群組/成員名稱快取的過期時間（預設 7 天） |
 | `ProfileCache:FailureRetryAfter` | LINE profile API 失敗後的程序內冷卻時間（預設 10 分鐘），避免暫時性故障被每則訊息放大成持續性的無效呼叫 |
-| `Encryption:Enabled` / `Key` / `SearchWindowDays` | 應用層欄位加密開關與金鑰，見 [docs/ENCRYPTION.md](docs/ENCRYPTION.md)。兩個專案的 `Key` 必須完全一致 |
+| `Encryption:Enabled` / `Key` / `SearchWindowDays` | 應用層欄位加密開關與金鑰，見 [docs/ENCRYPTION.md](docs/ENCRYPTION.md)。所有直連資料庫的主機 `Key` 必須完全一致 |
 
-開發環境設定機密（在 `MessageService/` 目錄下）：
+開發環境設定機密（在 `MessageService.Web/` 目錄下）：
 
 ```bash
 dotnet user-secrets init
@@ -117,7 +117,7 @@ dotnet user-secrets set "Line:ChannelAccessToken" "<你的 access token>"
 
 1. LINE Developers Console 建立 Messaging API channel，**啟用 Allow bot to join group chats**（不開就完全收不到群組訊息）
 2. 取得 Channel Secret（Basic settings 分頁）與 Channel Access Token（Messaging API 分頁），用 user-secrets 寫入
-3. `dotnet run --project MessageService --urls http://localhost:5072` 啟動（刻意只掛 HTTP，避免 `UseHttpsRedirection` 把 LINE 的 webhook 轉址掉）
+3. `dotnet run --project MessageService.Web --urls http://localhost:5072` 啟動（刻意只掛 HTTP；`Http:UseHttpsRedirection` 預設 false，別開它，否則 LINE 的 webhook 會被轉址擋掉）
 4. 用 dev tunnel 或 ngrok 將該 port 開成 HTTPS URL
 5. 在 LINE console 設定 Webhook URL 為 `https://<tunnel>/api/line/webhook`、啟用 Use webhook，按 Verify 確認
 6. 將 bot 拉進測試群組，發文字/貼圖/圖片/影片/語音/檔案各一，確認 SQLite 落地與 `DownloadStatus` 流轉
@@ -205,7 +205,9 @@ dotnet user-secrets set "Line:ChannelAccessToken" "<你的 access token>"
 
 ```jsonc
 // appsettings.json
-"AllowedClientIps": [ "127.0.0.1", "::1", "10.1.0.0/24" ],  // 支援單一 IP 與 CIDR 網段
+"Viewer": {
+  "AllowedClientIps": [ "127.0.0.1", "::1", "10.1.0.0/24" ]  // 支援單一 IP 與 CIDR 網段
+},
 "UseForwardedHeaders": false  // 部署在反向代理（IIS/nginx）後面時才需要開啟
 ```
 
@@ -223,10 +225,10 @@ dotnet user-secrets set "Line:ChannelAccessToken" "<你的 access token>"
 
 | 設定鍵 | 說明 |
 |---|---|
-| `Database:Provider` / `ConnectionStrings:*` | 與收錄端指向同一顆資料庫 |
-| `AllowedClientIps` | IP 白名單，見上 |
+| `Database:Provider` / `ConnectionStrings:*` | 與其他直連資料庫的主機指向同一顆資料庫 |
+| `Viewer:AllowedClientIps` | IP 白名單，見上 |
 | `UseForwardedHeaders` | 反向代理後方時開啟；IIS in-process（預設部署方式）不要開，見上 |
-| `Encryption:Enabled` / `Key` / `SearchWindowDays` | **必須與收錄端完全一致**，否則訊息會顯示成 `ENC1:` 密文、媒體一律回 404，見 [docs/ENCRYPTION.md](docs/ENCRYPTION.md) |
+| `Encryption:Enabled` / `Key` / `SearchWindowDays` | **所有直連資料庫的主機必須完全一致**，否則訊息會顯示成 `ENC1:` 密文、媒體一律回 404，見 [docs/ENCRYPTION.md](docs/ENCRYPTION.md) |
 
 ---
 
@@ -268,7 +270,7 @@ dotnet user-secrets set "Line:ChannelAccessToken" "<你的 access token>"
 
 **MaskKeywords** + **MaskKeywordGroups**／**UserAliases**／**AnonymousIdentities**：檢視端寫入的顯示設定，只有這幾張表（含上面的 ViewerSettings）是 Web 專案會寫入的。`AnonymousIdentities`（GroupId+UserId 複合主鍵）是 `NameDisplayMode.Anonymous` 的代號永久指派表，跟其他幾張不同的地方是使用者不直接編輯——由 `GET /api/groups/{groupId}/messages` 第一次遇到某成員時自動指派並寫入。
 
-這些表的欄位是兩個專案間（以及未來其他消費端）的共用契約，異動需評估相容性。
+這些表的欄位是各部署角色的主機間（以及未來其他消費端）的共用契約，異動需評估相容性。
 
 ## 資料庫初始化
 
@@ -321,7 +323,7 @@ mutex，避免兩邊同時建 `__EFMigrationsHistory` 互相打架。
 
 ## 日誌（NLog）
 
-兩個專案都用 NLog，各自輸出到 Console 與**執行檔目錄下的 `logs/{專案名}-{日期}.log`**（每日一檔，保留 30 天）。`Microsoft.*` 的雜訊只留 Warning 以上。日誌路徑用 NLog 的 `${basedir}` 變數錨定在執行檔目錄，不是行程當下的工作目錄——用 IIS/Windows 服務等非互動方式啟動時，工作目錄未必等於執行檔所在目錄，寫死相對路徑會讓 log 檔案憑空跑到別的地方（甚至因為沒有寫入權限而整個 NLog 靜默失敗）。
+NLog 輸出到 Console 與**執行檔目錄下的 `logs/messageservice-{日期}.log`**（每日一檔，保留 30 天）。`Microsoft.*` 的雜訊只留 Warning 以上。日誌路徑用 NLog 的 `${basedir}` 變數錨定在執行檔目錄，不是行程當下的工作目錄——用 IIS/Windows 服務等非互動方式啟動時，工作目錄未必等於執行檔所在目錄，寫死相對路徑會讓 log 檔案憑空跑到別的地方（甚至因為沒有寫入權限而整個 NLog 靜默失敗）。
 
 - **收錄端**：收到並存檔的每則訊息（型別/群組/是否排入下載）、內容下載完成（大小/MIME）、下載重試與最終失敗、影片/語音轉檔失敗、啟動接續補跑數量、保留期清除筆數與下次排程時間、簽章驗證拒絕
 - **檢視端**：IP 白名單放行/拒絕的來源

@@ -78,14 +78,27 @@ public class HttpIngestSink(HttpClient httpClient, IOptions<IngestOptions> optio
 
         if (response.IsSuccessStatusCode)
         {
-            var payload = await response.Content.ReadFromJsonAsync<List<IngestBatchItemResult>>(cancellationToken);
-            return payload ?? [];
+            // body 是 null（200 但空回應，只可能是 Core 端有 bug）不能回空清單——空清單對
+            // forwarder 代表「這批誰都沒被處理到」，項目原樣留著會立刻重跑、變成無退避的
+            // 熱迴圈打爆 Core；往外拋讓 outbox 照退避重試才對
+            var payload = await response.Content.ReadFromJsonAsync<List<IngestBatchItemResult>>(cancellationToken)
+                ?? throw new InvalidOperationException(
+                    $"Ingest API returned an empty batch response body for {envelopes.Count} events");
+            return payload;
         }
 
         if (response.StatusCode == HttpStatusCode.BadRequest)
         {
+            // 整包 400：ASP.NET Core 的模型驗證是對整個請求回 400，分不出是批次裡哪一筆有
+            // 問題——若把整批擲成 PermanentIngestException，forwarder 的批次層級 catch 會把它
+            // 當暫時性失敗無限退避重試（毒項目永不死信、還連坐同批健康項目）。退回逐筆模式
+            // 隔離毒項目：有問題的那筆單獨拿到 400 → 永久拒絕死信，健康項目照常落地，
+            // 恢復合併前逐筆版「單筆死信、其餘照走」的語意
             var body = await response.Content.ReadAsStringAsync(cancellationToken);
-            throw new PermanentIngestException($"Ingest API rejected event batch as malformed (400): {body}");
+            logger.LogWarning(
+                "Ingest API 對整批請求回 400（{Body}）——退回逐筆模式隔離有問題的項目，{Count} 筆各自重送",
+                body, envelopes.Count);
+            return await SubmitOneByOneAsync(envelopes, cancellationToken);
         }
 
         throw new InvalidOperationException($"Ingest API returned {(int)response.StatusCode} for event batch of {envelopes.Count} events");
