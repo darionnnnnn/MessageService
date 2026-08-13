@@ -9,16 +9,45 @@
 
 ---
 
+## 最快路徑：單機部署（AllInOne）5 步驟
+
+多數情況（單一 Windows Server、SQLite 就夠、不需要跨主機拆機）走這條路就好，不用讀完整份
+文件：
+
+1. `dotnet publish MessageService.Web -c Release -o C:\Deploy\MessageService`
+2. 複製 `deploy/appsettings.Production.AllInOne.json` 到站台目錄，改名
+   `appsettings.Production.json`
+3. 填三個值：`Line:ChannelSecret`、`Line:ChannelAccessToken`、`Viewer:AllowedClientIps`
+4. IIS 建站台（應用程式集區選「沒有 Managed Code」）指到該目錄，跑
+   `deploy\Set-AppPool.ps1 -AppPoolName "你的集區名稱" -SiteName "你的網站名稱"`
+5. LINE Developers Console 的 Webhook URL 填 `https://你的網域/api/line/webhook`，按
+   **Verify**
+
+資料庫、資料表、索引都會在第一次啟動時自動建好，不用先做任何準備；SQLite 資料庫檔案預設
+放在站台目錄下的 `Db\` 資料夾，也是自動建立。
+
+拆機（兩台／三台）、SQL Server、加密請繼續往下讀完整流程；上面 5 步驟只是把 Part B～F
+的預設路徑濃縮起來，遇到問題或想確認細節時對應章節都還在。
+
+---
+
 ## 部署前要決定的三件事
 
 1. **一台包辦（AllInOne）還是拆機？**
-   - 收 webhook 的主機碰得到資料庫 → **AllInOne**（多數情況選這個）
+   - 收 webhook 的主機碰得到資料庫、單機就夠 → **AllInOne** 一台（多數情況選這個）
+   - 收 webhook 的主機碰得到資料庫，但想把網頁流量隔開成獨立一台 → **AllInOne
+     （`Viewer:Enabled=false`）＋獨立 `Viewer`** 兩台（硬前提：要用 SQL Server，見下一點）
    - webhook 要對外曝露在 DMZ、資料庫在內網連不到 → **Edge + Core** 兩台拆機
    - 想讓檢視端獨立一台、Core 專職資料庫與 ingest → **Edge + Core + Viewer** 三台
-   - 四種角色的能力矩陣見 [DEPLOYMENT-MODES.md](DEPLOYMENT-MODES.md)
+   - 四種角色的能力矩陣、兩台拓撲兩種切法的完整比較見 [DEPLOYMENT-MODES.md](DEPLOYMENT-MODES.md)
 2. **SQL Server 還是 SQLite？**
-   - 正式環境、多人同時查詢 → SQL Server
-   - 單機小規模、省成本 → SQLite（單一檔案，本文件預設值）
+   - 正式環境、多人同時查詢 → SQL Server：填 `ConnectionStrings:SqlServer` 就好，不用另外設
+     `Database:Provider`——沒填就自動用 SQLite、填了就自動用 SQL Server（見
+     [DEPLOYMENT-MODES.md](DEPLOYMENT-MODES.md) 的 `Database:Provider` 說明）
+   - 單機小規模、省成本 → SQLite（單一檔案，什麼都不用填，本文件預設值）
+   - 單機部署（AllInOne）額外多一層保護：填了 SQL Server 連線字串但啟動時連不上／schema
+     不對，會自動改用本機 SQLite 撐起服務（`Database:SqliteFallback`，預設開啟），不會直接
+     打不開站台；拆機模式（Edge／Core／Viewer）沒有這層，設定錯誤會直接啟動失敗
 3. **要不要開應用層加密？**（選用，跳到 [Part G](#part-g選用開啟應用層加密)）
 
 ## 需要準備的東西
@@ -63,6 +92,12 @@ dotnet publish MessageService.Web -c Release -o C:\Deploy\MessageService
 
 每台主機都用**同一份成品**，差別只在站台目錄下各自的 `appsettings.Production.json`。
 
+> **重佈方式注意**：SQLite 資料庫檔案預設放在站台目錄下的 `Db\` 子資料夾。上面這種
+> `dotnet publish -o` 覆蓋式重佈只覆蓋程式檔、不刪多餘檔案，`Db\` 與
+> `appsettings.Production.json` 都安全；但「先清空目錄再放新版」的重佈方式
+> （robocopy `/MIR`、Web Deploy 同步刪除、砍資料夾重解壓）會把 `Db\` 連同所有訊息
+> 一起清掉——用這類方式的話，請先照 [D3](#d3-資料夾權限) 的說明把資料庫搬到站台目錄以外。
+
 ---
 
 ## Part C：設定站台目錄下的 `appsettings.Production.json`
@@ -74,7 +109,7 @@ dotnet publish MessageService.Web -c Release -o C:\Deploy\MessageService
 | `deploy/appsettings.Production.AllInOne.json` | 單機部署 | 一台主機收 webhook＋直連資料庫＋檢視端全包 |
 | `deploy/appsettings.Production.Edge.json` | 拆機：Edge | 只收 webhook，透過 ingest API 轉送給 Core |
 | `deploy/appsettings.Production.Core.json` | 拆機：Core | 直連資料庫＋ingest API＋檢視端（兩台拆機時） |
-| `deploy/appsettings.Production.Viewer.json` | 三台拓撲：Viewer | 純檢視端，不收 webhook、不開 ingest API |
+| `deploy/appsettings.Production.Viewer.json` | 三台拓撲、或兩台拓撲切法 A：Viewer | 純檢視端，不收 webhook、不開 ingest API（見 [DEPLOYMENT-MODES.md](DEPLOYMENT-MODES.md) 的兩台拓撲兩種切法） |
 
 部署到某台主機時：
 
@@ -85,7 +120,8 @@ dotnet publish MessageService.Web -c Release -o C:\Deploy\MessageService
    與／或 `Ingest:AllowedClientIps`（Edge 主機的對外 IP）——**兩個是分開的設定，語意不同，
    不要填反**
 4. 三台拓撲時，Core 那台額外加一行 `"Viewer": { "Enabled": false }`，把檢視端交給獨立的
-   Viewer 主機負責
+   Viewer 主機負責；兩台拓撲的切法 A（AllInOne＋獨立 Viewer）則是 AllInOne 那台加這一行，
+   見 [DEPLOYMENT-MODES.md](DEPLOYMENT-MODES.md) 的兩台拓撲說明
 
 `ASPNETCORE_ENVIRONMENT=Production`（已內建在 `web.config`）會讓 ASP.NET Core 自動載入
 `appsettings.Production.json`，疊加在成品裡 `appsettings.json` 的開發預設值之上。這個檔案
@@ -97,7 +133,7 @@ dotnet publish MessageService.Web -c Release -o C:\Deploy\MessageService
 
 ### SQL Server：建表
 
-只有 SQL Server 需要手動建表；SQLite 由程式啟動時自動跑 migrations（見下方 D3）。
+只有 SQL Server 需要手動建表；SQLite 由程式啟動時自動跑 migrations（見下方 D5）。
 
 ```bash
 cd MessageService.sln 所在目錄
@@ -137,6 +173,25 @@ dotnet ef database update --project MessageService.Data --context SqlServerMessa
 SQLite 環境不受影響——既有檔案由 `LegacySqliteBaseliner` 一次性橋接到 baseline，
 之後跟全新 SQLite migrations 走同一條路，沒有 `ALTER COLUMN` 鎖表的問題。
 
+### 既有 SQLite 環境升級到新的預設資料庫路徑
+
+**這一節只適用於「按舊版樣板部署過」的既有環境**——舊版樣板把 `messages.db`／`outbox.db`
+直接指到站台目錄本身（跟 `dotnet publish -o` 的輸出目錄同一個路徑），新版樣板改成站台目錄下
+的 `Db\` 子資料夾。全新部署直接用新樣板即可，不用管這段。
+
+升級步驟：
+
+1. 停掉站台
+2. 在站台目錄下建立 `Db\` 子資料夾
+3. 把既有的 `messages.db`／`messages.db-wal`／`messages.db-shm`（若存在）與
+   `outbox.db`／`outbox.db-wal`／`outbox.db-shm`（若存在）搬進 `Db\`
+4. 把 `appsettings.Production.json` 換成新版樣板的內容（或至少把 `ConnectionStrings`
+   段落換成新版的 `Db/messages.db`／`Db/outbox.db`）
+5. 啟動站台，確認 log 沒有錯誤、資料照舊完整
+
+不搬檔案也不會啟動失敗——程式會依新的預設路徑在 `Db\` 建一個全新的空資料庫，只是舊資料
+「看起來消失了」（其實還在站台目錄下的舊路徑，只是程式不再讀它），所以務必照上面的步驟搬檔案。
+
 ---
 
 ## Part D：建立 IIS 站台（每台主機都要做一次）
@@ -163,9 +218,15 @@ SQLite 環境不受影響——既有檔案由 `LegacySqliteBaseliner` 一次性
 
 ### D3. 資料夾權限
 
-`appsettings.Production.json` 所在資料夾、SQLite 檔案（`messages.db`／`outbox.db`）所在
-資料夾、`logs/` 資料夾都要給 IIS 應用程式集區的執行帳號（預設 `ApplicationPoolIdentity`）
-完整讀寫權限。
+`appsettings.Production.json` 所在資料夾、`logs/` 資料夾都要給 IIS 應用程式集區的執行帳號
+（預設 `ApplicationPoolIdentity`）完整讀寫權限——一般情況下站台目錄整層開好這個權限就夠，
+SQLite 檔案（`messages.db`／`outbox.db`）預設就放在站台目錄下的 `Db\` 子資料夾，自動涵蓋
+在內，不用另外設定；程式第一次啟動時會自動建立這個子資料夾。
+
+只有把 `ConnectionStrings` 改指到站台目錄以外的絕對路徑時（見
+[appsettings.Production.AllInOne.json](../deploy/appsettings.Production.AllInOne.json) 的
+說明——通常是因為重佈方式會清空整個站台目錄），才需要額外對那個路徑授權，可以用
+`Set-AppPool.ps1 -DataDirectory` 一次做掉（見 D4）。
 
 ### D4. 設定應用程式集區常駐執行（重要，容易漏掉）
 
@@ -181,7 +242,13 @@ IIS 應用程式集區預設**閒置 20 分鐘沒有請求就回收**、**固定
 ```
 
 這支指令稿會把集區設成 `startMode=AlwaysRunning`、閒置逾時與固定間隔回收都歸零，並開啟
-站台的 `preloadEnabled`。
+站台的 `preloadEnabled`。若把 SQLite 資料庫檔案搬到站台目錄以外（見 D3），加上
+`-DataDirectory` 一次把目錄建立與授權都做掉：
+
+```powershell
+.\Set-AppPool.ps1 -AppPoolName "你的集區名稱" -SiteName "你的網站名稱" `
+    -DataDirectory "C:\ProgramData\MessageService"
+```
 
 ### D5. 啟動站台
 
@@ -194,10 +261,13 @@ Core 的 ingest API，Core 沒起來的話 Edge 只是把事件暫存在本機 o
 
 ---
 
-## Part E：拆機模式的額外設定
+## Part E：拆機模式（Edge＋Core）的額外設定
 
-適用情境：webhook 要對外曝露（DMZ），資料庫在內網連不到對外主機。除了 Part D 的一般步驟，
-拆機模式還要注意：
+適用情境：webhook 要對外曝露（DMZ），資料庫在內網連不到對外主機——也就是
+[DEPLOYMENT-MODES.md](DEPLOYMENT-MODES.md) 兩台拓撲裡的切法 B。如果選的是切法 A
+（`AllInOne`＋獨立 `Viewer`），不需要這個 Part：沒有 ingest API、沒有 outbox 跨主機轉送、
+沒有 `Ingest:ApiKey` 要對齊，照 Part C 的樣板說明填完就好。除了 Part D 的一般步驟，
+拆機模式（Edge＋Core）還要注意：
 
 ### E1. Edge ↔ Core 的共用設定
 
@@ -271,8 +341,11 @@ Edge 端的 outbox 排空預設會打 Core 的批次 ingest 端點（`POST /api/
       心跳會第一個停，不用像過去那樣等到隔天早上翻 log 才發現）
 - [ ] 站台目錄的存取權限只開放應用程式集區帳號與管理者——`appsettings.Production.json`
       含明文機密，不該讓其他人（或其他應用程式集區）讀得到
-- [ ] 重佈演練：解壓一份新的發佈成品到同一個站台目錄，確認
-      `appsettings.Production.json` 還在、內容沒被覆蓋、站台仍能正常啟動
+- [ ] 重佈演練：用你實際會用的重佈方式（不是隨便解壓一份到別的資料夾）跑一次，確認
+      `appsettings.Production.json` 還在、內容沒被覆蓋，**且 `Db\messages.db`／
+      `Db\outbox.db`（或你改指到的絕對路徑）也還在、資料沒有遺失**——「先清空目錄再放
+      新版」的重佈方式（robocopy `/MIR`、Web Deploy 同步刪除、砍資料夾重解壓）預設會把
+      `Db\` 一起清掉，若你用這種方式，請先照 D3 的說明把資料庫搬到站台目錄以外
 - [ ] （拆機模式）設定頁「主機狀態」區塊看得到 Edge 主機那一列（由 Core 代寫，見
       `POST /api/ingest/heartbeat`），且 outbox 積壓數是 0 或很快歸零
 - [ ] （多台直連資料庫）設定頁「主機狀態」區塊裡各主機的「加密金鑰指紋」欄位一致
@@ -292,7 +365,8 @@ Edge 端的 outbox 排空預設會打 Core 的批次 ingest 端點（`POST /api/
 
 ### I2. SQLite
 
-`messages.db`／`outbox.db` 各自是**單一檔案**，但啟用 WAL 模式後（本專案預設開啟，見
+`messages.db`／`outbox.db` 預設放在站台目錄下的 `Db\` 資料夾（或你改指到的絕對路徑，見 D3）。
+各自是**單一檔案**，但啟用 WAL 模式後（本專案預設開啟，見
 [README.md](../README.md)）實際上是三個檔案一組：`messages.db`、`messages.db-wal`、
 `messages.db-shm`（`outbox.db` 同理）。**只複製主檔案而漏了 `-wal`，還原出來的資料庫會
 遺失最近尚未 checkpoint 的異動**——WAL 模式下最新的寫入可能還停留在 `-wal` 檔案裡，
@@ -350,6 +424,7 @@ Edge 端的 outbox 排空預設會打 Core 的批次 ingest 端點（`POST /api/
 | 加密後訊息變亂碼／媒體全部消失 | 各主機的 `Encryption:Key` 不一致 |
 | 半夜的保留期清除／outbox 排空沒有動靜 | 應用程式集區被閒置逾時或固定間隔回收殺掉——確認 [Part D4](#d4-設定應用程式集區常駐執行重要容易漏掉) 的常駐設定有套用 |
 | Edge 端 log 出現找不到 events-batch（404）的警告 | Core 端還沒升級到支援批次端點，功能仍正常（自動退回逐筆模式），升級 Core 後警告會自動消失 |
+| 明明填了 SQL Server 連線字串，AllInOne 站台卻在用本機 SQLite | 啟動時 SQL Server 探測失敗，觸發了救場（`Database:SqliteFallback`，預設開啟）——看 log 裡的 Error 訊息找失敗原因，或打開檢視端設定頁「主機狀態」分頁看救援模式警告；修好 SQL Server 後重啟即可切回，見 [部署前要決定的三件事](#部署前要決定的三件事) |
 
 ---
 

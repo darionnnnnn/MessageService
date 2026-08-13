@@ -9,10 +9,11 @@ public static class DeploymentValidator
 {
     public static void Validate(
         DeploymentOptions deployment, LineOptions line, ViewerOptions viewer, IngestOptions ingest, ILogger logger,
-        string? databaseProvider = null, bool hasSqlServerConnectionString = false)
+        DatabaseStartupDecision? database = null)
     {
         var mode = deployment.Mode;
         var capabilities = DeploymentCapabilities.Derive(mode, line, viewer, ingest);
+        var db = database ?? DatabaseStartupDecision.Default;
 
         if (mode is DeploymentMode.Edge &&
             (string.IsNullOrWhiteSpace(ingest.BaseUrl) || string.IsNullOrWhiteSpace(ingest.ApiKey)))
@@ -84,16 +85,47 @@ public static class DeploymentValidator
                 "直到設定允許的來源網段為止。", mode);
         }
 
-        // Provider 鍵決定啟動時實際連的是哪個資料庫（見 Program.cs 的 databaseProvider 判斷）——
-        // 顯式維持 Sqlite 預設、不做「有連線字串就自動切換」的隱式推導（殘留設定不該悄悄換
-        // 資料庫），但這代表打錯 Provider 鍵或忘記改的情況只能靠這條警告攔：已經設定了
-        // SqlServer 連線字串，Provider 卻還是 Sqlite，多半是想切換但忘了改這個鍵
-        if (databaseProvider == "Sqlite" && hasSqlServerConnectionString)
+        // 顯式設定 SqlServer 卻沒有可用的連線字串——不管救場開不開，這都是「連探測都沒得做」
+        // 的更基本錯誤，寧可啟動失敗講清楚，不要留給 EF 在 UseSqlServer(null) 時丟出難懂的例外
+        if (db.EffectiveProvider == "SqlServer" && !db.HasSqlServerConnectionString)
+        {
+            throw new InvalidOperationException(
+                "Database:Provider 是 SqlServer，但 ConnectionStrings:SqlServer 沒有設定值或是空字串，" +
+                "無法連線。請設定連線字串，或移除 Database:Provider 讓程式依連線字串自動推導。");
+        }
+
+        // 需求2：Database:Provider 未設定時依 ConnectionStrings:SqlServer 有沒有值推導，顯式設定
+        // 永遠優先（見 DatabaseProviderResolver）。推導路徑不會出現「Sqlite 但留著 SqlServer
+        // 連線字串」這個組合（有連線字串就會被推導成 SqlServer）——只有使用者自己顯式蓋過推導
+        // 結果、設成 "Sqlite"，才是典型的「想切換但忘記改」或「複製設定殘留」，直接檢查
+        // ConfiguredProvider 本身而不是派生出來的旗標，跟救場有沒有觸發無關，語意才不會混淆
+        if (string.Equals(db.ConfiguredProvider, "Sqlite", StringComparison.OrdinalIgnoreCase)
+            && db.HasSqlServerConnectionString)
         {
             logger.LogWarning(
-                "Database:Provider 是 Sqlite，但 ConnectionStrings:SqlServer 有設定值——這個連線字串不會被使用。" +
-                "如果是想改用 SQL Server，請把 Database:Provider 改成 \"SqlServer\"；如果只是複製設定殘留，" +
-                "可以移除這個連線字串。");
+                "Database:Provider 顯式設定為 Sqlite，但 ConnectionStrings:SqlServer 有設定值——這個連線" +
+                "字串不會被使用。如果是想改用 SQL Server，請移除 Database:Provider 讓程式自動推導，或改成" +
+                " \"SqlServer\"；如果只是複製設定殘留，可以移除這個連線字串。");
+        }
+
+        // Database:SqliteFallback 只有 AllInOne 會用到（見 Program.cs 的救場觸發條件）——其他
+        // 模式設了這個鍵大概率是複製設定殘留，不是錯誤但值得提醒，免得誤以為這台也有救場
+        if (mode is not DeploymentMode.AllInOne && db.SqliteFallbackConfigured)
+        {
+            logger.LogWarning(
+                "Database:SqliteFallback 只在 Deployment:Mode=AllInOne 時有效，這台主機（{Mode}）的設定" +
+                "不會有任何作用。", mode);
+        }
+
+        // 救場已經觸發：本機正在用 SQLite 撐著，不是原本設定要的 SQL Server——這是需要立刻處理
+        // 的異常狀態，用 Error 等級確保被注意到，訊息帶上原始失敗原因方便直接定位問題
+        if (db.SqliteFallbackTriggered)
+        {
+            logger.LogError(
+                "Deployment:Mode=AllInOne 設定使用 SQL Server，但啟動時連線／schema 驗證失敗，已改用" +
+                "本機 SQLite 運作（Database:SqliteFallback 預設開啟，設 false 可改成寧可啟動失敗）：" +
+                "{Reason}。修好 SQL Server 後重新啟動即可切回；這段期間寫入本機 SQLite 的資料不會自動" +
+                "搬到 SQL Server，見 docs/DEPLOYMENT-GUIDE.md。", db.SqliteFallbackReason);
         }
 
         // Viewer 模式不會用到 Line／Ingest 設定——多半是從別台主機複製 appsettings 忘記清掉，

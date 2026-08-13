@@ -280,13 +280,15 @@ public class MaskingRuleSetTests
     }
 
     [Fact]
-    public void MaskText_DefaultPiiSettings_WhenNotSpecified_IsAllEnabled()
+    public void MaskText_DefaultPiiSettings_WhenNotSpecified_MatchesViewerSettingsDefaults()
     {
-        // MaskingRuleSet 建構子沒帶 PiiMaskingSettings 時預設全開，跟 ViewerSettings 欄位的
-        // 資料庫預設值（見 MessageDbContext 的 model／migration）一致
+        // MaskingRuleSet 建構子沒帶 PiiMaskingSettings 時退回 ViewerSettings 類別預設
+        // （見 PiiMaskingSettings.Defaults 的單一定義點說明）——身分證等三種預設開啟、
+        // 健保卡預設關閉（12 碼數字跟宅配貨運單號撞格式）
         var rules = CreateRuleSet(pii: null);
 
         Assert.Equal(MaskMiddleExpected("A123456789"), rules.MaskText("G1", "A123456789"));
+        Assert.Equal("123456789012", rules.MaskText("G1", "123456789012")); // 健保卡格式：預設不遮
     }
 
     [Fact]

@@ -286,14 +286,16 @@ public class SettingsControllerTests : IDisposable
     // === 個資去識別化開關（決策7：預設全開） ===
 
     [Fact]
-    public async Task GetPiiMaskingSettings_DefaultsToAllEnabled()
+    public async Task GetPiiMaskingSettings_Defaults_NhiCardOffOthersOn()
     {
+        // 健保卡固定 12 碼數字跟宅配貨運單號格式撞在一起，預設關閉；其他三種格式沒有這個問題，
+        // 維持預設全開
         var settings = await _fixture.Client.GetFromJsonAsync<PiiMaskingSettingsDto>("/api/settings/pii-masking");
 
         Assert.True(settings!.MaskNationalId);
         Assert.True(settings.MaskMobilePhone);
         Assert.True(settings.MaskLandline);
-        Assert.True(settings.MaskNhiCard);
+        Assert.False(settings.MaskNhiCard);
     }
 
     [Fact]
@@ -457,5 +459,50 @@ public class SettingsControllerTests : IDisposable
         Assert.Equal(
             [("Core", "a-host"), ("Edge", "a-host"), ("Edge", "b-host")],
             rows!.Select(r => (r.Role, r.MachineName)));
+    }
+
+    [Fact]
+    public async Task DeleteHostHeartbeat_ExistingRow_RemovesIt()
+    {
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            dbContext.HostHeartbeats.Add(new HostHeartbeat
+            {
+                Role = "Edge", MachineName = "retired-host", LastSeenAt = DateTimeOffset.UtcNow.AddDays(-30)
+            });
+            await Task.CompletedTask;
+        });
+
+        var response = await _fixture.Client.DeleteAsync("/api/settings/host-heartbeats/Edge/retired-host");
+
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+        var rows = await _fixture.Client.GetFromJsonAsync<List<HostHeartbeatDto>>("/api/settings/host-heartbeats");
+        Assert.Empty(rows!);
+    }
+
+    [Fact]
+    public async Task DeleteHostHeartbeat_UnknownRow_ReturnsNotFound()
+    {
+        var response = await _fixture.Client.DeleteAsync("/api/settings/host-heartbeats/Edge/nonexistent-host");
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task DeleteHostHeartbeat_OnlyRemovesMatchingRow_LeavesOthersIntact()
+    {
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            dbContext.HostHeartbeats.AddRange(
+                new HostHeartbeat { Role = "Edge", MachineName = "keep-me", LastSeenAt = DateTimeOffset.UtcNow },
+                new HostHeartbeat { Role = "Core", MachineName = "keep-me", LastSeenAt = DateTimeOffset.UtcNow });
+            await Task.CompletedTask;
+        });
+
+        await _fixture.Client.DeleteAsync("/api/settings/host-heartbeats/Edge/keep-me");
+
+        var rows = await _fixture.Client.GetFromJsonAsync<List<HostHeartbeatDto>>("/api/settings/host-heartbeats");
+        var remaining = Assert.Single(rows!);
+        Assert.Equal(("Core", "keep-me"), (remaining.Role, remaining.MachineName));
     }
 }

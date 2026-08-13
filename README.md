@@ -81,9 +81,10 @@ RetentionCleanupService（每日固定時間讀取檢視端設定頁存的保留
 | 設定鍵 | 說明 |
 |---|---|
 | `Deployment:Mode` | `AllInOne`（預設）／`Edge`／`Core`／`Viewer`（舊名 `Full`／`Line`／`Db` 相容），見 [docs/DEPLOYMENT-MODES.md](docs/DEPLOYMENT-MODES.md) |
-| `Database:Provider` | `Sqlite`（預設）或 `SqlServer` |
-| `ConnectionStrings:SqlServer` / `Sqlite` | 連線字串 |
-| `ConnectionStrings:Outbox` | 本機 outbox 的 SQLite 檔，預設 `Data Source=outbox.db` |
+| `Database:Provider` | `Sqlite`／`SqlServer`，選填。未設定時依 `ConnectionStrings:SqlServer` 有沒有值推導，顯式設定永遠優先，見 [docs/DEPLOYMENT-MODES.md](docs/DEPLOYMENT-MODES.md) |
+| `Database:SqliteFallback` | `bool`，預設 `true`，僅 `Deployment:Mode=AllInOne` 有效。有效 provider 為 SqlServer 時，啟動時探測連線／schema 失敗就改用本機 SQLite 撐起服務；設 `false` 改成寧可啟動失敗 |
+| `ConnectionStrings:SqlServer` / `Sqlite` | 連線字串，`Sqlite` 預設 `Data Source=Db/messages.db`（相對路徑以 ContentRootPath 為基準，第一次啟動自動建立目錄） |
+| `ConnectionStrings:Outbox` | 本機 outbox 的 SQLite 檔，預設 `Data Source=Db/outbox.db` |
 | `Database:AutoMigrate` | 啟動時是否自動跑 `Database.Migrate()`，預設 `true` |
 | `Line:ChannelSecret` | 簽章驗證用。**勿進版控**，開發用 user-secrets、正式用站台目錄下不進版控的 `appsettings.Production.json` |
 | `Line:ChannelAccessToken` | 內容下載與 profile API 用，同上 |
@@ -113,7 +114,7 @@ dotnet user-secrets set "Line:ChannelAccessToken" "<你的 access token>"
 
 ### 本機串接 LINE 測試
 
-完整的逐步操作（建立 Bot、取得金鑰、Webhook 設定、測試驗收、疑難排解）see **[docs/LINE-BOT-SETUP.md](docs/LINE-BOT-SETUP.md)**。快速版：
+完整的逐步操作（建立 Bot、取得金鑰、Webhook 設定、測試驗收、疑難排解）見 **[docs/LINE-BOT-SETUP.md](docs/LINE-BOT-SETUP.md)**。快速版：
 
 1. LINE Developers Console 建立 Messaging API channel，**啟用 Allow bot to join group chats**（不開就完全收不到群組訊息）
 2. 取得 Channel Secret（Basic settings 分頁）與 Channel Access Token（Messaging API 分頁），用 user-secrets 寫入
@@ -148,7 +149,7 @@ dotnet user-secrets set "Line:ChannelAccessToken" "<你的 access token>"
 - 文字訊息中的網址會轉成可點連結（`target="_blank"` + `rel="noopener noreferrer"`）；所有內容（含搜尋高亮）一律用 DOM 節點組裝（`textContent`／`createElement`），不用 `innerHTML`，避免訊息內容造成 XSS
 - **手機版（<768px）**：群組列表與聊天面板全螢幕切換，標頭出現「‹」返回鈕，仿 LINE 手機版導覽
 
-**設定**：聊天頁裡的寬版 modal（`modal-xl`，手機自動轉全螢幕），不再是獨立頁面——`/Home/Settings` 路由已移除。上方四個頁籤：介面顯示（字體大小 px 數值設定，見上方「字級」；「對話內容使用全版面寬度」勾選框，預設不勾＝桌面 2/3）、隱私與匿名（名稱顯示四模式，含完全匿名動植物代號；別名編輯器可依群組篩選成員；台灣個資自動遮蔽四開關——身分證/手機/市話/健保卡，預設全開；訊息保留天數，異動有確認對話框防手滑）、關鍵字遮蔽規則（新增/刪除，預設等長 `*` 或自訂替換字串，全部群組或指定群組）、主機狀態（各部署主機的存活燈號／最後回報時間／outbox 積壓／加密金鑰指紋，讀 `HostHeartbeats` 表，指紋不一致時顯示警告，見下方資料表說明）。多數變更即存（字體大小與對話寬度為 localStorage、不進 DB；PII 開關切換即 PUT；其餘 PUT 後顯示 toast），保留天數則需按「儲存」並過確認對話框才會寫入。資料只在**第一次**打開 modal 時才載入（`shown.bs.modal` 才打 API，不會讓聊天頁一開就多打一輪設定用的請求），成功寫入任何變更後關閉 modal 會自動重新整理目前的訊息視窗與側欄，不用手動重新整理頁面。
+**設定**：聊天頁裡的寬版 modal（`modal-xl`，手機自動轉全螢幕），不再是獨立頁面——`/Home/Settings` 路由已移除。上方四個頁籤：介面顯示（字體大小 px 數值設定，見上方「字級」；「對話內容使用全版面寬度」勾選框，預設不勾＝桌面 2/3）、隱私與匿名（名稱顯示四模式，含完全匿名動植物代號；別名編輯器可依群組篩選成員；台灣個資自動遮蔽四開關——身分證/手機/市話預設開啟、健保卡預設關閉（12 碼數字跟宅配貨運單號撞格式）；訊息保留天數，異動有確認對話框防手滑）、關鍵字遮蔽規則（新增/刪除，預設等長 `*` 或自訂替換字串，全部群組或指定群組）、主機狀態（各部署主機的存活燈號／最後回報時間／outbox 積壓／加密金鑰指紋，讀 `HostHeartbeats` 表，指紋不一致時顯示警告，見下方資料表說明）。多數變更即存（字體大小與對話寬度為 localStorage、不進 DB；PII 開關切換即 PUT；其餘 PUT 後顯示 toast），保留天數則需按「儲存」並過確認對話框才會寫入。資料只在**第一次**打開 modal 時才載入（`shown.bs.modal` 才打 API，不會讓聊天頁一開就多打一輪設定用的請求），成功寫入任何變更後關閉 modal 會自動重新整理目前的訊息視窗與側欄，不用手動重新整理頁面。
 
 **API**（都在 `MessageService.Web/Controllers/Api/`）：
 
@@ -180,7 +181,7 @@ dotnet user-secrets set "Line:ChannelAccessToken" "<你的 access token>"
 `IMaskingService.LoadRulesAsync()` 每個請求只呼叫一次，把當下的名稱顯示模式、關鍵字規則、別名對照載成一份 `IMaskingRuleSet` 快照，套用到該次回應的每則訊息時全是同步運算，避免每則訊息各打一次 DB。
 
 - **關鍵字遮蔽**：不分大小寫的純字串比對（不用 regex），可設定全部群組或指定群組套用；預設遮蔽為與關鍵字等長的 `*`，也可設定自訂替換字串
-- **台灣個資自動遮蔽**：跟關鍵字規則互補的第二層——不需要事先知道要輸入什麼關鍵字，只要「長得像」就遮。身分證／統一證號、手機、市話、健保卡四種格式各有獨立開關（存 `ViewerSettings`，預設全開，設定頁可關），命中的字串一律套用跟名稱遮蔽同一套「首尾保留、中間 `*`」。實作在 `MaskingRuleSet.MaskText`，四組 regex 的邊界處理見下方「設計決策備忘」；搜尋端因為是拿遮蔽後的文字重新驗證，所以個資遮蔽自動也是搜尋的過濾條件，不會變成後門
+- **台灣個資自動遮蔽**：跟關鍵字規則互補的第二層——不需要事先知道要輸入什麼關鍵字，只要「長得像」就遮。身分證／統一證號、手機、市話、健保卡四種格式各有獨立開關（存 `ViewerSettings`，前三種預設開啟、健保卡預設關閉——12 碼數字跟宅配貨運單號撞格式，設定頁可調），命中的字串一律套用跟名稱遮蔽同一套「首尾保留、中間 `*`」。實作在 `MaskingRuleSet.MaskText`，四組 regex 的邊界處理見下方「設計決策備忘」；搜尋端因為是拿遮蔽後的文字重新驗證，所以個資遮蔽自動也是搜尋的過濾條件，不會變成後門
 - **名稱顯示四模式**：
   - `Original`：顯示原始快取的 LINE 顯示名稱，沒有快取則顯示 UserId；唯一會回傳真實頭貼 URL 的模式
   - `MaskMiddle`：首尾字保留、中間 `*`（1 字全遮；2 字只留首字，如「小明」→「小*」；3 字以上首尾各留一字，如「王小明」→「王*明」）
@@ -233,7 +234,7 @@ dotnet user-secrets set "Line:ChannelAccessToken" "<你的 access token>"
 | `Viewer:AllowedClientIps` | IP 白名單，見上 |
 | `UseForwardedHeaders` / `ForwardedHeaders:KnownProxies` / `KnownNetworks` | 反向代理後方時開啟並設定其中一項；IIS in-process（預設部署方式）不要開，見上 |
 | `Encryption:Enabled` / `Key` / `SearchWindowDays` | **所有直連資料庫的主機必須完全一致**，否則訊息會顯示成 `ENC2:` 密文、媒體一律回 404，見 [docs/ENCRYPTION.md](docs/ENCRYPTION.md) |
-| `Heartbeat:Enabled` / `IntervalSeconds` / `OutboxBacklogAlertMinutes` | 所有部署模式都跑的存活回報，供設定頁「主機狀態」區塊顯示；`Enabled` 預設 `true`，只有測試主機會關掉；`IntervalSeconds` 預設 60；`OutboxBacklogAlertMinutes`（預設 30）是 outbox 最舊未死信項目滯留幾分鐘就記一則 Error |
+| `Heartbeat:Enabled` / `IntervalSeconds` / `OutboxBacklogAlertMinutes` | 所有部署模式都跑的存活回報，供設定頁「主機狀態」區塊顯示；`Enabled` 預設 `true`，只有測試主機會關掉；`IntervalSeconds` 預設 60，**所有主機要設成一致**（狀態燈的 Online/Delayed/Offline 門檻是以檢視端這台的設定為基準判斷，見 `SettingsController.ComputeStatus`）；`OutboxBacklogAlertMinutes`（預設 30）是 outbox 最舊未死信項目滯留幾分鐘就記一則 Error |
 
 ---
 
@@ -269,11 +270,11 @@ dotnet user-secrets set "Line:ChannelAccessToken" "<你的 access token>"
 | FailedAttempts | int | 累計下載失敗次數，`ContentDownload:MaxFailedRetries` 用它判斷是否放棄重試 |
 | LastAttemptAt | datetimeoffset, null | 最後一次嘗試下載的時間 |
 
-**Groups** / **GroupMembers**：收錄端背景快取的群組名稱、成員顯示名稱與頭像 URL（7 天 TTL，來源是 LINE 的 group summary / member profile API），檢視端用來把 GroupId/UserId 轉成人看得懂的名稱。快取失敗時 fallback 顯示原始 ID；`ProfileCache:FailureRetryAfter`（預設 10 分鐘）冷卻期內失敗不會重複呼叫 LINE API。加密開啟時群組名稱/顯示名稱/頭像 URL 同樣走 `ENC2:` 整值加密。
+**Groups** / **GroupMembers**：收錄端背景快取的群組名稱、成員顯示名稱與頭像 URL（7 天 TTL，來源是 LINE 的 group summary / member profile API），檢視端用來把 GroupId/UserId 轉成人看得懂的名稱。快取失敗時 fallback 顯示原始 ID；`ProfileCache:FailureRetryAfter`（預設 10 分鐘）冷卻期內失敗不會重複呼叫 LINE API。加密開啟時群組名稱/顯示名稱/頭像 URL 同樣走 `ENC2:` 整值加密。檢視端也會寫這張表：`Groups.LastMessageId` 指向的訊息若被保留期清除刪掉，`GroupsController.RecoverDriftedLastMessageAsync` 會即時查回目前真正的最後一則並修正這一列（見 `docs/DEPLOYMENT-GUIDE.md` 的 Viewer 帳號權限說明）。
 
-**ViewerSettings**（單列，Id 固定為 1）：除既有的名稱顯示模式外，新增 `RetentionDays`（保留天數，預設 1095＝3 年，`RetentionCleanupService` 每次執行讀取）與 `MaskNationalId`/`MaskMobilePhone`/`MaskLandline`/`MaskNhiCard`（台灣個資自動遮蔽四開關，預設全開）。
+**ViewerSettings**（單列，Id 固定為 1）：除既有的名稱顯示模式外，新增 `RetentionDays`（保留天數，預設 1095＝3 年，`RetentionCleanupService` 每次執行讀取）與 `MaskNationalId`/`MaskMobilePhone`/`MaskLandline`（預設全開）/`MaskNhiCard`（台灣個資自動遮蔽四開關；`MaskNhiCard` 預設關閉——12 碼純數字的偵測規則跟宅配貨運單號格式相同，開啟前請先確認群組內容性質）。
 
-**MaskKeywords** + **MaskKeywordGroups**／**UserAliases**／**AnonymousIdentities**：檢視端寫入的顯示設定，只有這幾張表（含上面的 ViewerSettings）是 Web 專案會寫入的。`AnonymousIdentities`（GroupId+UserId 複合主鍵）是 `NameDisplayMode.Anonymous` 的代號永久指派表，跟其他幾張不同的地方是使用者不直接編輯——由 `GET /api/groups/{groupId}/messages` 第一次遇到某成員時自動指派並寫入。
+**MaskKeywords** + **MaskKeywordGroups**／**UserAliases**／**AnonymousIdentities**：檢視端寫入的顯示設定（含上面的 ViewerSettings）。`AnonymousIdentities`（GroupId+UserId 複合主鍵）是 `NameDisplayMode.Anonymous` 的代號永久指派表，跟其他幾張不同的地方是使用者不直接編輯——由 `GET /api/groups/{groupId}/messages` 第一次遇到某成員時自動指派並寫入。Web 專案實際會寫入的表不只這幾張，下面兩段的 `HostHeartbeats`（所有模式都跑）與上面的 `Groups`（保留期清除後的自癒路徑）也是。
 
 **HostHeartbeats**（`Role`+`MachineName` 複合主鍵，每台主機一列，`upsert` 不成長）：`HeartbeatService` 每 `Heartbeat:IntervalSeconds` 秒更新自己那列，記錄 `LastSeenAt`、`OutboxPending`／`OutboxOldestAgeSeconds`（只有收 webhook 的主機才有值，其餘固定 `null`）、`EncryptionKeyFingerprint`（`FieldCipher.KeyId`，未啟用加密固定 `null`）。Edge 沒有本機資料庫，靠 `POST /api/ingest/heartbeat` 端點請 Core 代寫（見 `IHeartbeatReporter` 的兩種實作）。設定頁「主機狀態」區塊純讀這張表。
 

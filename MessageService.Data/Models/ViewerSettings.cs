@@ -23,5 +23,9 @@ public class ViewerSettings
     public bool MaskNationalId { get; set; } = true;
     public bool MaskMobilePhone { get; set; } = true;
     public bool MaskLandline { get; set; } = true;
-    public bool MaskNhiCard { get; set; } = true;
+
+    /// <summary>健保卡固定 12 碼數字的格式跟宅配貨運單號（黑貓、新竹貨運等常見業者也是 12 碼
+    /// 純數字）撞在一起，預設關閉避免誤遮蔽貨運單號；群組內容以健保卡號為主的話可以在設定頁
+    /// 開啟。</summary>
+    public bool MaskNhiCard { get; set; } = false;
 }

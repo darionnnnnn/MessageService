@@ -307,7 +307,7 @@ namespace MessageService.Data.Migrations.SqlServer
                             MaskLandline = true,
                             MaskMobilePhone = true,
                             MaskNationalId = true,
-                            MaskNhiCard = true,
+                            MaskNhiCard = false,
                             NameDisplayMode = "MaskMiddle",
                             RetentionDays = 1095
                         });

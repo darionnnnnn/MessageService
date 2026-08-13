@@ -172,6 +172,21 @@ public class IngestController(
     [HttpPost("heartbeat")]
     public async Task<IActionResult> ReportHeartbeat([FromBody] HeartbeatRequest request, CancellationToken cancellationToken)
     {
+        // ApiKey＋IP 白名單擋著大部分亂來的呼叫，但設定錯誤的 Edge（例如 MachineName 被塞了
+        // 非預期的值）不該有辦法無上限長列——Role／MachineName 直接寫進主鍵欄位，這裡補上
+        // 跟欄位定義（HostHeartbeat.MachineName 的 HasMaxLength(128)）一致的驗證，SQLite 不會
+        // 實際擋長度所以只能在這裡擋。刻意不用 Enum.TryParse（會把 "99"／"-1" 這類沒有對應具名
+        // 成員、只是恰好能轉成底層 int 的數字字串也判定為合法——這是 Enum.TryParse 廣為人知的
+        // 陷阱），改成直接比對宣告的成員名稱本身
+        if (!Enum.GetNames<DeploymentMode>().Contains(request.Role))
+        {
+            return BadRequest($"Unknown Role: {request.Role}");
+        }
+        if (string.IsNullOrWhiteSpace(request.MachineName) || request.MachineName.Length > 128)
+        {
+            return BadRequest("MachineName must be non-empty and at most 128 characters.");
+        }
+
         // Edge 不碰加密金鑰，代寫時指紋固定 null——不能拿這台（Core）自己的指紋去填 Edge 那列，
         // 那樣「金鑰指紋不一致」的比對就永遠測不出來
         await heartbeatStore.UpsertAsync(

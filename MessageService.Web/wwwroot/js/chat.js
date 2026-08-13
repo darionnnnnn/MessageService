@@ -1481,6 +1481,30 @@
         loadGroups().catch(() => setConnectionOk(false));
         setInterval(pollNewer, POLL_INTERVAL_MS);
         setInterval(pollGroups, GROUP_POLL_INTERVAL_MS);
+        checkDatabaseFallback();
+    }
+
+    // SQLite 救援模式的全站警示（需求2）：救場是啟動當下決定、行程存續期間不變的狀態
+    // （見 DatabaseStartupDecision），頁面載入時查一次就夠，不用輪詢。查詢失敗就安靜跳過——
+    // 這只是提醒層，不該因為它把聊天頁弄壞
+    async function checkDatabaseFallback() {
+        try {
+            const response = await fetch('/api/settings/database-status');
+            if (!response.ok) {
+                return;
+            }
+            const status = await response.json();
+            if (status.sqliteFallbackActive) {
+                const banner = $('db-fallback-banner');
+                banner.textContent =
+                    `目前以 SQLite 救援模式運作——設定的 SQL Server 啟動時連線失敗` +
+                    `（${status.sqliteFallbackReason || '原因不明'}），資料暫時寫入本機資料庫。` +
+                    `修好 SQL Server 後重新啟動即可切回，這段期間的資料不會自動搬過去。`;
+                banner.classList.remove('d-none');
+            }
+        } catch {
+            // 提醒層失敗不影響聊天功能
+        }
     }
 
     document.addEventListener('DOMContentLoaded', init);

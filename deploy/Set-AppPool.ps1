@@ -18,8 +18,20 @@
     （AlwaysRunning／閒置逾時／固定間隔回收這三項已經足以避免行程被殺，
     preloadEnabled 是錦上添花——集區重新啟動後不用等第一個真實請求進來才啟動應用程式）。
 
+.PARAMETER DataDirectory
+    只在你把 appsettings.Production.json 的 ConnectionStrings（Sqlite／Outbox）改指到
+    站台目錄以外的絕對路徑時才需要——例如 "C:\ProgramData\MessageService"。省略則跳過，
+    預設的 Db\ 相對路徑（在站台目錄底下）由應用程式自己在第一次啟動時建立，不需要這一步。
+    有給值的話，這裡會建立目錄並授與這個應用程式集區身分（IIS AppPool\<AppPoolName>）
+    完整控制權限——Microsoft.Data.Sqlite 不會自動建立不存在的目錄，站台目錄以外的路徑
+    也不會自動繼承到集區身分的存取權，兩者都要手動補上。
+
 .EXAMPLE
     .\Set-AppPool.ps1 -AppPoolName "MessageService" -SiteName "MessageService"
+
+.EXAMPLE
+    .\Set-AppPool.ps1 -AppPoolName "MessageService" -SiteName "MessageService" `
+        -DataDirectory "C:\ProgramData\MessageService"
 
 .NOTES
     在目標 Windows Server 上以系統管理員身分執行；本機開發機不需要跑這支。
@@ -30,7 +42,10 @@ param(
     [string]$AppPoolName,
 
     [Parameter(Mandatory = $false)]
-    [string]$SiteName
+    [string]$SiteName,
+
+    [Parameter(Mandatory = $false)]
+    [string]$DataDirectory
 )
 
 $ErrorActionPreference = 'Stop'
@@ -74,6 +89,28 @@ if ($SiteName) {
         Set-ItemProperty -Path $sitePath -Name "applicationDefaults.preloadEnabled" -Value $true
         Write-Host "  網站 '$SiteName' 的 preloadEnabled = true" -ForegroundColor Green
     }
+}
+
+if ($DataDirectory) {
+    Write-Host "設定資料目錄 '$DataDirectory'..." -ForegroundColor Cyan
+
+    if (-not (Test-Path $DataDirectory)) {
+        New-Item -ItemType Directory -Path $DataDirectory -Force | Out-Null
+        Write-Host "  已建立目錄" -ForegroundColor Green
+    }
+
+    # ApplicationPoolIdentity 這種虛擬帳戶只在 IIS AppPool\<名稱> 這個寫法下可解析——
+    # 不是真的 Windows 帳戶，用一般的 Get-Acl 帳戶查詢方式找不到它
+    $identity = "IIS AppPool\$AppPoolName"
+    $acl = Get-Acl -Path $DataDirectory
+    $accessRule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+        $identity, "Modify", "ContainerInherit,ObjectInherit", "None", "Allow")
+    $acl.AddAccessRule($accessRule)
+    Set-Acl -Path $DataDirectory -AclObject $acl
+
+    Write-Host "  已授與 '$identity' 完整控制權限" -ForegroundColor Green
+    Write-Host "  請記得把 appsettings.Production.json 的 ConnectionStrings（Sqlite／Outbox）" -ForegroundColor Yellow
+    Write-Host "  改指到這個目錄，例如 `"Data Source=$DataDirectory\messages.db`"" -ForegroundColor Yellow
 }
 
 # Application Initialization 是 preloadEnabled 真正生效的前提（沒裝這個角色服務，
