@@ -157,10 +157,15 @@ public class ContentStreamService(MessageDbContext dbContext, FieldCipher cipher
             // 連 revalidate 都不做。把 CompletedAt 一起折進去（已在上面同一次投影撈回來，零額外查詢），
             // 順帶也讓還原備份、換資料庫這類情境不會撞快取。
             var etag = $"\"mc-{messageContentId}-{meta.CompletedAt?.UtcTicks ?? 0:x}\"";
-            // 加密啟用時不進瀏覽器磁碟快取：加密的動機通常是個資合規，把解密後的內容長期存在
-            // 每台值班電腦的瀏覽器快取磁碟上，是稽核會問的一條。ETag／304 仍照常運作（那是
-            // 記憶體內的協商快取，不涉及磁碟落地），只是不再允許瀏覽器跨工作階段保留內容本身
-            response.Headers.CacheControl = cipher.Enabled ? "no-store" : "private, max-age=31536000, immutable";
+            // 看這顆 blob「實際上是不是密文」（isEncrypted，跟上面判斷要不要解密同一個依據），
+            // 不是看 Encryption:Enabled 現在開著沒開——體檢輪抓到的間隙：先前寫的是
+            // cipher.Enabled，會導致啟用加密前就存在、從未加密過的舊 blob，在管理者事後打開
+            // 加密設定後，明明本身仍是明文，也被連坐套上 no-store，白白讓瀏覽器不再快取這些
+            // 本來就不涉及個資合規顧慮的舊內容。加密的動機通常是個資合規，把解密後的內容長期
+            // 存在每台值班電腦的瀏覽器快取磁碟上，是稽核會問的一條，但這個顧慮只適用於「這顆
+            // blob 真的是加密寫入的」那些。ETag／304 仍照常運作（那是記憶體內的協商快取，
+            // 不涉及磁碟落地），只是加密的那些不再允許瀏覽器跨工作階段保留內容本身
+            response.Headers.CacheControl = isEncrypted ? "no-store" : "private, max-age=31536000, immutable";
             response.Headers.ETag = etag;
 
             if (MatchesIfNoneMatch(ifNoneMatch, etag))

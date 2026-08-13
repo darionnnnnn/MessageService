@@ -153,11 +153,22 @@ public class DbContentWorkSource(MessageDbContext dbContext, IOptions<ContentDow
             if (countingStream.BytesRead != effectiveLength)
             {
                 // 往外拋而不是標成 Failed：這是一次性的傳輸問題，交給 ContentDownloadService
-                // 既有的重試迴圈處理；DownloadStatus 維持 Pending，下次重跑會整個重寫這顆 blob
+                // 既有的重試迴圈處理
                 throw new InvalidOperationException(
                     $"Content stream for message content {contentId} produced {countingStream.BytesRead} bytes "
                     + $"but {effectiveLength} were declared; refusing to mark it as completed.");
             }
+        }
+        catch
+        {
+            // 認領已經把狀態從 Pending 改成 Downloading，任何失敗（上面的長度不符、連線中斷、
+            // SQL 逾時等）往外拋之前都要改回 Pending——不然 ProcessAsync 重試時呼叫的
+            // CompleteAsync 會因為 WHERE DownloadStatus==Pending 認領不到（claimed==0）而
+            // 直接靜默 return，既不寫入也不拋例外，重試迴圈會把這次失敗誤判成功，
+            // 這顆內容永遠卡在 Downloading（見 DownloadStatus.Downloading 的回收說明，
+            // 只有整個行程重啟才會被 GetPendingIdsAsync 撿回）
+            await RevertClaimAsync(contentId, cancellationToken);
+            throw;
         }
         finally
         {
@@ -181,6 +192,14 @@ public class DbContentWorkSource(MessageDbContext dbContext, IOptions<ContentDow
         entity.FailedAttempts = 0;
         await dbContext.SaveChangesAsync(cancellationToken);
     }
+
+    /// <summary>把認領失敗的列改回 Pending，讓 ProcessAsync 的重試迴圈下一次呼叫 CompleteAsync
+    /// 時能重新認領到（見上面 catch 區塊的說明）。用 ExecuteUpdateAsync 直接下 SQL，不透過
+    /// change tracker——這裡不需要、也不該去查詢或建立 change tracker 對這個實體的追蹤。</summary>
+    private Task RevertClaimAsync(long contentId, CancellationToken cancellationToken) =>
+        dbContext.MessageContents
+            .Where(c => c.Id == contentId && c.DownloadStatus == DownloadStatus.Downloading)
+            .ExecuteUpdateAsync(s => s.SetProperty(c => c.DownloadStatus, DownloadStatus.Pending), cancellationToken);
 
     private static async Task WriteContentSqlServerAsync(
         DbConnection connection, long contentId, Stream content, CancellationToken cancellationToken)

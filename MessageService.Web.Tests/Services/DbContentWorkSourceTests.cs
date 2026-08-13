@@ -246,6 +246,45 @@ public class DbContentWorkSourceTests : IDisposable
         Assert.Null(reloaded.Content);
     }
 
+    // 體檢輪揪出的真 bug：認領（Pending→Downloading）之後若寫入失敗（長度不符、連線中斷等），
+    // 一定要把狀態改回 Pending 再往外拋，否則 ProcessAsync 的重試迴圈下一次呼叫 CompleteAsync
+    // 會因為認領不到（狀態已經不是 Pending）而靜默 return，重試被誤判成功、內容永遠卡在
+    // Downloading——見 CompleteAsync 的 catch 區塊與 RevertClaimAsync 說明
+    [Fact]
+    public async Task CompleteAsync_DeclaredLengthExceedsActualStreamLength_ThrowsAndRevertsClaimToPending()
+    {
+        using var scope = _provider.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+        var groupMessage = new GroupMessage
+        {
+            WebhookEventId = "e1", LineMessageId = "m1", GroupId = "G1", MessageType = "image",
+            EventTimestamp = DateTimeOffset.UtcNow, ReceivedAt = DateTimeOffset.UtcNow,
+            Content = new MessageContent { DownloadStatus = DownloadStatus.Pending }
+        };
+        dbContext.GroupMessages.Add(groupMessage);
+        await dbContext.SaveChangesAsync();
+        var source = CreateSource(dbContext);
+        var contentId = groupMessage.Content!.Id;
+
+        // 宣稱 100 bytes，來源串流實際只有 3 bytes——模擬 LINE 回應的 Content-Length 標頭
+        // 跟實際內容對不起來（見 CompleteAsync 對 contentLength 不可盡信的說明）
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            source.CompleteAsync(contentId, new MemoryStream([1, 2, 3]), 100, "image/png", CancellationToken.None));
+        Assert.Contains("produced 3 bytes", ex.Message);
+
+        var reloaded = await dbContext.MessageContents.AsNoTracking().SingleAsync(c => c.Id == contentId);
+        Assert.Equal(DownloadStatus.Pending, reloaded.DownloadStatus); // 改回 Pending，不是卡在 Downloading
+
+        // 證明真的能重新認領：下一次呼叫（模擬 ProcessAsync 的重試）用正確長度必須成功寫入，
+        // 不能因為上次失敗留下的殘留狀態而靜默 no-op
+        var payload = new byte[] { 9, 9, 9 };
+        await source.CompleteAsync(contentId, new MemoryStream(payload), payload.Length, "image/png", CancellationToken.None);
+
+        var completed = await ReloadContentAsync(contentId);
+        Assert.Equal(DownloadStatus.Completed, completed.DownloadStatus);
+        Assert.Equal(payload, completed.Content);
+    }
+
     [Fact]
     public async Task GetPendingIdsAsync_DownloadingContent_IsRecoveredAndResetToPending()
     {

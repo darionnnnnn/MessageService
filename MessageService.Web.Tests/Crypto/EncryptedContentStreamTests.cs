@@ -211,6 +211,12 @@ public class EncryptedContentStreamTests : IDisposable
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.Equal(plaintext, await response.Content.ReadAsByteArrayAsync());
+        // 體檢輪揪出的真 bug：Cache-Control 曾經看的是 Encryption:Enabled（目前設定），不是這顆
+        // blob 本身是不是密文——這台 fixture 的加密是開著的，但這顆內容從沒被加密過，理當拿到
+        // 跟未加密部署完全一樣的長效快取，不該因為「管理者後來打開了加密」就連坐失去快取
+        Assert.False(response.Headers.CacheControl?.NoStore);
+        Assert.True(response.Headers.CacheControl?.Private);
+        Assert.Equal(TimeSpan.FromDays(365), response.Headers.CacheControl?.MaxAge);
     }
 
     // === MSE2 key id：見 docs/POST-CONSOLIDATION-REVIEW-PLAN.md 批次E ===
