@@ -4,8 +4,11 @@ namespace MessageService.Data.Crypto;
 /// 邊讀邊加密，一次只在記憶體裡放一個 chunk（1MB），不管來源檔案多大都不會整份進記憶體——
 /// 直接指派給 SqlParameter.Value 做串流上傳，或用 CopyToAsync 寫進 SqliteBlob，都只會照這個
 /// 串流實際被讀取的步調消耗來源串流，跟 DbContentWorkSource 既有的無加密路徑記憶體特性一致。
-/// 唯讀、forward-only：只支援 Read／ReadAsync，其餘 Stream 操作一律不支援。</summary>
-public sealed class ChunkedEncryptingStream(Stream source, long plaintextLength, byte[] key) : Stream
+/// 唯讀、forward-only：只支援 Read／ReadAsync，其餘 Stream 操作一律不支援。
+///
+/// keyId 是表頭要帶的 1 byte 金鑰指紋（見 ChunkedBlobCipher.BuildHeader 的 MSE2 多載），
+/// 由 FieldCipher.CreateEncryptingStream 傳入，跟文字欄位共用同一份指紋來源。</summary>
+public sealed class ChunkedEncryptingStream(Stream source, long plaintextLength, byte[] key, byte keyId) : Stream
 {
     private readonly long _plaintextLength = plaintextLength;
     private readonly byte[] _readBuffer = new byte[ChunkedBlobCipher.ChunkSize];
@@ -40,7 +43,7 @@ public sealed class ChunkedEncryptingStream(Stream source, long plaintextLength,
         {
             if (!_headerEmitted)
             {
-                _pending = new MemoryStream(ChunkedBlobCipher.BuildHeader(_plaintextLength), writable: false);
+                _pending = new MemoryStream(ChunkedBlobCipher.BuildHeader(_plaintextLength, keyId), writable: false);
                 _headerEmitted = true;
             }
             else if (_plaintextRemaining > 0)

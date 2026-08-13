@@ -92,7 +92,7 @@ public class EncryptionEndToEndTests : IDisposable
         var raw = (string?)await command.ExecuteScalarAsync();
 
         Assert.NotNull(raw);
-        Assert.StartsWith("ENC1:", raw);
+        Assert.StartsWith("ENC2:", raw);
         Assert.DoesNotContain("明文", raw);
     }
 

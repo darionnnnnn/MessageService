@@ -232,7 +232,7 @@ dotnet user-secrets set "Line:ChannelAccessToken" "<你的 access token>"
 | `Database:Provider` / `ConnectionStrings:*` | 與其他直連資料庫的主機指向同一顆資料庫 |
 | `Viewer:AllowedClientIps` | IP 白名單，見上 |
 | `UseForwardedHeaders` / `ForwardedHeaders:KnownProxies` / `KnownNetworks` | 反向代理後方時開啟並設定其中一項；IIS in-process（預設部署方式）不要開，見上 |
-| `Encryption:Enabled` / `Key` / `SearchWindowDays` | **所有直連資料庫的主機必須完全一致**，否則訊息會顯示成 `ENC1:` 密文、媒體一律回 404，見 [docs/ENCRYPTION.md](docs/ENCRYPTION.md) |
+| `Encryption:Enabled` / `Key` / `SearchWindowDays` | **所有直連資料庫的主機必須完全一致**，否則訊息會顯示成 `ENC2:` 密文、媒體一律回 404，見 [docs/ENCRYPTION.md](docs/ENCRYPTION.md) |
 
 ---
 
@@ -248,7 +248,7 @@ dotnet user-secrets set "Line:ChannelAccessToken" "<你的 access token>"
 | GroupId | nvarchar(64) | 來源群組；`(GroupId, Id)` 與 `(GroupId, EventTimestamp)` 各有複合索引，支撐依群組翻頁/搜尋的主要查詢路徑 |
 | UserId | nvarchar(64), null | 發言者（未加 bot 好友時可能為 null） |
 | MessageType | nvarchar(20) | text / sticker / image / video / audio / file |
-| Text | nvarchar(max), null | 文字內容或 `(貼圖)`（顯示時會套遮蔽規則；應用層加密開啟時此欄位以 `ENC1:` 前綴整值加密存放，見 [docs/ENCRYPTION.md](docs/ENCRYPTION.md)） |
+| Text | nvarchar(max), null | 文字內容或 `(貼圖)`（顯示時會套遮蔽規則；應用層加密開啟時此欄位以 `ENC2:` 前綴整值加密存放，見 [docs/ENCRYPTION.md](docs/ENCRYPTION.md)） |
 | StickerId | nvarchar(max), null | 貼圖識別碼（僅 sticker 型別；此欄位加入前收到的貼圖為 null，檢視端 fallback 顯示文字） |
 | PackageId | nvarchar(max), null | 貼圖包識別碼（同上；渲染目前只用 StickerId，一併保存供未來使用） |
 | EventTimestamp | datetimeoffset | LINE 事件時間 |
@@ -260,7 +260,7 @@ dotnet user-secrets set "Line:ChannelAccessToken" "<你的 access token>"
 |---|---|---|
 | Id | bigint PK | |
 | GroupMessageId | bigint FK | |
-| FileName | nvarchar(max), null | 檔案訊息的原始檔名（加密開啟時同 Text 走 `ENC1:` 整值加密） |
+| FileName | nvarchar(max), null | 檔案訊息的原始檔名（加密開啟時同 Text 走 `ENC2:` 整值加密） |
 | ContentType | nvarchar(max), null | 下載完成後的 MIME type |
 | DownloadStatus | nvarchar(20) | Pending / Completed / Failed |
 | Content | varbinary(max), null | 原始檔案內容，Pending/Failed 時為 null；加密開啟時以 1MB 為單位分塊加密存放（保留 Range 續傳能力，見 [docs/ENCRYPTION.md](docs/ENCRYPTION.md)） |
@@ -268,7 +268,7 @@ dotnet user-secrets set "Line:ChannelAccessToken" "<你的 access token>"
 | FailedAttempts | int | 累計下載失敗次數，`ContentDownload:MaxFailedRetries` 用它判斷是否放棄重試 |
 | LastAttemptAt | datetimeoffset, null | 最後一次嘗試下載的時間 |
 
-**Groups** / **GroupMembers**：收錄端背景快取的群組名稱、成員顯示名稱與頭像 URL（7 天 TTL，來源是 LINE 的 group summary / member profile API），檢視端用來把 GroupId/UserId 轉成人看得懂的名稱。快取失敗時 fallback 顯示原始 ID；`ProfileCache:FailureRetryAfter`（預設 10 分鐘）冷卻期內失敗不會重複呼叫 LINE API。加密開啟時群組名稱/顯示名稱/頭像 URL 同樣走 `ENC1:` 整值加密。
+**Groups** / **GroupMembers**：收錄端背景快取的群組名稱、成員顯示名稱與頭像 URL（7 天 TTL，來源是 LINE 的 group summary / member profile API），檢視端用來把 GroupId/UserId 轉成人看得懂的名稱。快取失敗時 fallback 顯示原始 ID；`ProfileCache:FailureRetryAfter`（預設 10 分鐘）冷卻期內失敗不會重複呼叫 LINE API。加密開啟時群組名稱/顯示名稱/頭像 URL 同樣走 `ENC2:` 整值加密。
 
 **ViewerSettings**（單列，Id 固定為 1）：除既有的名稱顯示模式外，新增 `RetentionDays`（保留天數，預設 1095＝3 年，`RetentionCleanupService` 每次執行讀取）與 `MaskNationalId`/`MaskMobilePhone`/`MaskLandline`/`MaskNhiCard`（台灣個資自動遮蔽四開關，預設全開）。
 
@@ -341,7 +341,7 @@ dotnet test
 只有一個測試專案 `MessageService.Web.Tests`（2026-08-13 部署收斂輪合併前是
 `MessageService.Tests`＋`MessageService.Web.Tests` 兩個），依原本各自的職責分兩段列：
 
-- **收錄相關**：webhook 事件解析（五種型別分流含 audio、過濾規則）、outbox 落地（`DirectIngestSink` 的防重送——`WebhookEventId` 唯一索引、撞鍵與暫時性儲存失敗以回查分辨〔前者當重複成功、後者拋回 outbox 重試不掉訊息〕、change tracker 不污染同批後續、各型別存檔行為、重複情境也正確回傳既有 ContentId、側欄 Groups.LastMessageId／LastMessageAt 追蹤）、outbox 批次排空（到期判斷、批次上限、指數退避與封頂、批次中途暫時性失敗整批重試、僅 `PermanentIngestException` 那一筆立即死信其餘照常、成功後依 IngestSideEffects 決定要不要入列本機佇列、每小時死信計數記錄）、outbox schema 升級（既有 outbox.db 補欄位不動既有資料、啟用 WAL、新舊 schema 皆冪等）、部署角色（能力推導單元測試＋真實 host 整合驗證：四種角色的路由閘門、Edge／Core 啟動驗證缺漏擋下、OutboundHere 與 ChannelAccessToken 的啟動驗證、ingest API 認證〔缺金鑰 404／錯金鑰 401／IP 不在白名單 403／正確金鑰經真實 DirectIngestSink 寫入並確認去重〕、content-work 與 profiles 端點的真實 HTTP 生命週期、批次端點）、`HttpIngestSink`（狀態碼分流：2xx 成功並解析回應帶出 ContentId、400 永久失敗、其餘與連線層錯誤皆可重試；批次端點 404 時自動退回逐筆模式）、`IContentWorkSource`／`IProfileStore` 兩套實作、Null 佇列（入列後 ReadAllAsync 永不產出）、`IngestSideEffects`（依 ContentId 有無決定要不要入列、Null 佇列搭配無錯誤）、**兩套 IIngestSink 落地路徑的等價性測試**（同一批 envelope 分別走 DirectIngestSink 與 HttpIngestSink→真實 Core 模式 host，斷言產生的 GroupMessages／MessageContents 完全相同，含重複送出時兩邊都回傳同一個 ContentId、批次落地路徑也逐欄位比對）、背景下載（成功/轉檔延遲重排/轉檔輪詢上限/重試耗盡/啟動接續/**多 worker 並行下載**〔gate 機制證明同時有多筆在下載〕/**轉檔中的影片不擋住排在後面的圖片**〔並發回歸測試〕/**Failed 重試視窗**〔超過 `FailedRetryWindowDays` 或 `MaxFailedRetries` 不再撿回〕）、`LineContentClient`（狀態碼分流、失敗時不洩漏連線）、`DbContentWorkSource`（SQLite 的 `zeroblob`/`SqliteBlob` 分塊寫入路徑、寫入長度與宣稱長度不符時拒絕標成 Completed）、群組/成員名稱快取（新增/過期更新/API 失敗 fallback/失敗冷卻期內不重複呼叫）、保留期清除（DB 讀取保留天數、分批刪除、含 CASCADE 驗證、清除後重算 Groups 側欄指標）、`LegacySqliteBaseliner`（既有 SQLite 檔案橋接到 migrations baseline，含「橋接後 Migrate() 跟全新 Migrate() 逐欄位等價」的關鍵測試）、兩個 provider 的 migrations 一致性守門測試、Controller 整合測試（401/200/畸形 body 仍 200 但 outbox 寫入失敗回 500、webhook 經真實 outbox＋背景排空落地資料庫）、加密（`FieldCipher` 整值加解密/`ENC1:` 前綴/舊明文混讀、`ChunkedBlobCipher`/`ChunkedEncryptingStream` 分塊格式與邊界情況、`MessageDbContext` 不同 `FieldCipher` 狀態間的模型快取隔離）
+- **收錄相關**：webhook 事件解析（五種型別分流含 audio、過濾規則）、outbox 落地（`DirectIngestSink` 的防重送——`WebhookEventId` 唯一索引、撞鍵與暫時性儲存失敗以回查分辨〔前者當重複成功、後者拋回 outbox 重試不掉訊息〕、change tracker 不污染同批後續、各型別存檔行為、重複情境也正確回傳既有 ContentId、側欄 Groups.LastMessageId／LastMessageAt 追蹤）、outbox 批次排空（到期判斷、批次上限、指數退避與封頂、批次中途暫時性失敗整批重試、僅 `PermanentIngestException` 那一筆立即死信其餘照常、成功後依 IngestSideEffects 決定要不要入列本機佇列、每小時死信計數記錄）、outbox schema 升級（既有 outbox.db 補欄位不動既有資料、啟用 WAL、新舊 schema 皆冪等）、部署角色（能力推導單元測試＋真實 host 整合驗證：四種角色的路由閘門、Edge／Core 啟動驗證缺漏擋下、OutboundHere 與 ChannelAccessToken 的啟動驗證、ingest API 認證〔缺金鑰 404／錯金鑰 401／IP 不在白名單 403／正確金鑰經真實 DirectIngestSink 寫入並確認去重〕、content-work 與 profiles 端點的真實 HTTP 生命週期、批次端點）、`HttpIngestSink`（狀態碼分流：2xx 成功並解析回應帶出 ContentId、400 永久失敗、其餘與連線層錯誤皆可重試；批次端點 404 時自動退回逐筆模式）、`IContentWorkSource`／`IProfileStore` 兩套實作、Null 佇列（入列後 ReadAllAsync 永不產出）、`IngestSideEffects`（依 ContentId 有無決定要不要入列、Null 佇列搭配無錯誤）、**兩套 IIngestSink 落地路徑的等價性測試**（同一批 envelope 分別走 DirectIngestSink 與 HttpIngestSink→真實 Core 模式 host，斷言產生的 GroupMessages／MessageContents 完全相同，含重複送出時兩邊都回傳同一個 ContentId、批次落地路徑也逐欄位比對）、背景下載（成功/轉檔延遲重排/轉檔輪詢上限/重試耗盡/啟動接續/**多 worker 並行下載**〔gate 機制證明同時有多筆在下載〕/**轉檔中的影片不擋住排在後面的圖片**〔並發回歸測試〕/**Failed 重試視窗**〔超過 `FailedRetryWindowDays` 或 `MaxFailedRetries` 不再撿回〕）、`LineContentClient`（狀態碼分流、失敗時不洩漏連線）、`DbContentWorkSource`（SQLite 的 `zeroblob`/`SqliteBlob` 分塊寫入路徑、寫入長度與宣稱長度不符時拒絕標成 Completed）、群組/成員名稱快取（新增/過期更新/API 失敗 fallback/失敗冷卻期內不重複呼叫）、保留期清除（DB 讀取保留天數、分批刪除、含 CASCADE 驗證、清除後重算 Groups 側欄指標）、`LegacySqliteBaseliner`（既有 SQLite 檔案橋接到 migrations baseline，含「橋接後 Migrate() 跟全新 Migrate() 逐欄位等價」的關鍵測試）、兩個 provider 的 migrations 一致性守門測試、Controller 整合測試（401/200/畸形 body 仍 200 但 outbox 寫入失敗回 500、webhook 經真實 outbox＋背景排空落地資料庫）、加密（`FieldCipher` 整值加解密/`ENC2:` 前綴帶 key id、keyId 不符時原樣回傳/`ENC1:` 舊格式與舊明文混讀、`ChunkedBlobCipher`/`ChunkedEncryptingStream` 分塊格式與邊界情況、`MessageDbContext` 不同 `FieldCipher` 狀態間的模型快取隔離）
 - **檢視相關**：Groups/Messages API（分頁游標、hasMore、空視窗仍回 latestId、沉寂期長於視窗仍能翻頁、遮蔽套用、視窗上限 500 筆與 `Truncated` 旗標、`aroundId` 雙段查詢〔錨點在群組最舊訊息時另一側不借用未用完額度、兩側都不足半窗不截斷〕、側欄未讀數〔依 `?read=` 基準計數、上限 100、畸形參數容錯、未帶參數為 0〕、側欄 Groups 指標漂移回退並順手修正）、訊息搜尋（文字/名稱各自 50 筆配額獨立生效）、內容串流（200/206/304/416/malformed Range、無 Range 直讀、XSS 白名單 MIME 判定、RFC5987 檔名編碼、ETag 產生與 `If-None-Match` 命中）、Settings API（CRUD、群組範圍替換、單列設定被刪後補建、保留天數驗證範圍、PII 遮蔽開關讀寫）、`/api/users`（Anonymous 模式回代號不觸發新指派、其他模式回真實姓名）、`MaskingService`/`MaskingRuleSet`（含名稱遮蔽邊界情況、四種台灣個資 regex 含 CJK 緊鄰英數字元的真實場景）、IP 白名單 middleware（允許/拒絕/空白名單/CIDR，檢視端與 ingest 端各自獨立設定）、加密端到端（開啟加密後整個請求生命週期的文字與 blob 加解密、Range 請求跨分塊邊界）
 
 測試都使用 SQLite（in-memory 或暫存檔），Web 端整合測試用 `IStartupFilter` 在 TestServer 補一個固定來源 IP（TestServer 的請求沒有真正 TCP 連線，`Connection.RemoteIpAddress` 預設是 null）。

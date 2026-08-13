@@ -13,15 +13,18 @@ namespace MessageService.Web.Services;
 /// 只讀取實際要傳送的位元組；ADO.NET 的 blob stream 是 forward-only，不支援 Seek，
 /// 所以「拖進度」是靠瀏覽器對同一個 URL 發出新的 Range 請求，而非在單一連線內做 Seek。
 ///
-/// 加密啟用時 blob 存的是分塊密文（格式見 ChunkedBlobCipher，DbContentWorkSource 寫入）——
-/// 讀取端一律先偷看前 16 bytes 表頭判斷是不是這個格式（不看 Encryption:Enabled 設定本身，
-/// 純粹看資料長什麼樣子），這樣新舊資料可以混存。注意反過來不成立：加密設定事後被關掉時，
-/// 既有的加密內容因為沒有金鑰可解，會直接回 404（不是顯示亂碼），見 docs/ENCRYPTION.md。
+/// 加密啟用時 blob 存的是分塊密文（格式見 ChunkedBlobCipher，MSE1／MSE2 兩種都認，
+/// DbContentWorkSource 寫入）——讀取端一律先偷看前 16 bytes 表頭判斷是不是這個格式
+/// （不看 Encryption:Enabled 設定本身，純粹看資料長什麼樣子），這樣新舊資料可以混存。
+/// 注意反過來不成立：加密設定事後被關掉時，既有的加密內容因為沒有金鑰可解，會直接回 404
+/// （不是顯示亂碼），見 docs/ENCRYPTION.md。MSE2 表頭多帶一個 byte 的 key id，跟目前設定的
+/// 金鑰指紋（cipher.MatchesKeyId）不符時視同內容不可用——輪替金鑰後舊資料還在，但沒有對應
+/// 金鑰的那些會乾脆回 404，不會嘗試用錯的金鑰硬解。
 /// Range 請求只解密涵蓋所需區間的那幾個 chunk，一次只在記憶體放一個 chunk，
 /// 不管請求範圍多大都不會整份解密進記憶體。
 ///
 /// 「是不是密文」既然只看資料本身，那個表頭就是外部可控的輸入（加密關閉期間，任何人都
-/// 可以在群組裡傳一個開頭剛好是 MSE1 的檔案），所以表頭裡的數字在使用前一定要驗證，
+/// 可以在群組裡傳一個開頭剛好是 MSE1／MSE2 的檔案），所以表頭裡的數字在使用前一定要驗證，
 /// 見 StreamAsync 裡的說明。
 /// </summary>
 public class ContentStreamService(MessageDbContext dbContext, FieldCipher cipher, ILogger<ContentStreamService> logger)
@@ -118,6 +121,18 @@ public class ContentStreamService(MessageDbContext dbContext, FieldCipher cipher
                         "Message content {MessageContentId} looks like an encrypted blob but its header failed validation "
                         + "(chunkSize={ChunkSize}, plaintextLength={PlaintextLength}, storedLength={StoredLength}); treating as unavailable",
                         messageContentId, chunkSize, totalLength, storedLength);
+                    return ContentStreamResult.NotFound;
+                }
+
+                // MSE2 表頭帶的 key id 跟目前設定的金鑰指紋不符——這顆 blob 是用另一把金鑰加的
+                // （金鑰輪替，或多台主機的 Encryption:Key 沒對齊）。在這裡（回應還沒開始寫）
+                // 判定失敗，比讓 AES-GCM 認證標籤驗證失敗才發現快，也才有機會乾淨地回 404——
+                // 真的走到 DecryptChunk 才失敗的話，串流可能已經開始寫進 response，來不及改狀態碼
+                if (!cipher.MatchesKeyId(ChunkedBlobCipher.ReadKeyId(header)))
+                {
+                    logger.LogWarning(
+                        "Message content {MessageContentId} was encrypted with a different key (key id mismatch); treating as unavailable",
+                        messageContentId);
                     return ContentStreamResult.NotFound;
                 }
             }

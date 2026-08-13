@@ -219,7 +219,9 @@ Edge 端的 outbox 排空預設會打 Core 的批次 ingest 端點（`POST /api/
 要加密訊息內容與媒體檔案的話，**每一台直連資料庫的主機**（AllInOne／Core／Viewer）都要設定
 `Encryption:Key`，金鑰產生指令、格式、注意事項見 [ENCRYPTION.md](ENCRYPTION.md)，這裡不重複。
 核心規則只有一條：**所有直連資料庫的主機，`Encryption:Key` 必須逐字相同**，不一致的話
-文字會顯示成 `ENC1:` 亂碼、媒體會整個 404（Edge 主機不直連資料庫，不需要設這個值）。
+文字會顯示成 `ENC2:` 亂碼、媒體會整個 404（Edge 主機不直連資料庫，不需要設這個值）。
+可以到設定頁「主機狀態」區塊比對各主機的金鑰指紋，不用等看到亂碼才發現設定沒對齊，
+見 [ENCRYPTION.md](ENCRYPTION.md) 的「金鑰指紋」一節。
 
 ---
 
