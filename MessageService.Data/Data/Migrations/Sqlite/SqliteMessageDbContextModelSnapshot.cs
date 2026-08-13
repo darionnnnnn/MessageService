@@ -143,6 +143,33 @@ namespace MessageService.Data.Migrations.Sqlite
                     b.ToTable("GroupMessages");
                 });
 
+            modelBuilder.Entity("MessageService.Models.HostHeartbeat", b =>
+                {
+                    b.Property<string>("Role")
+                        .HasMaxLength(20)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("MachineName")
+                        .HasMaxLength(128)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("EncryptionKeyFingerprint")
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("LastSeenAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<double?>("OutboxOldestAgeSeconds")
+                        .HasColumnType("REAL");
+
+                    b.Property<long?>("OutboxPending")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("Role", "MachineName");
+
+                    b.ToTable("HostHeartbeats");
+                });
+
             modelBuilder.Entity("MessageService.Models.MaskKeyword", b =>
                 {
                     b.Property<int>("Id")

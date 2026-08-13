@@ -5,6 +5,7 @@ using MessageService.Tests.TestSupport;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using OptionsFactory = Microsoft.Extensions.Options.Options;
 
@@ -37,7 +38,8 @@ public class OutboxForwarderServiceTests : IDisposable
         _connection.Dispose();
     }
 
-    private OutboxForwarderService CreateForwarder(OutboxOptions? options = null) =>
+    private OutboxForwarderService CreateForwarder(
+        OutboxOptions? options = null, HeartbeatOptions? heartbeatOptions = null, ILogger<OutboxForwarderService>? logger = null) =>
         new(
             _provider.GetRequiredService<IServiceScopeFactory>(),
             new FakeOutboxSignal(),
@@ -49,7 +51,8 @@ public class OutboxForwarderServiceTests : IDisposable
                 BaseRetryDelaySeconds = 5,
                 MaxRetryDelaySeconds = 300
             }),
-            NullLogger<OutboxForwarderService>.Instance);
+            OptionsFactory.Create(heartbeatOptions ?? new HeartbeatOptions()),
+            logger ?? NullLogger<OutboxForwarderService>.Instance);
 
     private static IngestEnvelope SampleEnvelope(string webhookEventId = "evt-1") => new(
         WebhookEventId: webhookEventId,
@@ -395,5 +398,78 @@ public class OutboxForwarderServiceTests : IDisposable
         var ex = await Record.ExceptionAsync(() => forwarder.LogDeadLetterCountAsync(CancellationToken.None));
 
         Assert.Null(ex);
+    }
+
+    // ==== 積壓年齡告警：P0 那類暫時性失敗永遠不會死信、死信計數看不出排空卡住，
+    // 只能靠最舊未死信項目的年齡判斷，見 LogDeadLetterCountAsync 的說明 ====
+
+    private sealed class CapturingLogger : ILogger<OutboxForwarderService>
+    {
+        public List<string> Errors { get; } = [];
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            if (logLevel == LogLevel.Error)
+            {
+                Errors.Add(formatter(state, exception));
+            }
+        }
+    }
+
+    private async Task AgeEntryAsync(long entryId, TimeSpan age)
+    {
+        using var scope = _provider.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<OutboxDbContext>();
+        var tracked = await dbContext.Entries.SingleAsync(e => e.Id == entryId);
+        tracked.CreatedAt = DateTimeOffset.UtcNow - age;
+        await dbContext.SaveChangesAsync();
+    }
+
+    [Fact]
+    public async Task LogDeadLetterCountAsync_OldestPendingBeyondThreshold_LogsError()
+    {
+        var entry = await SeedEntryAsync(SampleEnvelope("evt-stuck"));
+        await AgeEntryAsync(entry.Id, TimeSpan.FromMinutes(45));
+        var logger = new CapturingLogger();
+        var forwarder = CreateForwarder(heartbeatOptions: new HeartbeatOptions { OutboxBacklogAlertMinutes = 30 }, logger: logger);
+
+        await forwarder.LogDeadLetterCountAsync(CancellationToken.None);
+
+        Assert.Single(logger.Errors, e => e.Contains("pending entry"));
+    }
+
+    [Fact]
+    public async Task LogDeadLetterCountAsync_OldestPendingWithinThreshold_DoesNotLogError()
+    {
+        var entry = await SeedEntryAsync(SampleEnvelope("evt-fresh"));
+        await AgeEntryAsync(entry.Id, TimeSpan.FromMinutes(5));
+        var logger = new CapturingLogger();
+        var forwarder = CreateForwarder(heartbeatOptions: new HeartbeatOptions { OutboxBacklogAlertMinutes = 30 }, logger: logger);
+
+        await forwarder.LogDeadLetterCountAsync(CancellationToken.None);
+
+        Assert.Empty(logger.Errors);
+    }
+
+    [Fact]
+    public async Task LogDeadLetterCountAsync_OnlyDeadLetteredEntriesOld_DoesNotLogError()
+    {
+        // 死信不算積壓——已經不會再被排空，年齡再久也不代表排空卡住
+        var entry = await SeedEntryAsync(SampleEnvelope("evt-dead-old"));
+        await AgeEntryAsync(entry.Id, TimeSpan.FromMinutes(45));
+        using (var scope = _provider.CreateScope())
+        {
+            var dbContext = scope.ServiceProvider.GetRequiredService<OutboxDbContext>();
+            var tracked = await dbContext.Entries.SingleAsync(e => e.Id == entry.Id);
+            tracked.DeadLetteredAt = DateTimeOffset.UtcNow;
+            await dbContext.SaveChangesAsync();
+        }
+        var logger = new CapturingLogger();
+        var forwarder = CreateForwarder(heartbeatOptions: new HeartbeatOptions { OutboxBacklogAlertMinutes = 30 }, logger: logger);
+
+        await forwarder.LogDeadLetterCountAsync(CancellationToken.None);
+
+        Assert.Empty(logger.Errors);
     }
 }

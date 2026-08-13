@@ -51,6 +51,8 @@ var lineOptionsRaw = builder.Configuration.GetSection(LineOptions.SectionName).G
 var viewerOptionsRaw = builder.Configuration.GetSection(ViewerOptions.SectionName).Get<ViewerOptions>()
     ?? new ViewerOptions();
 var capabilities = DeploymentCapabilities.Derive(deploymentMode, lineOptionsRaw, viewerOptionsRaw, ingestOptionsRaw);
+// HeartbeatService 需要在建構子直接拿到能力推導結果，不必每次都自己重新 Derive 一次
+builder.Services.AddSingleton(capabilities);
 
 // Add services to the container.
 
@@ -80,6 +82,7 @@ builder.Services.Configure<ViewerOptions>(builder.Configuration.GetSection(Viewe
 builder.Services.Configure<IngestOptions>(builder.Configuration.GetSection(IngestOptions.SectionName));
 builder.Services.Configure<OutboxOptions>(builder.Configuration.GetSection(OutboxOptions.SectionName));
 builder.Services.Configure<EncryptionOptions>(builder.Configuration.GetSection(EncryptionOptions.SectionName));
+builder.Services.Configure<HeartbeatOptions>(builder.Configuration.GetSection(HeartbeatOptions.SectionName));
 // 單例：金鑰是固定設定值，跟請求無關；MessageDbContext 的建構子也靠 DI 注入同一份實例，
 // 見 MessageDbContextModelCacheKeyFactory 對「模型依 cipher 狀態分開快取」的說明。合併前
 // 收錄端與檢視端各自持有一份，現在單一行程只有一份，跨行程金鑰不一致的風險本身也隨之消失
@@ -165,6 +168,22 @@ else
         client.DefaultRequestHeaders.Add("X-Ingest-Key", ingestApiKeyForClient);
     });
 }
+
+// 需求4：Web 端要能看到另外幾台服務是否正常運作——有資料庫就直接寫 HostHeartbeats，
+// 沒有資料庫（Edge）就打上面已經註冊好的 "ingest" 具名 HttpClient 代寫，見
+// HeartbeatService／IHeartbeatReporter 的兩種實作說明。IHeartbeatStore 額外只在有資料庫時
+// 註冊——IngestController 的 heartbeat 端點（只存在於 AllInOne／Core）跟 DbHeartbeatReporter
+// 共用同一份 upsert 邏輯。
+if (capabilities.HasDatabaseAccess)
+{
+    builder.Services.AddScoped<IHeartbeatStore, DbHeartbeatStore>();
+    builder.Services.AddScoped<IHeartbeatReporter, DbHeartbeatReporter>();
+}
+else
+{
+    builder.Services.AddScoped<IHeartbeatReporter, HttpHeartbeatReporter>();
+}
+builder.Services.AddHostedService<HeartbeatService>();
 
 // 媒體下載／頭貼刷新的入列佇列：這台主機要不要真的做這兩件事只看 OutboundHere，
 // 跟模式或資料庫存取權無關（Core 端也可能 OutboundHere=true）。沒有消費者時换成 Null 實作，

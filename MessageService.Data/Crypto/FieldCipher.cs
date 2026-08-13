@@ -51,7 +51,18 @@ public class FieldCipher
         }
 
         _key = key;
+        KeyId = ComputeKeyId(key);
     }
+
+    /// <summary>金鑰指紋：SHA-256 前 4 bytes 轉小寫 hex（8 個字元），從金鑰本身導出、不是另外的
+    /// 設定值。不會洩漏金鑰本身（單向雜湊），用途：(1) 多台直連資料庫的主機互相比對，金鑰
+    /// 設定不一致時能立刻看出來，不用等到畫面上出現解不開的 ENC1: 密文才發現；
+    /// (2) 未來加密信封帶 key id 時（見 docs/POST-CONSOLIDATION-REVIEW-PLAN.md 批次E），
+    /// 沿用同一個值，不用兩套指紋定義。未啟用加密時為 null。</summary>
+    public string? KeyId { get; }
+
+    private static string ComputeKeyId(byte[] key) =>
+        Convert.ToHexStringLower(SHA256.HashData(key).AsSpan(0, 4));
 
     /// <summary>測試／未啟用加密情境用：一律不加密，Encrypt 原樣傳回、Decrypt 只在偵測到
     /// ENC1: 前綴時才嘗試解密（沒有金鑰的話會失敗並原樣回傳，見 Decrypt 說明）。</summary>

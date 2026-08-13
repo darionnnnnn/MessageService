@@ -45,6 +45,7 @@ public class MessageDbContext(DbContextOptions options, FieldCipher? cipher = nu
     public DbSet<MaskKeywordGroup> MaskKeywordGroups => Set<MaskKeywordGroup>();
     public DbSet<UserAlias> UserAliases => Set<UserAlias>();
     public DbSet<AnonymousIdentity> AnonymousIdentities => Set<AnonymousIdentity>();
+    public DbSet<HostHeartbeat> HostHeartbeats => Set<HostHeartbeat>();
 
     protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder) =>
         optionsBuilder.ReplaceService<IModelCacheKeyFactory, MessageDbContextModelCacheKeyFactory>();
@@ -106,6 +107,13 @@ public class MessageDbContext(DbContextOptions options, FieldCipher? cipher = nu
 
         modelBuilder.Entity<AnonymousIdentity>().HasKey(a => new { a.GroupId, a.UserId });
 
+        modelBuilder.Entity<HostHeartbeat>(entity =>
+        {
+            entity.HasKey(h => new { h.Role, h.MachineName });
+            entity.Property(h => h.Role).HasMaxLength(20);
+            entity.Property(h => h.MachineName).HasMaxLength(128);
+        });
+
         // SQLite only supports equality on DateTimeOffset, not <, > comparisons — needed for
         // retention cleanup's and profile cache staleness date-range queries. SQL Server keeps the
         // native datetimeoffset column since it supports range comparisons natively and other tools
@@ -126,6 +134,9 @@ public class MessageDbContext(DbContextOptions options, FieldCipher? cipher = nu
                 .HasConversion(new DateTimeOffsetToBinaryConverter());
             modelBuilder.Entity<MessageContent>()
                 .Property(c => c.LastAttemptAt)
+                .HasConversion(new DateTimeOffsetToBinaryConverter());
+            modelBuilder.Entity<HostHeartbeat>()
+                .Property(h => h.LastSeenAt)
                 .HasConversion(new DateTimeOffsetToBinaryConverter());
         }
 

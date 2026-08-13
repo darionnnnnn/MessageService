@@ -20,6 +20,7 @@ public class IngestController(
     IProfileStore profileStore,
     IContentDownloadQueue downloadQueue,
     IProfileRefreshQueue profileRefreshQueue,
+    IHeartbeatStore heartbeatStore,
     IOptions<IngestOptions> ingestOptions,
     ILogger<IngestController> logger) : ControllerBase
 {
@@ -162,6 +163,21 @@ public class IngestController(
     public async Task<IActionResult> UpsertMemberProfile([FromBody] MemberUpsertRequest request, CancellationToken cancellationToken)
     {
         await profileStore.UpsertMemberAsync(request.GroupId, request.Profile.UserId, request.Profile, cancellationToken);
+        return NoContent();
+    }
+
+    // === 心跳（Line:OutboundHere 與加密都無關——Edge 沒有本機資料庫，靠這支端點代寫自己的
+    // 存活狀態，見 HttpHeartbeatReporter／HostHeartbeat 說明） ===
+
+    [HttpPost("heartbeat")]
+    public async Task<IActionResult> ReportHeartbeat([FromBody] HeartbeatRequest request, CancellationToken cancellationToken)
+    {
+        // Edge 不碰加密金鑰，代寫時指紋固定 null——不能拿這台（Core）自己的指紋去填 Edge 那列，
+        // 那樣「金鑰指紋不一致」的比對就永遠測不出來
+        await heartbeatStore.UpsertAsync(
+            request.Role, request.MachineName,
+            new HeartbeatReport(request.OutboxPending, request.OutboxOldestAgeSeconds),
+            encryptionKeyFingerprint: null, cancellationToken);
         return NoContent();
     }
 }

@@ -17,11 +17,13 @@ public class OutboxForwarderService(
     IContentDownloadQueue downloadQueue,
     IProfileRefreshQueue profileRefreshQueue,
     IOptions<OutboxOptions> options,
+    IOptions<HeartbeatOptions> heartbeatOptions,
     ILogger<OutboxForwarderService> logger) : BackgroundService
 {
     private static readonly TimeSpan DeadLetterCheckInterval = TimeSpan.FromHours(1);
 
     private readonly OutboxOptions _options = options.Value;
+    private readonly HeartbeatOptions _heartbeatOptions = heartbeatOptions.Value;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -81,6 +83,29 @@ public class OutboxForwarderService(
             logger.LogWarning(
                 "Outbox has {Count} dead-lettered entries awaiting manual review (see LastError column in outbox.db)",
                 deadLetterCount);
+        }
+
+        // P0 那類「批次 ingest 撞重複鍵 500，Edge outbox 永久卡死但完全沒有告警」的情況——
+        // 死信計數看不出來（暫時性失敗永遠不會死信，見 OutboxEntry.DeadLetteredAt 說明），
+        // 只能靠最舊未死信項目的年齡判斷排空是不是卡住了。順著同一個每小時迴圈檢查，
+        // 第一個小時內就會被叫出來，不用等到有人發現「怎麼今天都沒新訊息」
+        var oldestPendingCreatedAt = await dbContext.Entries
+            .Where(e => e.DeadLetteredAt == null)
+            .OrderBy(e => e.CreatedAt)
+            .Select(e => (DateTimeOffset?)e.CreatedAt)
+            .FirstOrDefaultAsync(cancellationToken);
+
+        if (oldestPendingCreatedAt is { } createdAt)
+        {
+            var age = DateTimeOffset.UtcNow - createdAt;
+            var alertThreshold = TimeSpan.FromMinutes(_heartbeatOptions.OutboxBacklogAlertMinutes);
+            if (age >= alertThreshold)
+            {
+                logger.LogError(
+                    "Outbox has a pending entry that has been waiting {AgeMinutes:F0} minutes " +
+                    "(alert threshold {ThresholdMinutes} minutes) — forwarding may be stuck",
+                    age.TotalMinutes, _heartbeatOptions.OutboxBacklogAlertMinutes);
+            }
         }
     }
 

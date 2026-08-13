@@ -53,6 +53,7 @@ public class LegacySqliteBaselinerTests : IDisposable
         using var drop = connection.CreateCommand();
         drop.CommandText = """
             DROP TABLE AnonymousIdentities;
+            DROP TABLE HostHeartbeats;
             ALTER TABLE GroupMessages DROP COLUMN StickerId;
             ALTER TABLE GroupMessages DROP COLUMN PackageId;
             ALTER TABLE MessageContents DROP COLUMN FailedAttempts;

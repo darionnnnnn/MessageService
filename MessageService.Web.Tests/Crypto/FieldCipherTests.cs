@@ -148,6 +148,42 @@ public class FieldCipherTests
         Assert.Null(ex);
     }
 
+    // === KeyId：金鑰指紋，供心跳互相比對用（見 docs/POST-CONSOLIDATION-REVIEW-PLAN.md 批次D／E）===
+
+    [Fact]
+    public void KeyId_Disabled_IsNull()
+    {
+        Assert.Null(FieldCipher.Disabled.KeyId);
+    }
+
+    [Fact]
+    public void KeyId_Enabled_Is8LowercaseHexChars()
+    {
+        var cipher = CreateEnabled();
+
+        Assert.NotNull(cipher.KeyId);
+        Assert.Equal(8, cipher.KeyId!.Length);
+        Assert.Matches("^[0-9a-f]{8}$", cipher.KeyId);
+    }
+
+    [Fact]
+    public void KeyId_SameKeyTwice_ProducesSameFingerprint()
+    {
+        var first = CreateEnabled();
+        var second = CreateEnabled();
+
+        Assert.Equal(first.KeyId, second.KeyId);
+    }
+
+    [Fact]
+    public void KeyId_DifferentKeys_ProduceDifferentFingerprints()
+    {
+        var first = CreateEnabled();
+        var second = CreateEnabled(Convert.ToBase64String(Enumerable.Range(0, 32).Select(i => (byte)(i + 1)).ToArray()));
+
+        Assert.NotEqual(first.KeyId, second.KeyId);
+    }
+
     [Fact]
     public void Encrypt_EmptyString_RoundTrips()
     {

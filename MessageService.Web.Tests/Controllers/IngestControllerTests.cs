@@ -34,13 +34,15 @@ public class IngestControllerTests
         FakeContentWorkSource? contentWorkSource = null,
         FakeProfileStore? profileStore = null,
         FakeContentDownloadQueue? downloadQueue = null,
-        FakeProfileRefreshQueue? profileRefreshQueue = null) =>
+        FakeProfileRefreshQueue? profileRefreshQueue = null,
+        FakeHeartbeatStore? heartbeatStore = null) =>
         new(
             sink ?? new FakeIngestSink(),
             contentWorkSource ?? new FakeContentWorkSource(),
             profileStore ?? new FakeProfileStore(),
             downloadQueue ?? new FakeContentDownloadQueue(),
             profileRefreshQueue ?? new FakeProfileRefreshQueue(),
+            heartbeatStore ?? new FakeHeartbeatStore(),
             OptionsFactory.Create(new IngestOptions()),
             NullLogger<IngestController>.Instance);
 
@@ -292,5 +294,26 @@ public class IngestControllerTests
         Assert.Equal("G1", groupId);
         Assert.Equal("U1", userId);
         Assert.Equal(profile, saved);
+    }
+
+    // === heartbeat（Edge 代寫自己的存活狀態，見 HeartbeatRequest 說明）===
+
+    [Fact]
+    public async Task ReportHeartbeat_DelegatesToStore_WithNullFingerprint()
+    {
+        var store = new FakeHeartbeatStore();
+        var controller = CreateController(heartbeatStore: store);
+        var request = new HeartbeatRequest("Edge", "edge-host-1", OutboxPending: 3, OutboxOldestAgeSeconds: 42.5);
+
+        var result = await controller.ReportHeartbeat(request, CancellationToken.None);
+
+        Assert.IsType<NoContentResult>(result);
+        var (role, machineName, report, fingerprint) = Assert.Single(store.Upserted);
+        Assert.Equal("Edge", role);
+        Assert.Equal("edge-host-1", machineName);
+        Assert.Equal(3, report.OutboxPending);
+        Assert.Equal(42.5, report.OutboxOldestAgeSeconds);
+        // Edge 不碰加密金鑰——不能拿 Core 自己的指紋去填 Edge 那列，否則「金鑰不一致」比對失效
+        Assert.Null(fingerprint);
     }
 }
