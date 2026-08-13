@@ -96,19 +96,25 @@
 
 ## 批次C：媒體下載認領＋效能
 
-**C1　認領機制（修同 ContentId 並發下載的 blob 交錯寫入）**
+**C1　認領機制（修同 ContentId 並發下載的 blob 交錯寫入）**——**實作落點與規劃不同，見下方「開發時的修正」**
 - `DownloadStatus` enum 新增 `Downloading`（存字串，migration 不用改型別）。
-- `DbContentWorkSource.GetAsync`：先認領再組工作項——
-  `ExecuteUpdateAsync` 把 `Id==contentId && DownloadStatus==Pending` 改成 `Downloading`，
-  `claimed == 0` → return null（另一個 worker 已拿走或已完成）。
-  API 路徑（Edge 的 `ApiContentWorkSource` → `GetContentWorkItem` 端點）走同一顆
-  `DbContentWorkSource`，自動涵蓋，Edge 端不用改。
-- `CompleteAsync`／`FailAsync` 不檢查目前狀態，行為不變（從 `Downloading` 收尾照常）。
+- ~~`DbContentWorkSource.GetAsync`：先認領~~ → 改在 `CompleteAsync` 開頭認領（原因見下）。
 - `GetPendingIdsAsync`：`Pending` 查詢擴為 `Pending || Downloading`——下載主機重啟時把
   中斷的認領撿回來（`ExecuteUpdateAsync` 把 `Downloading` 重設回 `Pending` 後一併入列）。
   已知限制（與審查一致）：worker 崩潰而行程未重啟時，該筆停在 `Downloading` 直到下次重啟；
   接受，不為此加租約逾時機制（KISS）。
-- 測試：兩次 `GetAsync` 同一 id → 第二次 null；重啟接續測試補 `Downloading` 情境。
+
+**開發時的修正**：規劃原打算把認領放在 `GetAsync`，實作時才發現這與既有的轉檔輪詢機制衝突——
+影片／語音要靠 `GetAsync` 反覆查詢轉檔狀態（`ContentDownloadService.CheckTranscodingAsync`／
+`EnqueueDelayed` 重新入列），同一個 worker 對同一筆內容會多次呼叫 `GetAsync`；若在那裡把
+狀態從 `Pending` 改成 `Downloading`，第二次查詢會因為狀態不再是 `Pending` 而被自己的認領邏輯
+擋下來，`ProcessAsync` 誤判成「這筆不見了」直接放棄，轉檔輪詢整個失效（本地測試直接跑出來：
+`ContentDownloadServiceTests` 四個轉檔案例全部失敗）。改為把認領放在 `CompleteAsync` 開頭：
+真正需要獨占的是「寫入同一顆 blob」這個動作本身，`GetAsync` 維持原樣（不改狀態，可安全重複
+呼叫），`CompleteAsync` 用 `ExecuteUpdateAsync` 把 `Id==contentId && DownloadStatus==Pending`
+改成 `Downloading`，`claimed == 0` 時直接 return（不寫入、不覆寫）。這樣既保住轉檔輪詢的重複
+查詢語意，也還是防住兩個 worker 同時寫入同一顆 blob 的核心問題。`FailAsync` 不受影響。
+測試涵蓋：`CompleteAsync` 第二次呼叫不覆寫已完成的內容、認領失敗時安靜跳過不拋例外。
 
 **C2　`DownloadStatus` 篩選索引**
 基底 `MessageDbContext` 加 `HasIndex(c => c.DownloadStatus)`，篩選條件因語法差異
