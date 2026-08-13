@@ -4,19 +4,16 @@ using MessageService.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
-using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
 
-namespace MessageService.Data.Migrations
+namespace MessageService.Data.Migrations.SqlServer
 {
-    [DbContext(typeof(MessageDbContext))]
-    [Migration("20260729071045_ViewerSettingsFixedSingletonId")]
-    partial class ViewerSettingsFixedSingletonId
+    [DbContext(typeof(SqlServerMessageDbContext))]
+    partial class MessageDbContextModelSnapshot : ModelSnapshot
     {
-        /// <inheritdoc />
-        protected override void BuildTargetModel(ModelBuilder modelBuilder)
+        protected override void BuildModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -24,6 +21,30 @@ namespace MessageService.Data.Migrations
                 .HasAnnotation("Relational:MaxIdentifierLength", 128);
 
             SqlServerModelBuilderExtensions.UseIdentityColumns(modelBuilder);
+
+            modelBuilder.Entity("MessageService.Models.AnonymousIdentity", b =>
+                {
+                    b.Property<string>("GroupId")
+                        .HasColumnType("nvarchar(450)");
+
+                    b.Property<string>("UserId")
+                        .HasColumnType("nvarchar(450)");
+
+                    b.Property<DateTimeOffset>("AssignedAt")
+                        .HasColumnType("datetimeoffset");
+
+                    b.Property<string>("IconKey")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("Label")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.HasKey("GroupId", "UserId");
+
+                    b.ToTable("AnonymousIdentities");
+                });
 
             modelBuilder.Entity("MessageService.Models.Group", b =>
                 {
@@ -79,7 +100,8 @@ namespace MessageService.Data.Migrations
 
                     b.Property<string>("GroupId")
                         .IsRequired()
-                        .HasColumnType("nvarchar(max)");
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)");
 
                     b.Property<string>("LineMessageId")
                         .IsRequired()
@@ -87,16 +109,24 @@ namespace MessageService.Data.Migrations
 
                     b.Property<string>("MessageType")
                         .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("nvarchar(20)");
+
+                    b.Property<string>("PackageId")
                         .HasColumnType("nvarchar(max)");
 
                     b.Property<DateTimeOffset>("ReceivedAt")
                         .HasColumnType("datetimeoffset");
 
+                    b.Property<string>("StickerId")
+                        .HasColumnType("nvarchar(max)");
+
                     b.Property<string>("Text")
                         .HasColumnType("nvarchar(max)");
 
                     b.Property<string>("UserId")
-                        .HasColumnType("nvarchar(max)");
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)");
 
                     b.Property<string>("WebhookEventId")
                         .IsRequired()
@@ -106,6 +136,10 @@ namespace MessageService.Data.Migrations
 
                     b.HasIndex("WebhookEventId")
                         .IsUnique();
+
+                    b.HasIndex("GroupId", "EventTimestamp");
+
+                    b.HasIndex("GroupId", "Id");
 
                     b.ToTable("GroupMessages");
                 });
@@ -165,13 +199,20 @@ namespace MessageService.Data.Migrations
 
                     b.Property<string>("DownloadStatus")
                         .IsRequired()
-                        .HasColumnType("nvarchar(max)");
+                        .HasMaxLength(20)
+                        .HasColumnType("nvarchar(20)");
+
+                    b.Property<int>("FailedAttempts")
+                        .HasColumnType("int");
 
                     b.Property<string>("FileName")
                         .HasColumnType("nvarchar(max)");
 
                     b.Property<long>("GroupMessageId")
                         .HasColumnType("bigint");
+
+                    b.Property<DateTimeOffset?>("LastAttemptAt")
+                        .HasColumnType("datetimeoffset");
 
                     b.HasKey("Id");
 
@@ -200,9 +241,24 @@ namespace MessageService.Data.Migrations
                     b.Property<int>("Id")
                         .HasColumnType("int");
 
+                    b.Property<bool>("MaskLandline")
+                        .HasColumnType("bit");
+
+                    b.Property<bool>("MaskMobilePhone")
+                        .HasColumnType("bit");
+
+                    b.Property<bool>("MaskNationalId")
+                        .HasColumnType("bit");
+
+                    b.Property<bool>("MaskNhiCard")
+                        .HasColumnType("bit");
+
                     b.Property<string>("NameDisplayMode")
                         .IsRequired()
                         .HasColumnType("nvarchar(max)");
+
+                    b.Property<int>("RetentionDays")
+                        .HasColumnType("int");
 
                     b.HasKey("Id");
 
@@ -212,7 +268,12 @@ namespace MessageService.Data.Migrations
                         new
                         {
                             Id = 1,
-                            NameDisplayMode = "MaskMiddle"
+                            MaskLandline = true,
+                            MaskMobilePhone = true,
+                            MaskNationalId = true,
+                            MaskNhiCard = true,
+                            NameDisplayMode = "MaskMiddle",
+                            RetentionDays = 1095
                         });
                 });
 

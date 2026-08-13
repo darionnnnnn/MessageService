@@ -92,17 +92,20 @@ var databaseProvider = builder.Configuration["Database:Provider"] ?? "Sqlite";
 // HasDatabaseAccess 窄——三台拓撲下 Viewer 主機雖然直連資料庫，但不該跟 Core 搶著清同一張表）
 if (capabilities.HasDatabaseAccess)
 {
-    builder.Services.AddDbContext<MessageDbContext>(options =>
+    // 用衍生類別（實作型別）而非 MessageDbContext 本身註冊，純粹是為了讓 EF migrations
+    // 工具能依 CLR 型別區分「這是 SQLite 的 migrations 集合」還是「SQL Server 的」（見
+    // Data/Migrations/Sqlite 與 Data/Migrations/SqlServer）。DI 只會把它們解析成
+    // MessageDbContext，全站其他地方完全不用知道衍生型別存在。
+    if (databaseProvider == "SqlServer")
     {
-        if (databaseProvider == "SqlServer")
-        {
-            options.UseSqlServer(builder.Configuration.GetConnectionString("SqlServer"));
-        }
-        else
-        {
-            options.UseSqlite(builder.Configuration.GetConnectionString("Sqlite"));
-        }
-    });
+        builder.Services.AddDbContext<MessageDbContext, SqlServerMessageDbContext>(options =>
+            options.UseSqlServer(builder.Configuration.GetConnectionString("SqlServer")));
+    }
+    else
+    {
+        builder.Services.AddDbContext<MessageDbContext, SqliteMessageDbContext>(options =>
+            options.UseSqlite(builder.Configuration.GetConnectionString("Sqlite")));
+    }
 
     builder.Services.AddScoped<IIngestSink, DirectIngestSink>();
 }
@@ -243,16 +246,31 @@ using (var validationScope = app.Services.CreateScope())
     validationScope.ServiceProvider.GetRequiredService<FieldCipher>();
 }
 
-if (capabilities.HasDatabaseAccess && databaseProvider == "Sqlite")
+if (capabilities.HasDatabaseAccess && builder.Configuration.GetValue("Database:AutoMigrate", true))
 {
     using var scope = app.Services.CreateScope();
     var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
-    dbContext.Database.EnsureCreated();
+    var migrationLogger = scope.ServiceProvider.GetRequiredService<ILogger<Program>>();
 
-    // EnsureCreated() 只在資料庫檔案完全不存在時建表——既有的 messages.db 補上本輪新增的
-    // 欄位／索引要在這裡另外處理，見 MessageDbSchemaUpgrader 的說明
-    var messageDbConnectionString = builder.Configuration.GetConnectionString("Sqlite") ?? "Data Source=messages.db";
-    MessageDbSchemaUpgrader.EnsureSchema(messageDbConnectionString);
+    if (databaseProvider == "Sqlite")
+    {
+        var messageDbConnectionString = builder.Configuration.GetConnectionString("Sqlite") ?? "Data Source=messages.db";
+        LegacySqliteBaseliner.EnsureBaseline(messageDbConnectionString, migrationLogger);
+    }
+
+    // 同機多站台（或同一台上多個 worker process）同時啟動時，兩邊都跑 Migrate() 有機會撞在一起：
+    // 一邊建 __EFMigrationsHistory 表、一邊也在建，SQLite 的檔案鎖會讓其中一邊直接炸掉。
+    // 具名 mutex 讓它們排隊而不是打架——單一實例的情況下這裡幾乎瞬間就能拿到鎖，沒有實際延遲。
+    using var migrationMutex = new Mutex(initiallyOwned: false, @"Global\MessageService.Migrate");
+    migrationMutex.WaitOne();
+    try
+    {
+        dbContext.Database.Migrate();
+    }
+    finally
+    {
+        migrationMutex.ReleaseMutex();
+    }
 }
 
 if (capabilities.ReceivesWebhook)

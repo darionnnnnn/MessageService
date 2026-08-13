@@ -9,11 +9,11 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
 
-namespace MessageService.Data.Migrations
+namespace MessageService.Data.Migrations.SqlServer
 {
-    [DbContext(typeof(MessageDbContext))]
-    [Migration("20260730010058_AddAnonymousIdentityAndAnonymousMode")]
-    partial class AddAnonymousIdentityAndAnonymousMode
+    [DbContext(typeof(SqlServerMessageDbContext))]
+    [Migration("20260804062907_AddStickerIdAndPackageId")]
+    partial class AddStickerIdAndPackageId
     {
         /// <inheritdoc />
         protected override void BuildTargetModel(ModelBuilder modelBuilder)
@@ -113,8 +113,14 @@ namespace MessageService.Data.Migrations
                         .IsRequired()
                         .HasColumnType("nvarchar(max)");
 
+                    b.Property<string>("PackageId")
+                        .HasColumnType("nvarchar(max)");
+
                     b.Property<DateTimeOffset>("ReceivedAt")
                         .HasColumnType("datetimeoffset");
+
+                    b.Property<string>("StickerId")
+                        .HasColumnType("nvarchar(max)");
 
                     b.Property<string>("Text")
                         .HasColumnType("nvarchar(max)");

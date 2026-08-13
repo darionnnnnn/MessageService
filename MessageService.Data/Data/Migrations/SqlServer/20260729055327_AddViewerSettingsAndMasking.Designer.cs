@@ -9,11 +9,11 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
 
-namespace MessageService.Data.Migrations
+namespace MessageService.Data.Migrations.SqlServer
 {
-    [DbContext(typeof(MessageDbContext))]
-    [Migration("20260729054950_AddGroupAndMemberCache")]
-    partial class AddGroupAndMemberCache
+    [DbContext(typeof(SqlServerMessageDbContext))]
+    [Migration("20260729055327_AddViewerSettingsAndMasking")]
+    partial class AddViewerSettingsAndMasking
     {
         /// <inheritdoc />
         protected override void BuildTargetModel(ModelBuilder modelBuilder)
@@ -110,6 +110,42 @@ namespace MessageService.Data.Migrations
                     b.ToTable("GroupMessages");
                 });
 
+            modelBuilder.Entity("MessageService.Models.MaskKeyword", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int");
+
+                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("Id"));
+
+                    b.Property<bool>("ApplyToAllGroups")
+                        .HasColumnType("bit");
+
+                    b.Property<string>("Keyword")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("Replacement")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("MaskKeywords");
+                });
+
+            modelBuilder.Entity("MessageService.Models.MaskKeywordGroup", b =>
+                {
+                    b.Property<int>("MaskKeywordId")
+                        .HasColumnType("int");
+
+                    b.Property<string>("GroupId")
+                        .HasColumnType("nvarchar(450)");
+
+                    b.HasKey("MaskKeywordId", "GroupId");
+
+                    b.ToTable("MaskKeywordGroups");
+                });
+
             modelBuilder.Entity("MessageService.Models.MessageContent", b =>
                 {
                     b.Property<long>("Id")
@@ -145,6 +181,55 @@ namespace MessageService.Data.Migrations
                     b.ToTable("MessageContents");
                 });
 
+            modelBuilder.Entity("MessageService.Models.UserAlias", b =>
+                {
+                    b.Property<string>("UserId")
+                        .HasColumnType("nvarchar(450)");
+
+                    b.Property<string>("Alias")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.HasKey("UserId");
+
+                    b.ToTable("UserAliases");
+                });
+
+            modelBuilder.Entity("MessageService.Models.ViewerSettings", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int");
+
+                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("Id"));
+
+                    b.Property<string>("NameDisplayMode")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("ViewerSettings");
+
+                    b.HasData(
+                        new
+                        {
+                            Id = 1,
+                            NameDisplayMode = "MaskMiddle"
+                        });
+                });
+
+            modelBuilder.Entity("MessageService.Models.MaskKeywordGroup", b =>
+                {
+                    b.HasOne("MessageService.Models.MaskKeyword", "MaskKeyword")
+                        .WithMany("Groups")
+                        .HasForeignKey("MaskKeywordId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("MaskKeyword");
+                });
+
             modelBuilder.Entity("MessageService.Models.MessageContent", b =>
                 {
                     b.HasOne("MessageService.Models.GroupMessage", "GroupMessage")
@@ -159,6 +244,11 @@ namespace MessageService.Data.Migrations
             modelBuilder.Entity("MessageService.Models.GroupMessage", b =>
                 {
                     b.Navigation("Content");
+                });
+
+            modelBuilder.Entity("MessageService.Models.MaskKeyword", b =>
+                {
+                    b.Navigation("Groups");
                 });
 #pragma warning restore 612, 618
         }

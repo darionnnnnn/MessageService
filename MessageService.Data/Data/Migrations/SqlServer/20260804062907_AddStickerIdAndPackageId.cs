@@ -2,7 +2,7 @@
 
 #nullable disable
 
-namespace MessageService.Data.Migrations
+namespace MessageService.Data.Migrations.SqlServer
 {
     /// <inheritdoc />
     public partial class AddStickerIdAndPackageId : Migration

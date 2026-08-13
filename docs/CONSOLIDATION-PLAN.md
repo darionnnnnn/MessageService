@@ -17,6 +17,40 @@
 
 ## 執行進度
 
+- **階段3（Schema 改用 Database.Migrate()）已完成並 commit**，分支 `feature/deployment-consolidation`。
+  全 solution 建置 0 警告 0 錯誤，464 測試全綠（較階段2新增 9 個：LegacySqliteBaseliner 7 個、
+  兩 provider 的 pending-model-changes 守門測試各 1 個）。
+  - `MessageDbContext` 建構子改吃非泛型 `DbContextOptions`（原本是 `DbContextOptions<MessageDbContext>`），
+    這是 EF Core 官方文件對「同一個 DbContext、多個 provider、各自獨立 migrations」情境建議的寫法——
+    `SqliteMessageDbContext`／`SqlServerMessageDbContext` 兩個空殼衍生類別各自的
+    `DbContextOptions<TDerived>` 才能傳給共用的基底建構子。既有直接
+    `new MessageDbContext(optionsBuilder.Options)` 的測試完全不用改（`DbContextOptions<T>`
+    本來就是 `DbContextOptions` 的子型別）。
+  - SqlServer 的七個既有 migration **原始內容一字未動**，只搬到 `Data/Migrations/SqlServer/`、
+    改 `[DbContext(typeof(...))]` 目標與 namespace；`dotnet ef migrations has-pending-model-changes`
+    確認搬移後跟目前模型完全一致，migration Id 沒變，既有 SQL Server 資料庫的
+    `__EFMigrationsHistory` 比對不受影響。
+  - SQLite 用 `dotnet ef migrations add` 真的重新產生（不是手刻），單一顆 `InitialCreate`
+    涵蓋目前完整模型（含 StickerId／PackageId／AnonymousIdentities／SchemaHardeningRound1
+    那批全部在內）。過程中踩到一個 `dotnet ef` 的怪癖：`--namespace` 參數會讓 ModelSnapshot
+    的實體輸出路徑跟著 namespace 文字跑（跑到 repo 外層一個不相關的資料夾），改用預設
+    namespace（`MessageService.Data.Data.Migrations.Sqlite`，因為輸出路徑帶了一層跟根
+    namespace 尾段重複的 `Data/`）生成後再用 sed 把 namespace 文字改乾淨，snapshot 檔案位置
+    正常不受影響。
+  - `LegacySqliteBaseliner`：偵測「有 GroupMessages 表但沒有 `__EFMigrationsHistory`」的既有
+    檔案，補齊三批各自時期新增、舊 `MessageDbSchemaUpgrader` 只補了其中一批的欄位／表
+    （SchemaHardeningRound1／StickerId＋PackageId／AnonymousIdentities），再用 EF 自己的
+    `IHistoryRepository` API 產生正確的歷史表建表／插入 SQL（不手刻，避免跟 EF 內部實際期待的
+    欄位型別有出入），寫入一筆 InitialCreate 已套用的紀錄。測試裡最重要的一個案例
+    `EnsureBaseline_ThenMigrate_ProducesSameSchemaAsFreshMigrate`：拿「舊схема橋接完再
+    Migrate()」跟「全新資料庫直接 Migrate()」兩邊逐表逐欄位比對，證明橋接後的最終結果
+    跟全新安裝完全一致，不是只驗證「沒有丟例外」。
+  - `outbox.db` 依規劃維持現狀（`EnsureCreated()`＋`OutboxSchemaUpgrader`），沒有跟著這輪改。
+  - **已知的文件落後**：`README.md` 的 SQLite schema 段落還在描述
+    `EnsureCreated()`＋`MessageDbSchemaUpgrader` 那套舊機制（含「加了新表要手動刪檔重建」的
+    舊建議），這段現在是錯的——留給階段6文件收尾一次處理，不在這裡零星修正以免跟屆時的
+    全面改寫互相打架。
+
 - **階段2（模式重定義）已完成並 commit**，分支 `feature/deployment-consolidation`。
   全 solution 建置 0 警告 0 錯誤，461 測試全綠（較階段1新增 14 個）。
   實作期間相對本文件原稿的三個調整：

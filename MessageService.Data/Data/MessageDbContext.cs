@@ -21,8 +21,18 @@ internal class MessageDbContextModelCacheKeyFactory : IModelCacheKeyFactory
 
 /// <summary>cipher 預設 null（未加密）——刻意用預設參數而非必要參數，讓既有直接
 /// `new MessageDbContext(options)` 的測試不必逐一改動；正式環境透過 DI 由
-/// AddDbContext 自動解析已註冊的 FieldCipher 單例注入。</summary>
-public class MessageDbContext(DbContextOptions<MessageDbContext> options, FieldCipher? cipher = null) : DbContext(options)
+/// AddDbContext 自動解析已註冊的 FieldCipher 單例注入。
+///
+/// 建構子吃非泛型的 <see cref="DbContextOptions"/> 而非 <c>DbContextOptions&lt;MessageDbContext&gt;</c>——
+/// 這樣 <see cref="SqliteMessageDbContext"/>／<see cref="SqlServerMessageDbContext"/> 兩個只為了
+/// 區分 migrations 集合而存在的衍生類別才能把各自的 <c>DbContextOptions&lt;TDerived&gt;</c>
+/// 往上轉型傳進來（<c>DbContextOptions&lt;TDerived&gt;</c> 是 <c>DbContextOptions&lt;MessageDbContext&gt;</c>
+/// 的相容型別，但兩個不同的封閉泛型型別之間沒有隱含轉換，只有都收斂到非泛型基底才行）——
+/// 這是 EF Core 官方文件對「同一個 DbContext 支援多個 provider、各自獨立 migrations」情境
+/// 建議的寫法。既有透過 <c>DbContextOptionsBuilder&lt;MessageDbContext&gt;</c> 建構子呼叫的測試
+/// 完全不用改，<c>DbContextOptions&lt;MessageDbContext&gt;</c> 本來就是 <c>DbContextOptions</c>
+/// 的子型別，可以直接傳。</summary>
+public class MessageDbContext(DbContextOptions options, FieldCipher? cipher = null) : DbContext(options)
 {
     internal bool EncryptionEnabled => cipher is { Enabled: true };
 
