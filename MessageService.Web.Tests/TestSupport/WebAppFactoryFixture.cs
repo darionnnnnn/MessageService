@@ -1,5 +1,7 @@
 using System.Net;
 using MessageService.Data;
+using MessageService.Models;
+using MessageService.Services;
 using MessageService.Tests.TestSupport;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
@@ -70,7 +72,27 @@ public class WebAppFactoryFixture : IDisposable
         using var scope = Factory.Services.CreateScope();
         var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
         await seed(dbContext);
+
+        // 側欄改讀 Groups.LastMessageId／LastMessageAt（見 GroupsController），這裡在存檔前
+        // 先記下這次呼叫新增了哪些 GroupMessage，存檔後（Id 已由 EF 填回）比照 DirectIngestSink
+        // 落地時的邏輯自動維護——跟正式寫入路徑共用同一份 GroupLastMessageTracker，測試不用
+        // 每個案例自己顧到這兩個欄位，也不會有另一份簡化版邏輯跟正式路徑漂移的風險
+        var addedMessages = dbContext.ChangeTracker.Entries<GroupMessage>()
+            .Where(e => e.State == EntityState.Added)
+            .Select(e => e.Entity)
+            .ToList();
+
         await dbContext.SaveChangesAsync();
+
+        foreach (var message in addedMessages)
+        {
+            await GroupLastMessageTracker.TrackAsync(
+                dbContext, message.GroupId, message.Id, message.EventTimestamp, CancellationToken.None);
+        }
+        if (addedMessages.Count > 0)
+        {
+            await dbContext.SaveChangesAsync();
+        }
     }
 
     public void Dispose()

@@ -1,7 +1,10 @@
 using System.Net.Http.Json;
+using MessageService.Data;
 using MessageService.Models;
 using MessageService.Web.Dtos;
 using MessageService.Web.Tests.TestSupport;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace MessageService.Web.Tests.Api;
 
@@ -245,5 +248,82 @@ public class GroupsControllerTests : IDisposable
 
         // 壞掉的 pair 一律略過 → 該群組沒有有效 baseline → 未讀視為 0，且不擲例外
         Assert.Equal(0, Assert.Single(groups!).UnreadCount);
+    }
+
+    [Fact]
+    public async Task GetGroups_GroupsPointerDrifted_FallsBackToActualLastMessageAndFixesPointer()
+    {
+        // 模擬 Groups.LastMessageId 指向一則已經被刪除的訊息（保留期清除跟這支 API 兩次查詢
+        // 之間的空檔）：seed 兩則訊息，讓 Groups 追蹤最新那則，然後直接刪掉那則訊息本身，
+        // 不透過任何會順手修正 Groups 的路徑
+        var now = DateTimeOffset.UtcNow;
+        GroupMessage older = null!, newer = null!;
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            older = new GroupMessage
+            {
+                WebhookEventId = "e1", LineMessageId = "m1", GroupId = "G1", MessageType = "text", Text = "older",
+                EventTimestamp = now.AddMinutes(-1), ReceivedAt = now.AddMinutes(-1)
+            };
+            newer = new GroupMessage
+            {
+                WebhookEventId = "e2", LineMessageId = "m2", GroupId = "G1", MessageType = "text", Text = "newer",
+                EventTimestamp = now, ReceivedAt = now
+            };
+            dbContext.GroupMessages.Add(older);
+            dbContext.GroupMessages.Add(newer);
+            await Task.CompletedTask;
+        });
+
+        using (var scope = _fixture.Factory.Services.CreateScope())
+        {
+            var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+            var newestTracked = await dbContext.GroupMessages.SingleAsync(m => m.WebhookEventId == "e2");
+            dbContext.GroupMessages.Remove(newestTracked); // Groups.LastMessageId 現在是懸空指標
+            await dbContext.SaveChangesAsync();
+        }
+
+        var groups = await _fixture.Client.GetFromJsonAsync<List<GroupDto>>("/api/groups");
+
+        var group = Assert.Single(groups!);
+        Assert.Equal(older.Id, group.LastMessageId);
+        Assert.Equal("older", group.LastMessagePreview);
+
+        using var verifyScope = _fixture.Factory.Services.CreateScope();
+        var verifyContext = verifyScope.ServiceProvider.GetRequiredService<MessageDbContext>();
+        var fixedGroup = await verifyContext.Groups.AsNoTracking().SingleAsync(g => g.GroupId == "G1");
+        Assert.Equal(older.Id, fixedGroup.LastMessageId); // 順手修正，下一輪不用再回退
+    }
+
+    [Fact]
+    public async Task GetGroups_GroupsPointerDrifted_AllMessagesGone_ExcludesGroupAndClearsPointer()
+    {
+        var now = DateTimeOffset.UtcNow;
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            dbContext.GroupMessages.Add(new GroupMessage
+            {
+                WebhookEventId = "e1", LineMessageId = "m1", GroupId = "G1", MessageType = "text", Text = "hi",
+                EventTimestamp = now, ReceivedAt = now
+            });
+            await Task.CompletedTask;
+        });
+
+        using (var scope = _fixture.Factory.Services.CreateScope())
+        {
+            var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+            dbContext.GroupMessages.RemoveRange(dbContext.GroupMessages);
+            await dbContext.SaveChangesAsync();
+        }
+
+        var groups = await _fixture.Client.GetFromJsonAsync<List<GroupDto>>("/api/groups");
+
+        Assert.Empty(groups!);
+
+        using var verifyScope = _fixture.Factory.Services.CreateScope();
+        var verifyContext = verifyScope.ServiceProvider.GetRequiredService<MessageDbContext>();
+        var group = await verifyContext.Groups.AsNoTracking().SingleAsync(g => g.GroupId == "G1");
+        Assert.Null(group.LastMessageId);
+        Assert.Null(group.LastMessageAt);
     }
 }

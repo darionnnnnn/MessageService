@@ -49,6 +49,12 @@ namespace MessageService.Data.Migrations.Sqlite
                     b.Property<string>("GroupName")
                         .HasColumnType("TEXT");
 
+                    b.Property<long?>("LastMessageAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long?>("LastMessageId")
+                        .HasColumnType("INTEGER");
+
                     b.Property<string>("PictureUrl")
                         .HasColumnType("TEXT");
 

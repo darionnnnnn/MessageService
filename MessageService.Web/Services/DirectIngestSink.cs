@@ -101,6 +101,43 @@ public class DirectIngestSink(
             envelope.MessageType, groupMessage.LineMessageId, groupMessage.GroupId,
             groupMessage.Content is null ? "" : " (has pending content)");
 
+        await TrackGroupLastMessageAsync(groupMessage, cancellationToken);
+
         return new IngestResult(groupMessage.Content?.Id);
+    }
+
+    /// <summary>側欄反正規化（見 GroupLastMessageTracker）：獨立於訊息本身的 SaveChanges，
+    /// 失敗不該讓整個 ingest 請求失敗——訊息已經確實存進去了，側欄的 LastMessageId 這次
+    /// 沒更新到，下一則訊息進來時會自然追上。</summary>
+    private async Task TrackGroupLastMessageAsync(GroupMessage groupMessage, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await GroupLastMessageTracker.TrackAsync(
+                dbContext, groupMessage.GroupId, groupMessage.Id, groupMessage.EventTimestamp, cancellationToken);
+            await dbContext.SaveChangesAsync(cancellationToken);
+        }
+        catch (DbUpdateException ex)
+        {
+            // Groups 主鍵撞鍵：跟 DbProfileStore 的頭貼快取寫入路徑（ProfileRefreshService／
+            // IngestController 的 profile upsert）併發時，兩邊都判定「這個群組還沒有列」同時
+            // 插入——對方贏了，這裡改成 UPDATE 補上 LastMessageId/At
+            dbContext.ChangeTracker.Clear();
+            try
+            {
+                await GroupLastMessageTracker.TrackAsync(
+                    dbContext, groupMessage.GroupId, groupMessage.Id, groupMessage.EventTimestamp, cancellationToken);
+                await dbContext.SaveChangesAsync(cancellationToken);
+            }
+            catch (DbUpdateException retryEx)
+            {
+                // 理論上不會再撞——重試前已經確認過對方贏了才會走到這裡。真的又失敗只記警告，
+                // 不讓側欄統計的次要問題擋住整個 ingest 請求成功
+                logger.LogWarning(retryEx,
+                    "Failed to track last message for group {GroupId} after retry (original: {OriginalError})",
+                    groupMessage.GroupId, ex.Message);
+                dbContext.ChangeTracker.Clear();
+            }
+        }
     }
 }

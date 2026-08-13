@@ -97,6 +97,80 @@ public class RetentionCleanupServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task RunCleanupAsync_GroupsLastMessagePointer_RecalculatedAfterItsMessageIsDeleted()
+    {
+        await SetRetentionDaysAsync(1095);
+        GroupMessage oldMessage, recentMessage;
+        using (var scope = _provider.CreateScope())
+        {
+            var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+            oldMessage = new GroupMessage
+            {
+                WebhookEventId = "old", LineMessageId = "m-old", GroupId = "G1", MessageType = "text", Text = "old",
+                EventTimestamp = DateTimeOffset.UtcNow.AddDays(-1096), ReceivedAt = DateTimeOffset.UtcNow.AddDays(-1096)
+            };
+            recentMessage = new GroupMessage
+            {
+                WebhookEventId = "recent", LineMessageId = "m-recent", GroupId = "G1", MessageType = "text", Text = "recent",
+                EventTimestamp = DateTimeOffset.UtcNow.AddDays(-1), ReceivedAt = DateTimeOffset.UtcNow.AddDays(-1)
+            };
+            dbContext.GroupMessages.AddRange(oldMessage, recentMessage);
+            await dbContext.SaveChangesAsync();
+
+            // 模擬「Groups.LastMessageId 目前指向即將被清除的那則」——側欄快取還沒追上
+            dbContext.Groups.Add(new Group
+            {
+                GroupId = "G1", UpdatedAt = DateTimeOffset.UtcNow,
+                LastMessageId = oldMessage.Id, LastMessageAt = oldMessage.EventTimestamp
+            });
+            await dbContext.SaveChangesAsync();
+        }
+
+        await CreateService().RunCleanupAsync(CancellationToken.None);
+
+        using var verifyScope = _provider.CreateScope();
+        var verifyContext = verifyScope.ServiceProvider.GetRequiredService<MessageDbContext>();
+        var group = await verifyContext.Groups.AsNoTracking().SingleAsync(g => g.GroupId == "G1");
+        Assert.Equal(recentMessage.Id, group.LastMessageId);
+        // SQLite 的 DateTimeOffsetToBinaryConverter 來回轉換會有微秒等級的精度損失，
+        // 不是這裡要驗證的重點，只比對到毫秒
+        Assert.Equal(recentMessage.EventTimestamp, group.LastMessageAt!.Value, TimeSpan.FromMilliseconds(1));
+    }
+
+    [Fact]
+    public async Task RunCleanupAsync_GroupWithAllMessagesDeleted_ClearsLastMessagePointer()
+    {
+        await SetRetentionDaysAsync(1095);
+        GroupMessage oldMessage;
+        using (var scope = _provider.CreateScope())
+        {
+            var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+            oldMessage = new GroupMessage
+            {
+                WebhookEventId = "old", LineMessageId = "m-old", GroupId = "G1", MessageType = "text", Text = "old",
+                EventTimestamp = DateTimeOffset.UtcNow.AddDays(-1096), ReceivedAt = DateTimeOffset.UtcNow.AddDays(-1096)
+            };
+            dbContext.GroupMessages.Add(oldMessage);
+            await dbContext.SaveChangesAsync();
+
+            dbContext.Groups.Add(new Group
+            {
+                GroupId = "G1", UpdatedAt = DateTimeOffset.UtcNow,
+                LastMessageId = oldMessage.Id, LastMessageAt = oldMessage.EventTimestamp
+            });
+            await dbContext.SaveChangesAsync();
+        }
+
+        await CreateService().RunCleanupAsync(CancellationToken.None);
+
+        using var verifyScope = _provider.CreateScope();
+        var verifyContext = verifyScope.ServiceProvider.GetRequiredService<MessageDbContext>();
+        var group = await verifyContext.Groups.AsNoTracking().SingleAsync(g => g.GroupId == "G1");
+        Assert.Null(group.LastMessageId);
+        Assert.Null(group.LastMessageAt);
+    }
+
+    [Fact]
     public async Task RunCleanupAsync_NoViewerSettingsRow_FallsBackToDefaultRetentionDays()
     {
         // EnsureCreated() 的 HasData 一定會種好單列設定，這裡模擬萬一那筆不存在的防禦性情境

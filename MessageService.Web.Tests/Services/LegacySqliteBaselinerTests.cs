@@ -62,6 +62,8 @@ public class LegacySqliteBaselinerTests : IDisposable
             ALTER TABLE ViewerSettings DROP COLUMN MaskMobilePhone;
             ALTER TABLE ViewerSettings DROP COLUMN MaskLandline;
             ALTER TABLE ViewerSettings DROP COLUMN MaskNhiCard;
+            ALTER TABLE Groups DROP COLUMN LastMessageId;
+            ALTER TABLE Groups DROP COLUMN LastMessageAt;
             DROP INDEX IF EXISTS IX_GroupMessages_GroupId_Id;
             DROP INDEX IF EXISTS IX_GroupMessages_GroupId_EventTimestamp;
             """;
@@ -161,7 +163,9 @@ public class LegacySqliteBaselinerTests : IDisposable
 
         Assert.Null(ex);
         Assert.Empty(dbContext.Database.GetPendingMigrations());
-        Assert.Single(dbContext.Database.GetAppliedMigrations());
+        // 橋接只標記 InitialCreate 為已套用；InitialCreate 之後新增的 migration（例如
+        // AddGroupLastMessageTracking）仍應該由 Migrate() 正常套用，不是「全部視為已套用」
+        Assert.Contains("InitialCreate", string.Join(",", dbContext.Database.GetAppliedMigrations()));
     }
 
     [Fact]

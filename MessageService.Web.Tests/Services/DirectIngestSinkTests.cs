@@ -64,6 +64,45 @@ public class DirectIngestSinkTests : IDisposable
     }
 
     [Fact]
+    public async Task TextMessage_TracksGroupLastMessage()
+    {
+        var result = await _sink.SubmitAsync(Envelope(), CancellationToken.None);
+
+        var saved = Assert.Single(_dbContext.GroupMessages);
+        var group = await _dbContext.Groups.AsNoTracking().SingleAsync(g => g.GroupId == "G1");
+        Assert.Equal(saved.Id, group.LastMessageId);
+        Assert.Equal(saved.EventTimestamp, group.LastMessageAt);
+        Assert.Null(group.GroupName); // 頭貼快取的職責，這裡只補 stub
+    }
+
+    [Fact]
+    public async Task SecondMessageInSameGroup_AdvancesLastMessageId_DoesNotCreateSecondGroupRow()
+    {
+        await _sink.SubmitAsync(Envelope(webhookEventId: "evt-1"), CancellationToken.None);
+        var second = await _sink.SubmitAsync(Envelope(webhookEventId: "evt-2", lineMessageId: "m2"), CancellationToken.None);
+
+        var groups = await _dbContext.Groups.AsNoTracking().Where(g => g.GroupId == "G1").ToListAsync();
+        var group = Assert.Single(groups);
+        var secondMessage = await _dbContext.GroupMessages.AsNoTracking().SingleAsync(m => m.WebhookEventId == "evt-2");
+        Assert.Equal(secondMessage.Id, group.LastMessageId);
+    }
+
+    [Fact]
+    public async Task MessageInGroupWithExistingCachedProfile_PreservesGroupNameAndPictureUrl()
+    {
+        // 頭貼快取（DbProfileStore）已經抓過這個群組的名稱/頭貼——訊息落地時的 Groups 追蹤
+        // 只該更新 LastMessageId/At，不該把已有的 GroupName/PictureUrl 覆蓋掉
+        _dbContext.Groups.Add(new Group { GroupId = "G1", GroupName = "工作群組", PictureUrl = "https://x/p.png", UpdatedAt = DateTimeOffset.UtcNow });
+        await _dbContext.SaveChangesAsync();
+
+        await _sink.SubmitAsync(Envelope(), CancellationToken.None);
+
+        var group = await _dbContext.Groups.AsNoTracking().SingleAsync(g => g.GroupId == "G1");
+        Assert.Equal("工作群組", group.GroupName);
+        Assert.Equal("https://x/p.png", group.PictureUrl);
+    }
+
+    [Fact]
     public async Task StickerMessage_SavesStickerIdAndPackageId()
     {
         await _sink.SubmitAsync(

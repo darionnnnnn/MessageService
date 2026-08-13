@@ -112,6 +112,9 @@ public class MessageDbContext(DbContextOptions options, FieldCipher? cipher = nu
             modelBuilder.Entity<Group>()
                 .Property(g => g.UpdatedAt)
                 .HasConversion(new DateTimeOffsetToBinaryConverter());
+            modelBuilder.Entity<Group>()
+                .Property(g => g.LastMessageAt)
+                .HasConversion(new DateTimeOffsetToBinaryConverter());
             modelBuilder.Entity<GroupMember>()
                 .Property(m => m.UpdatedAt)
                 .HasConversion(new DateTimeOffsetToBinaryConverter());

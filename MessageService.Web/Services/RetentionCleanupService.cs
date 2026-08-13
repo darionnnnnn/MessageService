@@ -112,9 +112,51 @@ public class RetentionCleanupService(
             await Task.Delay(DelayBetweenBatches, cancellationToken);
         }
 
+        if (totalDeleted > 0)
+        {
+            await RefreshStaleGroupPointersAsync(dbContext, cutoff, cancellationToken);
+        }
+
         logger.LogInformation(
             "Retention cleanup removed {Count} group messages older than {Cutoff:yyyy-MM-dd} (retention: {RetentionDays} days)",
             totalDeleted, cutoff, retentionDays);
+    }
+
+    /// <summary>側欄改讀 Groups.LastMessageId／LastMessageAt（見 GroupsController）——這裡清完
+    /// 之後，任何「記錄的最後一則訊息時間早於 cutoff」的群組，那則訊息一定已經被上面的批次
+    /// 刪除掃到了，指標已經失效，要重新算一次真正的最後一則（Groups 表只有幾十列，
+    /// 逐群組一次 MAX 查詢可接受）；訊息全被清空的群組兩欄設回 null。
+    /// LastMessageAt ≥ cutoff 的群組完全沒被這輪清除動到，不用查。</summary>
+    private static async Task RefreshStaleGroupPointersAsync(
+        MessageDbContext dbContext, DateTimeOffset cutoff, CancellationToken cancellationToken)
+    {
+        var staleGroupIds = await dbContext.Groups
+            .Where(g => g.LastMessageAt != null && g.LastMessageAt < cutoff)
+            .Select(g => g.GroupId)
+            .ToListAsync(cancellationToken);
+
+        foreach (var groupId in staleGroupIds)
+        {
+            var latest = await dbContext.GroupMessages
+                .Where(m => m.GroupId == groupId)
+                .OrderByDescending(m => m.Id)
+                .Select(m => new { m.Id, m.EventTimestamp })
+                .FirstOrDefaultAsync(cancellationToken);
+
+            var group = await dbContext.Groups.FindAsync([groupId], cancellationToken);
+            if (group is null)
+            {
+                continue;
+            }
+
+            group.LastMessageId = latest?.Id;
+            group.LastMessageAt = latest?.EventTimestamp;
+        }
+
+        if (staleGroupIds.Count > 0)
+        {
+            await dbContext.SaveChangesAsync(cancellationToken);
+        }
     }
 
     private static async Task<int> GetRetentionDaysAsync(MessageDbContext dbContext, CancellationToken cancellationToken)

@@ -6,6 +6,7 @@ using MessageService.Tests.TestSupport;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using OptionsFactory = Microsoft.Extensions.Options.Options;
 
@@ -24,6 +25,7 @@ public class ProfileRefreshServiceTests : IDisposable
         var services = new ServiceCollection();
         services.AddDbContext<MessageDbContext>(o => o.UseSqlite(_connection));
         services.AddScoped<IProfileStore, DbProfileStore>();
+        services.AddSingleton(typeof(ILogger<>), typeof(NullLogger<>));
         services.AddSingleton<ILineProfileClient>(_profileClient);
         _provider = services.BuildServiceProvider();
 
