@@ -183,7 +183,11 @@ else
 {
     builder.Services.AddScoped<IHeartbeatReporter, HttpHeartbeatReporter>();
 }
-builder.Services.AddHostedService<HeartbeatService>();
+// 測試主機（WebAppFactoryFixture）會把這個關掉，見 HeartbeatOptions.Enabled 說明
+if (builder.Configuration.GetValue("Heartbeat:Enabled", true))
+{
+    builder.Services.AddHostedService<HeartbeatService>();
+}
 
 // 媒體下載／頭貼刷新的入列佇列：這台主機要不要真的做這兩件事只看 OutboundHere，
 // 跟模式或資料庫存取權無關（Core 端也可能 OutboundHere=true）。沒有消費者時换成 Null 實作，
