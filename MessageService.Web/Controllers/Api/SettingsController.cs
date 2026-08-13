@@ -108,9 +108,11 @@ public class SettingsController(
             .AsNoTracking()
             .FirstOrDefaultAsync(v => v.Id == ViewerSettings.SingletonId, cancellationToken);
 
-        return Ok(settings is null
-            ? new PiiMaskingSettingsDto(true, true, true, true)
-            : new PiiMaskingSettingsDto(settings.MaskNationalId, settings.MaskMobilePhone, settings.MaskLandline, settings.MaskNhiCard));
+        // singleton 列不存在時退回類別預設（跟 migration 種子同一個來源），不要在這裡另外硬寫
+        // 一份布林值——健保卡預設改關那次，這裡硬寫的 (true,true,true,true) 就跟真正的預設漂移了
+        var effective = settings ?? new ViewerSettings();
+        return Ok(new PiiMaskingSettingsDto(
+            effective.MaskNationalId, effective.MaskMobilePhone, effective.MaskLandline, effective.MaskNhiCard));
     }
 
     [HttpPut("pii-masking")]

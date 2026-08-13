@@ -92,6 +92,12 @@ dotnet publish MessageService.Web -c Release -o C:\Deploy\MessageService
 
 每台主機都用**同一份成品**，差別只在站台目錄下各自的 `appsettings.Production.json`。
 
+> **重佈方式注意**：SQLite 資料庫檔案預設放在站台目錄下的 `Db\` 子資料夾。上面這種
+> `dotnet publish -o` 覆蓋式重佈只覆蓋程式檔、不刪多餘檔案，`Db\` 與
+> `appsettings.Production.json` 都安全；但「先清空目錄再放新版」的重佈方式
+> （robocopy `/MIR`、Web Deploy 同步刪除、砍資料夾重解壓）會把 `Db\` 連同所有訊息
+> 一起清掉——用這類方式的話，請先照 [D3](#d3-資料夾權限) 的說明把資料庫搬到站台目錄以外。
+
 ---
 
 ## Part C：設定站台目錄下的 `appsettings.Production.json`
@@ -127,7 +133,7 @@ dotnet publish MessageService.Web -c Release -o C:\Deploy\MessageService
 
 ### SQL Server：建表
 
-只有 SQL Server 需要手動建表；SQLite 由程式啟動時自動跑 migrations（見下方 D3）。
+只有 SQL Server 需要手動建表；SQLite 由程式啟動時自動跑 migrations（見下方 D5）。
 
 ```bash
 cd MessageService.sln 所在目錄

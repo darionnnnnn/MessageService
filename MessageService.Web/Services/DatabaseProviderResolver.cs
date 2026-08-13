@@ -9,6 +9,18 @@ public static class DatabaseProviderResolver
     {
         if (!string.IsNullOrWhiteSpace(configuredProvider))
         {
+            // 大小寫在這裡收斂成標準寫法——下游（DbContext 註冊、migration、validator）全部用
+            // == "SqlServer" 精確比對，顯式設 "sqlserver" 若不正規化會靜默落入 Sqlite 分支，
+            // 而且兩條驗證規則都不會觸發，完全沒有提示。無法辨認的值維持原樣（下游行為跟
+            // 既往一致：非 SqlServer 一律走 Sqlite 分支）
+            if (string.Equals(configuredProvider, "SqlServer", StringComparison.OrdinalIgnoreCase))
+            {
+                return ("SqlServer", false);
+            }
+            if (string.Equals(configuredProvider, "Sqlite", StringComparison.OrdinalIgnoreCase))
+            {
+                return ("Sqlite", false);
+            }
             return (configuredProvider, false);
         }
 

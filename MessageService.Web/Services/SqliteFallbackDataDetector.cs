@@ -14,7 +14,9 @@ public static class SqliteFallbackDataDetector
             return false;
         }
 
-        using var connection = new SqliteConnection($"Data Source={sqliteFilePath};Mode=ReadOnly");
+        // Pooling=False：這是啟動時的一次性偵測，連線池會讓行程存續期間一直持有這個檔案的
+        // handle，擋住管理者事後搬移／刪除殘留檔
+        using var connection = new SqliteConnection($"Data Source={sqliteFilePath};Mode=ReadOnly;Pooling=False");
         connection.Open();
 
         using var checkTable = connection.CreateCommand();

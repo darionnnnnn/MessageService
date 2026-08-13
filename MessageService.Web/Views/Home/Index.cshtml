@@ -3,6 +3,11 @@
     ViewData["BodyClass"] = "chat-page";
 }
 
+@* SQLite 救援模式的全站持續性警示（需求2）——救場是需要立刻處理的異常狀態，不能只藏在
+   設定 modal 的「主機狀態」分頁裡等人打開才看到；chat.js 頁面載入時查一次
+   /api/settings/database-status 決定顯示與否，內容也由它填 *@
+<div id="db-fallback-banner" class="alert alert-danger rounded-0 mb-0 py-2 text-center d-none" role="alert"></div>
+
 <div id="chat-app" class="chat-app">
     <aside id="sidebar" class="sidebar">
         <div class="sidebar-header">

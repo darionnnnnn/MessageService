@@ -37,7 +37,7 @@ public static class MessageServiceDatabaseMigrationExtensions
             DatabaseMigrationMutex.RunExclusive(
                 () =>
                 {
-                    if (registration.DatabaseProvider == "Sqlite")
+                    if (registration.DatabaseStartupDecision.EffectiveProvider == "Sqlite")
                     {
                         // SqliteConnectionString 在這裡必然已解析好：這個區塊由 capabilities.HasDatabaseAccess
                         // 圍住（見上面 AutoMigrate 判斷），跟 AddMessageServiceCore 註冊 DbContext 時賦值的

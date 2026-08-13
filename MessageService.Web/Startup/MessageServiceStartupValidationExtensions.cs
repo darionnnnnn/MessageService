@@ -31,11 +31,12 @@ public static class MessageServiceStartupValidationExtensions
 
         // 需求2：純粹的推導結果記一行 Info——救場觸發（Error 等級）與其他 DB 相關規則檢查都在
         // DeploymentValidator 裡，這裡只記錄「沒設 Provider 時自動選了哪個」這個單純事實
-        if (registration.DatabaseProviderWasInferred)
+        var decision = registration.DatabaseStartupDecision;
+        if (decision.ProviderWasInferred)
         {
             validationLogger.LogInformation(
                 "Database:Provider 未設定，依 ConnectionStrings:SqlServer 是否有值推導為 {Provider}。",
-                registration.ResolvedDatabaseProviderBeforeFallback);
+                decision.ProviderBeforeFallback);
         }
 
         var lineOptions = validationScope.ServiceProvider.GetRequiredService<IOptions<LineOptions>>().Value;
@@ -43,23 +44,37 @@ public static class MessageServiceStartupValidationExtensions
         var ingestOptions = validationScope.ServiceProvider.GetRequiredService<IOptions<IngestOptions>>().Value;
         DeploymentValidator.Validate(
             deploymentOptions, lineOptions, viewerOptions, ingestOptions, validationLogger,
-            registration.DatabaseStartupDecision);
+            decision);
 
         // 救場沒有觸發、確實在用 SQL Server：偵測站台目錄下是否殘留救場期間累積的 SQLite 資料——
         // 只偵測、只警告，不自動合併（見 AddMessageServiceCore 救場區塊的說明）。用跟主資料庫相同
         // 的預設路徑解析規則找「如果有救場資料，會在哪裡」，不需要真的建立這個目錄
         // （ResolveDataSourcePath 不像 Resolve 那樣有建立目錄的副作用）
-        if (deploymentMode is DeploymentMode.AllInOne && registration.DatabaseProvider == "SqlServer")
+        if (deploymentMode is DeploymentMode.AllInOne && decision.EffectiveProvider == "SqlServer")
         {
             var potentialFallbackPath = SqliteConnectionStringResolver.ResolveDataSourcePath(
                 app.Configuration.GetConnectionString("Sqlite") ?? "Data Source=Db/messages.db",
                 app.Environment.ContentRootPath);
-            if (potentialFallbackPath is not null && SqliteFallbackDataDetector.HasResidualMessages(potentialFallbackPath))
+            if (potentialFallbackPath is not null)
             {
-                validationLogger.LogWarning(
-                    "偵測到 {Path} 有資料——這通常代表先前 SQLite 救場期間累積過訊息，但尚未存在於目前" +
-                    "使用的 SQL Server 裡。不會自動合併，請視需要人工處理，見 docs/DEPLOYMENT-GUIDE.md。",
-                    potentialFallbackPath);
+                // 這只是「順手警告」性質的偵測——殘留檔案損毀、非 SQLite 格式或被別的行程鎖住
+                // 都不該讓 SQL Server 一切正常的部署啟動失敗，吞掉例外改記警告
+                try
+                {
+                    if (SqliteFallbackDataDetector.HasResidualMessages(potentialFallbackPath))
+                    {
+                        validationLogger.LogWarning(
+                            "偵測到 {Path} 有資料——這通常代表先前 SQLite 救場期間累積過訊息，但尚未存在於目前" +
+                            "使用的 SQL Server 裡。不會自動合併，請視需要人工處理，見 docs/DEPLOYMENT-GUIDE.md。",
+                            potentialFallbackPath);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    validationLogger.LogWarning(ex,
+                        "檢查 {Path} 是否殘留 SQLite 救場資料時失敗（檔案損毀或被鎖住？）——不影響啟動，" +
+                        "但無法確認是否有救場期間的資料尚未搬到 SQL Server。", potentialFallbackPath);
+                }
             }
         }
 

@@ -12,15 +12,16 @@ namespace MessageService.Web.Startup;
 /// <summary>Program.cs 里純機械式拆出來的結果——不改任何邏輯／順序／條件，只是把同一段
 /// DI 註冊矩陣搬進這個檔案，讓 Program.cs 本身可以只剩組裝呼叫。資料庫 provider 推導與
 /// SQLite 救場探測（需求2）放在這裡而不是獨立一個檔案，是因為這段決定了要註冊哪個
-/// DbContext，跟註冊本身密不可分，拆開反而要多傳一堆參數。</summary>
+/// DbContext，跟註冊本身密不可分，拆開反而要多傳一堆參數。
+///
+/// provider 相關的欄位一律透過 DatabaseStartupDecision 取用，不在這個 record 另存副本——
+/// 兩份必須永遠同步的欄位正是「改共用欄位漏改讀取端」那類 bug 的溫床（終檢輪收斂）。
+/// 這裡只放 decision 沒有的東西：兩條已解析的 Sqlite 連線字串與 AutoMigrate 旗標。</summary>
 public record MessageServiceCoreRegistration(
-    string DatabaseProvider,
-    bool DatabaseProviderWasInferred,
-    string ResolvedDatabaseProviderBeforeFallback,
+    DatabaseStartupDecision DatabaseStartupDecision,
     bool AutoMigrate,
     string? SqliteConnectionString,
-    string? OutboxConnectionString,
-    DatabaseStartupDecision DatabaseStartupDecision);
+    string? OutboxConnectionString);
 
 public static class MessageServiceCoreServiceCollectionExtensions
 {
@@ -275,7 +276,6 @@ public static class MessageServiceCoreServiceCollectionExtensions
         }
 
         return new MessageServiceCoreRegistration(
-            databaseProvider, databaseProviderWasInferred, resolvedDatabaseProvider, autoMigrate,
-            sqliteConnectionString, outboxConnectionString, databaseStartupDecision);
+            databaseStartupDecision, autoMigrate, sqliteConnectionString, outboxConnectionString);
     }
 }

@@ -90,6 +90,10 @@
 - **B6 樣板與文件**：四份樣板拿掉 `Database:Provider` 鍵，註解改寫推導規則＋救場行為＋
   嚴格模式開關；`DEPLOYMENT-MODES.md` 設定鍵一覽表更新（`Provider` 改「選填，未設定時推導」、
   新增 `SqliteFallback`）；`DEPLOYMENT-GUIDE.md` Part C 對應改寫。
+  - **實作時的有意識偏離**：Viewer 樣板保留顯式 `"Provider": "SqlServer"` 沒拿掉——Viewer
+    沒有救場機制，若改成推導、又不小心漏填 SqlServer 連線字串，程式會悄悄改用一顆空的本機
+    SQLite 安靜啟動，檢視端看起來像「還沒有任何訊息」，比啟動失敗更難察覺；顯式設定能讓
+    這種疏漏在啟動當下直接報錯擋下來（理由也寫在樣板註解裡）。
 - **B7 測試**：推導矩陣（顯式×2、未設定×2）、Validator 三條新舊警告、探測失敗→Sqlite 註冊
   ＋runtime state 正確（探測器做成可注入以便測試替身）、banner API 曝露、B4 切回偵測。
 
@@ -168,6 +172,43 @@
 另外對「救場決定點的單一性」「路徑解析在 IIS in-process／`dotnet run` 下的行為」各做了兩次
 獨立的發佈執行檔端到端煙霧測試（含刻意用 RFC 5737 保留位址製造真實網路逾時），均驗證正確，
 沒有發現額外問題。
+
+## 終檢輪（完成，607 測試綠）
+
+三角度平行審查（規劃比對／程式碼正確性／文件普查）＋逐項查證，修正：
+
+**規劃承諾的缺漏補齊**
+1. B3 通知的「全站持續性 banner」與「主機狀態頁附註 provider」原本只做了設定 modal 內的
+   警示——補上聊天頁頂部的 `#db-fallback-banner`（chat.js 載入時查一次 database-status，
+   救場是啟動時定案的狀態不用輪詢；`body.chat-page` 改 flex column 讓 banner 與聊天版面
+   共存，隱藏時版面跟原本完全一樣）與主機狀態分頁的「本機目前使用的資料庫」附註。
+2. B2 探測逾時補上「夾到 5 秒內」（`SqlConnectionStringBuilder.ConnectTimeout`，只影響探測、
+   不影響正式連線；連線字串顯式給更短值就從其，0=無限也一併夾掉）。
+3. A5 的 Part B 重佈方式警告補上。
+
+**審查抓到的程式碼問題**
+4. `MessageServiceCoreRegistration` 與 `DatabaseStartupDecision` 的 provider 欄位三欄重複
+   （欄位漂移溫床，正是這專案抓過的 bug 家族）——registration 收斂成只放 decision＋兩條
+   連線字串＋AutoMigrate，「救場前的推導結果」改為 decision 的導出屬性
+   `ProviderBeforeFallback`。
+5. 殘留救場資料偵測（`SqliteFallbackDataDetector`）的例外會讓 SQL Server 一切正常的部署
+   啟動失敗——包 try/catch 降為警告；連線加 `Pooling=False` 避免行程存續期間持有殘留檔
+   handle 擋住管理者搬移。
+6. `Database:Provider` 大小寫在推導點收斂成標準寫法（顯式設 `"sqlserver"` 原本會靜默落入
+   Sqlite 分支且兩條驗證規則都不觸發）；無法辨認的值維持原樣。
+7. PII 遮蔽的「singleton 列不存在／建構子未指定」後備共**三處**硬寫全開（SettingsController／
+   MaskingService／MaskingRuleSet），健保卡預設改關後全部漂移——收斂到
+   `PiiMaskingSettings.Defaults`（從 `new ViewerSettings()` 投影，跟 migration 種子同一個
+   定義點）。
+8. 規劃 B6 補記 Viewer 樣板保留顯式 Provider 的有意識偏離（見該條目）。
+
+**文件**
+9. README.md 兩處「預設全開」漏改、一處死引用、一處英文 typo；DEPLOYMENT-GUIDE.md 一處
+   章節指涉錯誤（D3→D5）。
+
+不修的審查意見：`Mode.ToString()` 對別名 enum 的回傳值不定（既有行為、純顯示層面、臆測性）；
+`database-status` 回應含例外訊息原文（檢視端有 IP 白名單把關，banner 本來就要把失敗原因
+顯示給管理者）。
 
 ## 明確不做（本輪）
 

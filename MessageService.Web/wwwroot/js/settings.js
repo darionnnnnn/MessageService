@@ -518,6 +518,10 @@
 
         // 只有本機這台主機的狀態（見 DatabaseStartupDecision 說明）——AllInOne 以外的模式
         // sqliteFallbackActive 恆為 false，這裡不用特別分模式處理
+        els.databaseProviderNote.textContent =
+            `本機（這台檢視端）目前使用的資料庫：${status.effectiveProvider}` +
+            (status.sqliteFallbackActive ? '（救援模式）' : '');
+
         els.databaseFallbackWarning.classList.toggle('d-none', !status.sqliteFallbackActive);
         if (status.sqliteFallbackActive) {
             els.databaseFallbackWarning.textContent =
@@ -588,6 +592,7 @@
         els.hostHeartbeatsEmpty = $('host-heartbeats-empty');
         els.hostHeartbeatsFingerprintWarning = $('host-heartbeats-fingerprint-warning');
         els.databaseFallbackWarning = $('database-fallback-warning');
+        els.databaseProviderNote = $('database-provider-note');
         els.hostHeartbeatsRefreshBtn = $('host-heartbeats-refresh-btn');
         els.settingsModal = $('settings-modal');
         els.settingsModalBody = $('settings-modal-body');

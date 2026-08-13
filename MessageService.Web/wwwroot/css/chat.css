@@ -53,11 +53,21 @@
     }
 }
 
-/* chat-page 拿掉一般頁面的邊距，讓雙欄版面吃滿整個視窗高度，不用 calc(100vh - 魔術數字) 猜 header 高度 */
+/* chat-page 拿掉一般頁面的邊距，讓雙欄版面吃滿整個視窗高度，不用 calc(100vh - 魔術數字) 猜 header 高度。
+   flex column 讓 SQLite 救援模式的全站警示（#db-fallback-banner）能跟聊天版面共存——banner 佔
+   自然高度、聊天版面吃剩餘空間；banner 隱藏（d-none）時 chat-app 跟原本一樣吃滿全高 */
 body.chat-page {
     height: 100dvh;
     margin: 0;
     overflow: hidden;
+    display: flex;
+    flex-direction: column;
+}
+
+body.chat-page .chat-app {
+    flex: 1 1 auto;
+    min-height: 0;
+    height: auto;
 }
 
 /* 字級系統：--font-base-px 是「中」檔泡泡文字的實際 px 大小，設定頁可用數值輸入直接調整

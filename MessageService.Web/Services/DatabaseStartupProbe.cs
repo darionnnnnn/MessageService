@@ -1,4 +1,5 @@
 using MessageService.Data;
+using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 
 namespace MessageService.Services;
@@ -17,8 +18,18 @@ public static class DatabaseStartupProbe
     {
         try
         {
+            // 連線逾時夾到 5 秒內：探測失敗是要走救場的，站台啟動被 SqlClient 預設的 15 秒
+            // Connect Timeout 拖住沒有意義；連線字串顯式給了更短的值就從其（0＝無限等待，
+            // 也一併夾掉）。只影響這次探測——正式 DI 註冊用的仍是原連線字串，不受影響。
+            // Connect Timeout 只管建立連線，不影響探測內 Migrate() 的執行時間。
+            var probeConnectionString = new SqlConnectionStringBuilder(connectionString);
+            if (probeConnectionString.ConnectTimeout == 0 || probeConnectionString.ConnectTimeout > 5)
+            {
+                probeConnectionString.ConnectTimeout = 5;
+            }
+
             var options = new DbContextOptionsBuilder<SqlServerMessageDbContext>()
-                .UseSqlServer(connectionString)
+                .UseSqlServer(probeConnectionString.ConnectionString)
                 .Options;
             using var dbContext = new SqlServerMessageDbContext(options);
 

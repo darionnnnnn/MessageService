@@ -14,6 +14,11 @@ public record DatabaseStartupDecision(
     bool SqliteFallbackTriggered,
     string? SqliteFallbackReason)
 {
+    /// <summary>顯式設定／推導的原始結果（救場覆寫前）——救場觸發時 EffectiveProvider 已被
+    /// 改成 Sqlite，「推導為哪個 provider」的啟動 log 要用這個。導出而非另存一欄：救場只可能
+    /// 從 SqlServer 觸發（見 Program.cs 的觸發條件），所以觸發時原始結果必然是 SqlServer。</summary>
+    public string ProviderBeforeFallback => SqliteFallbackTriggered ? "SqlServer" : EffectiveProvider;
+
     /// <summary>DeploymentValidator 的單元測試不關心 DB 推導細節時的預設值——等同「未設定
     /// Provider、沒有 SqlServer 連線字串、沒有觸發救場」，跟批次 B 之前的行為一致。</summary>
     public static DatabaseStartupDecision Default { get; } = new(

@@ -9,7 +9,8 @@ public partial class MaskingRuleSet(
     IReadOnlyDictionary<string, string> aliases,
     PiiMaskingSettings? piiSettings = null) : IMaskingRuleSet
 {
-    private readonly PiiMaskingSettings _pii = piiSettings ?? PiiMaskingSettings.AllEnabled;
+    // 沒指定時退回 ViewerSettings 的類別預設（見 PiiMaskingSettings.Defaults 的單一定義點說明）
+    private readonly PiiMaskingSettings _pii = piiSettings ?? PiiMaskingSettings.Defaults;
 
     public string MaskText(string groupId, string text)
     {

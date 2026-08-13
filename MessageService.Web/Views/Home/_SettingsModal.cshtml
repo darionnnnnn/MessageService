@@ -186,6 +186,8 @@
                                 </div>
                                 <p class="form-text">每台部署主機（AllInOne／Edge／Core／Viewer）定期回報一次存活狀態；「離線」只代表多久沒收到回報，不代表資料遺失。所有主機的心跳回報間隔（Heartbeat:IntervalSeconds）務必設成一致，狀態燈是以這裡（檢視端）的設定為基準判斷。Edge 這列量的是「Edge→Core 連通性」而非「Edge 是否存活」——Core 掛掉時 Edge 會顯示離線，但 Edge 本身可能仍在正常緩衝。</p>
 
+                                <p id="database-provider-note" class="form-text"></p>
+
                                 <div id="database-fallback-warning" class="alert alert-danger d-none" role="alert"></div>
 
                                 <div id="host-heartbeats-fingerprint-warning" class="alert alert-warning d-none" role="alert"></div>
