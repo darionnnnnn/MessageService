@@ -295,6 +295,10 @@ if (capabilities.ReceivesWebhook)
     var outboxConnectionString = builder.Configuration.GetConnectionString("Outbox") ?? "Data Source=outbox.db";
     OutboxSchemaUpgrader.EnsureDeadLetterColumn(outboxConnectionString);
 
+    // 既有 outbox.db 可能已經因為 LINE redelivery 累積了重複 WebhookEventId（P0）——
+    // 必須先去重才能補建唯一索引，見 EnsureWebhookEventIdUniqueIndex 說明
+    OutboxSchemaUpgrader.EnsureWebhookEventIdUniqueIndex(outboxConnectionString);
+
     // webhook 執行緒寫、forwarder 執行緒讀刪；rollback journal 模式下兩邊會互相 block
     // （busy_timeout 預設 30 秒，遠超 LINE 的 webhook 逾時），WAL 讓讀寫不互相阻塞
     OutboxSchemaUpgrader.EnableWalMode(outboxConnectionString);

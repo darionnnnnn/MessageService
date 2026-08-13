@@ -78,7 +78,12 @@ public class IngestController(
             return Problem(statusCode: StatusCodes.Status500InternalServerError);
         }
 
-        var envelopesByWebhookEventId = envelopes.ToDictionary(e => e.WebhookEventId);
+        // LINE redelivery 會用同一個 WebhookEventId 重送整包，同一批裡出現重複鍵是預期會發生的
+        // （見 docs/DEPLOYMENT-GUIDE.md 對 Webhook redelivery 的建議）——重複鍵的內容永遠相同
+        // （同一事件），取哪一筆都一樣，用 ToDictionary 直接丟例外會讓整批回 500
+        var envelopesByWebhookEventId = envelopes
+            .GroupBy(e => e.WebhookEventId)
+            .ToDictionary(g => g.Key, g => g.First());
         foreach (var item in results)
         {
             if (item.PermanentlyRejected)

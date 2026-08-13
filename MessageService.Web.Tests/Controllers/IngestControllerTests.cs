@@ -180,6 +180,23 @@ public class IngestControllerTests
         Assert.Equal(7, Assert.Single(downloadQueue.Enqueued));
     }
 
+    // P0：LINE redelivery 用同一個 WebhookEventId 重送整包，同一批裡出現重複鍵是預期會發生的
+    // （見 docs/POST-CONSOLIDATION-REVIEW-PLAN.md 批次A）。改用 GroupBy 之前這裡會直接讓
+    // ToDictionary 丟 ArgumentException，端點回 500，讓 Edge 端 outbox 永久卡死
+    [Fact]
+    public async Task SubmitEventsBatch_DuplicateWebhookEventId_DoesNotThrowAndReturnsOk()
+    {
+        var sink = new FakeIngestSink();
+        var controller = CreateController(sink: sink);
+        var envelopes = new List<IngestEnvelope> { Envelope("evt-1"), Envelope("evt-1"), Envelope("evt-2") };
+
+        var result = await controller.SubmitEventsBatch(envelopes, CancellationToken.None);
+
+        var ok = Assert.IsType<OkObjectResult>(result);
+        var results = Assert.IsType<List<IngestBatchItemResult>>(ok.Value);
+        Assert.Equal(["evt-1", "evt-1", "evt-2"], results.Select(r => r.WebhookEventId));
+    }
+
     // === content-work ===
 
     [Fact]

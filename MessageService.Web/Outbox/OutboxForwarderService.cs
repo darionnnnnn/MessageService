@@ -106,7 +106,10 @@ public class OutboxForwarderService(
         }
 
         // 反序列化本身失敗（不該發生，但防禦性處理）不算落地失敗——payload 壞了重試也不會變好，
-        // 直接死信，不讓這種項目卡進下面的批次呼叫
+        // 直接死信，不讓這種項目卡進下面的批次呼叫。
+        // 這裡用索引子賦值而非 group：OutboxDbContext 對 WebhookEventId 有唯一索引，同一批 batch
+        // 裡不可能出現兩列相同的 WebhookEventId（DB 層面保證），不需要為理論上不會發生的重複
+        // 多寫一層 group 邏輯——見 SqliteOutboxWriter.EnqueueAsync 對撞鍵的處理
         var entriesByWebhookEventId = new Dictionary<string, OutboxEntry>();
         var envelopes = new List<IngestEnvelope>();
         foreach (var entry in batch)
