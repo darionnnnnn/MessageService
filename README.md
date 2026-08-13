@@ -233,6 +233,7 @@ dotnet user-secrets set "Line:ChannelAccessToken" "<你的 access token>"
 | `Viewer:AllowedClientIps` | IP 白名單，見上 |
 | `UseForwardedHeaders` / `ForwardedHeaders:KnownProxies` / `KnownNetworks` | 反向代理後方時開啟並設定其中一項；IIS in-process（預設部署方式）不要開，見上 |
 | `Encryption:Enabled` / `Key` / `SearchWindowDays` | **所有直連資料庫的主機必須完全一致**，否則訊息會顯示成 `ENC2:` 密文、媒體一律回 404，見 [docs/ENCRYPTION.md](docs/ENCRYPTION.md) |
+| `Heartbeat:Enabled` / `IntervalSeconds` / `OutboxBacklogAlertMinutes` | 所有部署模式都跑的存活回報，供設定頁「主機狀態」區塊顯示；`Enabled` 預設 `true`，只有測試主機會關掉；`IntervalSeconds` 預設 60；`OutboxBacklogAlertMinutes`（預設 30）是 outbox 最舊未死信項目滯留幾分鐘就記一則 Error |
 
 ---
 
@@ -273,6 +274,8 @@ dotnet user-secrets set "Line:ChannelAccessToken" "<你的 access token>"
 **ViewerSettings**（單列，Id 固定為 1）：除既有的名稱顯示模式外，新增 `RetentionDays`（保留天數，預設 1095＝3 年，`RetentionCleanupService` 每次執行讀取）與 `MaskNationalId`/`MaskMobilePhone`/`MaskLandline`/`MaskNhiCard`（台灣個資自動遮蔽四開關，預設全開）。
 
 **MaskKeywords** + **MaskKeywordGroups**／**UserAliases**／**AnonymousIdentities**：檢視端寫入的顯示設定，只有這幾張表（含上面的 ViewerSettings）是 Web 專案會寫入的。`AnonymousIdentities`（GroupId+UserId 複合主鍵）是 `NameDisplayMode.Anonymous` 的代號永久指派表，跟其他幾張不同的地方是使用者不直接編輯——由 `GET /api/groups/{groupId}/messages` 第一次遇到某成員時自動指派並寫入。
+
+**HostHeartbeats**（`Role`+`MachineName` 複合主鍵，每台主機一列，`upsert` 不成長）：`HeartbeatService` 每 `Heartbeat:IntervalSeconds` 秒更新自己那列，記錄 `LastSeenAt`、`OutboxPending`／`OutboxOldestAgeSeconds`（只有收 webhook 的主機才有值，其餘固定 `null`）、`EncryptionKeyFingerprint`（`FieldCipher.KeyId`，未啟用加密固定 `null`）。Edge 沒有本機資料庫，靠 `POST /api/ingest/heartbeat` 端點請 Core 代寫（見 `IHeartbeatReporter` 的兩種實作）。設定頁「主機狀態」區塊純讀這張表。
 
 這些表的欄位是各部署角色的主機間（以及未來其他消費端）的共用契約，異動需評估相容性。
 
