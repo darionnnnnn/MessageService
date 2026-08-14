@@ -29,12 +29,12 @@ public class MaskingServiceTests : IDisposable
     [Fact]
     public async Task LoadRulesAsync_UsesSeededDefaultViewerSettings()
     {
-        // Migration 的 HasData 種子（MaskMiddle）在 EnsureCreated 下也會套用
+        // Migration 的 HasData 種子（Original）在 EnsureCreated 下也會套用
         var service = new MaskingService(_dbContext);
 
         var rules = await service.LoadRulesAsync(CancellationToken.None);
 
-        Assert.Equal("小*", rules.ResolveDisplayName("U1", "小明"));
+        Assert.Equal("小明", rules.ResolveDisplayName("U1", "小明"));
     }
 
     [Fact]

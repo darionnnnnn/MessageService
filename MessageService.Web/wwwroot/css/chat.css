@@ -337,6 +337,15 @@ body.chat-page .chat-app {
     object-fit: cover;
 }
 
+/* 顯示代號 emoji（而不是真實頭貼圖檔）時由 buildAvatarElement 掛上。emoji 是文字節點，
+   會吃到外層繼承來的行高把字推歪、在小尺寸的 .message-row .avatar 裡甚至被裁掉；
+   這裡把行高歸一並置中，讓三種尺寸共用同一份對齊行為 */
+.avatar-icon {
+    line-height: 1;
+    text-align: center;
+    user-select: none;
+}
+
 /* LINE 桌面版清單／標頭頭貼是圓角方形（squircle），不是正圓；訊息串裡的 sender 頭貼
    仍維持正圓（見 .message-row .avatar），與 LINE 一致 */
 .group-avatar {
@@ -783,7 +792,10 @@ body.chat-page .chat-app {
     background: transparent;
     box-shadow: none;
     font-size: calc(var(--chat-base-current) * 1.3rem / 1.15rem);
-    color: #fff;
+    /* 泡泡背景是透明的，文字直接落在淺色的訊息區底色上——這裡不能沿用泡泡內的白字，
+       否則貼圖圖檔載不出來時 buildStickerFallbackNode 的「(貼圖)」是白底白字，看起來
+       就是一塊空白方塊，跟「載入中」分不出來 */
+    color: var(--line-text);
     padding: 0;
 }
 

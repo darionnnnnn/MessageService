@@ -75,6 +75,19 @@ public static class DeploymentValidator
                 "所有訊息內容會停在 Pending。如果這不是刻意的，請檢查設定。");
         }
 
+        // Core 端 OutboundHere=false 是兩台拓撲的正常設定（對外由 Edge 負責），不是錯誤——但這代表
+        // 「圖片載不出來／名稱與頭貼一直是空的」的成因有一半在另一台主機上，而那台的設定這裡驗證
+        // 不到。實際踩過的情境是兩台都沒開：媒體永遠停在 Pending、Groups.GroupName 與
+        // GroupMembers.DisplayName 永遠是 null，前台看到的就會是 LINE 的原始 ID，很容易被當成
+        // 檢視端壞掉而在這台主機上白找。啟動時把這條線索留在 log 裡，省下那趟冤枉路
+        if (mode is DeploymentMode.Core && !capabilities.OutboundHere)
+        {
+            logger.LogInformation(
+                "Deployment:Mode=Core 且 Line:OutboundHere 判定為 false：本機不會對外呼叫 LINE API，" +
+                "媒體下載與名稱／頭貼快取全部倚賴 Edge 端主機。若前台的圖片一直停在「內容抓取中」、" +
+                "或名稱與頭貼始終空白，請先確認 Edge 端有在執行且它的 Line:OutboundHere 沒有被設成 false。");
+        }
+
         // 檢視端啟用時預設會一併開（見 DeploymentCapabilities.ViewerEnabled）——空白名單雖然是
         // 「全拒」而非啟動失敗，但這種組合通常代表部署時漏設，值得提醒。不限 Core：AllInOne
         // 是最常見的拓撲，同樣會「檢視端啟用了卻全拒」而不自知

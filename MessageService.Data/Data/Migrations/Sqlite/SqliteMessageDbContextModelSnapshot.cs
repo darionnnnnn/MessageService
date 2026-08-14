@@ -297,7 +297,7 @@ namespace MessageService.Data.Migrations.Sqlite
                             MaskMobilePhone = true,
                             MaskNationalId = true,
                             MaskNhiCard = false,
-                            NameDisplayMode = "MaskMiddle",
+                            NameDisplayMode = "Original",
                             RetentionDays = 1095
                         });
                 });

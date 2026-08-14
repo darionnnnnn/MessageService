@@ -176,9 +176,9 @@ public class MessagesControllerTests : IDisposable
     }
 
     [Fact]
-    public async Task GetMessages_DisplayName_IsMaskedByDefault_AndFallsBackToMaskedUserIdWhenNoCachedProfile()
+    public async Task GetMessages_DisplayName_ShowsRealNameByDefault_AndFallsBackToUserIdWhenNoCachedProfile()
     {
-        // 預設 ViewerSettings.NameDisplayMode = MaskMiddle（migration 種子值），驗證真的 MaskingService 有接進來
+        // 預設 ViewerSettings.NameDisplayMode = Original（migration 種子值）
         var now = DateTimeOffset.UtcNow;
         await _fixture.SeedAsync(async dbContext =>
         {
@@ -186,6 +186,28 @@ public class MessagesControllerTests : IDisposable
             dbContext.GroupMessages.Add(TextMessage("e1", "U1", now, "hi"));
             dbContext.GroupMessages.Add(TextMessage("e2", "U2", now, "hi2"));
             await Task.CompletedTask;
+        });
+
+        var page = await _fixture.Client.GetFromJsonAsync<MessagesPageDto>($"/api/groups/{GroupId}/messages?days=3");
+
+        Assert.Equal("小明", page!.Messages.Single(m => m.UserId == "U1").DisplayName);
+        // 還沒快取到 profile 的成員只能顯示 LINE UserId 本身——這正是預設不再用 MaskMiddle 的理由：
+        // 遮蔽這串 ID 只會得到看起來像故障的 U****…，見 ViewerSettings.NameDisplayMode
+        Assert.Equal("U2", page.Messages.Single(m => m.UserId == "U2").DisplayName);
+    }
+
+    [Fact]
+    public async Task GetMessages_DisplayName_IsMasked_WhenMaskMiddleSelected()
+    {
+        // 驗證 MaskingService 真的有接進這支 API，不是只有預設值那條路走得通
+        var now = DateTimeOffset.UtcNow;
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            var settings = await dbContext.ViewerSettings.SingleAsync();
+            settings.NameDisplayMode = NameDisplayMode.MaskMiddle;
+            dbContext.GroupMembers.Add(new GroupMember { GroupId = GroupId, UserId = "U1", DisplayName = "小明", UpdatedAt = now });
+            dbContext.GroupMessages.Add(TextMessage("e1", "U1", now, "hi"));
+            dbContext.GroupMessages.Add(TextMessage("e2", "U2", now, "hi2"));
         });
 
         var page = await _fixture.Client.GetFromJsonAsync<MessagesPageDto>($"/api/groups/{GroupId}/messages?days=3");

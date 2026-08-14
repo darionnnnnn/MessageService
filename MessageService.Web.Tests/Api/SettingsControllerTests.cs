@@ -13,11 +13,11 @@ public class SettingsControllerTests : IDisposable
     public void Dispose() => _fixture.Dispose();
 
     [Fact]
-    public async Task GetDisplaySettings_DefaultsToMaskMiddle()
+    public async Task GetDisplaySettings_DefaultsToOriginal()
     {
         var settings = await _fixture.Client.GetFromJsonAsync<DisplaySettingsDto>("/api/settings/display");
 
-        Assert.Equal(nameof(NameDisplayMode.MaskMiddle), settings!.NameDisplayMode);
+        Assert.Equal(nameof(NameDisplayMode.Original), settings!.NameDisplayMode);
     }
 
     [Fact]
