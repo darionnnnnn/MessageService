@@ -11,7 +11,7 @@ public class WebhookEventHandler(
     IOutboxWriter outboxWriter,
     ILogger<WebhookEventHandler> logger) : IWebhookEventHandler
 {
-    private static readonly HashSet<string> DownloadableTypes = ["image", "video", "audio", "file"];
+    private static readonly HashSet<string> DownloadableTypes = ["image", "video", "audio", "file", "sticker"];
     private static readonly HashSet<string> SupportedTypes = ["text", "sticker", "image", "video", "audio", "file"];
 
     public async Task HandleAsync(WebhookRequest request, CancellationToken cancellationToken)

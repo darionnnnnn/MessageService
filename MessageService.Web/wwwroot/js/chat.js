@@ -248,6 +248,18 @@
     function buildReadyContentNode(messageType, contentId, fileName) {
         const url = `/api/messages/${contentId}/content`;
 
+        if (messageType === 'sticker') {
+            const img = document.createElement('img');
+            img.className = 'msg-sticker';
+            img.loading = 'lazy';
+            img.alt = '(貼圖)';
+            img.src = url;
+            img.addEventListener('error', () => {
+                img.replaceWith(buildStickerFallbackNode({ text: '(貼圖)' }));
+            }, { once: true });
+            return img;
+        }
+
         if (messageType === 'image') {
             const img = document.createElement('img');
             img.className = 'msg-image';
@@ -339,16 +351,19 @@
             return buildStickerFallbackNode(message);
         }
 
-        const img = document.createElement('img');
-        img.className = 'msg-sticker';
-        img.loading = 'lazy';
-        img.alt = message.text ?? '(貼圖)';
-        img.referrerPolicy = 'no-referrer';
-        img.src = `https://stickershop.line-scdn.net/stickershop/v1/sticker/${encodeURIComponent(message.stickerId)}/android/sticker.png`;
-        img.addEventListener('error', () => {
-            img.replaceWith(buildStickerFallbackNode(message));
-        }, { once: true });
-        return img;
+        const content = message.content;
+        if (!content) {
+            return buildStickerFallbackNode(message);
+        }
+
+        if (isDownloadInProgress(content.downloadStatus)) {
+            return buildPendingNode(content.id, message.messageType, '');
+        }
+        if (content.downloadStatus === 'Failed') {
+            return buildStickerFallbackNode(message);
+        }
+
+        return buildReadyContentNode(message.messageType, content.id, '');
     }
 
     function buildContentNode(message) {
@@ -494,7 +509,9 @@
         }
         const replacement = status.downloadStatus === 'Completed'
             ? buildReadyContentNode(pendingEl.dataset.messageType, status.contentId, pendingEl.dataset.fileName)
-            : buildFailedNode();
+            : (pendingEl.dataset.messageType === 'sticker' 
+                ? buildStickerFallbackNode({ text: '(貼圖)' }) 
+                : buildFailedNode());
         pendingEl.replaceWith(replacement);
     }
 

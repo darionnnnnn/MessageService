@@ -59,7 +59,7 @@ public class ContentDownloadServiceTests : IDisposable
             NullLogger<ContentDownloadService>.Instance);
     }
 
-    private async Task<long> SeedPendingContentAsync(string messageType, string lineMessageId = "line-msg-1")
+    private async Task<long> SeedPendingContentAsync(string messageType, string lineMessageId = "line-msg-1", string? stickerId = null)
     {
         using var scope = _provider.CreateScope();
         var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
@@ -70,6 +70,7 @@ public class ContentDownloadServiceTests : IDisposable
             LineMessageId = lineMessageId,
             GroupId = "G1",
             MessageType = messageType,
+            StickerId = stickerId,
             EventTimestamp = DateTimeOffset.UtcNow,
             ReceivedAt = DateTimeOffset.UtcNow,
             Content = new MessageContent { DownloadStatus = DownloadStatus.Pending }
@@ -100,6 +101,38 @@ public class ContentDownloadServiceTests : IDisposable
         Assert.Equal(new byte[] { 1, 2, 3, 4 }, content.Content);
         Assert.Equal("image/jpeg", content.ContentType);
         Assert.NotNull(content.CompletedAt);
+        Assert.Single(_contentClient.ContentCalls);
+        Assert.Empty(_contentClient.StickerCalls);
+    }
+
+    [Fact]
+    public async Task ProcessAsync_Sticker_DownloadsFromStickerCdn()
+    {
+        var contentId = await SeedPendingContentAsync("sticker", stickerId: "123456");
+        _contentClient.OnGetSticker = _ => Task.FromResult(new LineContentResult(new MemoryStream([1, 2]), "image/png", 2));
+
+        var service = CreateService();
+        await service.ProcessAsync(contentId, CancellationToken.None);
+
+        var content = await ReloadContentAsync(contentId);
+        Assert.Equal(DownloadStatus.Completed, content.DownloadStatus);
+        Assert.Single(_contentClient.StickerCalls);
+        Assert.Empty(_contentClient.ContentCalls);
+        Assert.Equal("123456", _contentClient.StickerCalls[0]);
+    }
+
+    [Fact]
+    public async Task ProcessAsync_StickerWithoutId_MarksFailedWithoutRetries()
+    {
+        var contentId = await SeedPendingContentAsync("sticker", stickerId: null);
+
+        var service = CreateService();
+        await service.ProcessAsync(contentId, CancellationToken.None);
+
+        var content = await ReloadContentAsync(contentId);
+        Assert.Equal(DownloadStatus.Failed, content.DownloadStatus);
+        Assert.Empty(_contentClient.ContentCalls);
+        Assert.Empty(_contentClient.StickerCalls);
     }
 
     [Theory]

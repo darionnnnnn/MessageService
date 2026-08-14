@@ -136,6 +136,7 @@ public static class MessageServiceCoreServiceCollectionExtensions
             }
 
             builder.Services.AddScoped<IIngestSink, DirectIngestSink>();
+            builder.Services.AddHostedService<StickerContentBackfillService>();
         }
 
         if (capabilities.RunsRetention)
@@ -227,6 +228,7 @@ public static class MessageServiceCoreServiceCollectionExtensions
             // 影片/檔案原檔可達數百 MB，預設 100 秒 timeout 不夠
             builder.Services.AddHttpClient(LineContentClient.HttpClientName,
                 client => client.Timeout = TimeSpan.FromMinutes(10));
+            builder.Services.AddHttpClient(LineContentClient.StickerHttpClientName);
             builder.Services.AddHttpClient(LineProfileClient.HttpClientName);
 
             builder.Services.AddHostedService<ContentDownloadService>();

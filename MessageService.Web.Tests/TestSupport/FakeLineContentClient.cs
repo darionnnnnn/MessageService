@@ -24,4 +24,14 @@ public class FakeLineContentClient : ILineContentClient
         TranscodingCalls.Add(messageId);
         return OnGetTranscodingStatus(messageId);
     }
+
+    public List<string> StickerCalls { get; } = [];
+    public Func<string, Task<LineContentResult>> OnGetSticker { get; set; } =
+        _ => Task.FromResult(new LineContentResult(new MemoryStream([1, 2, 3]), "image/png", 3));
+
+    public Task<LineContentResult> GetStickerAsync(string stickerId, CancellationToken cancellationToken)
+    {
+        StickerCalls.Add(stickerId);
+        return OnGetSticker(stickerId);
+    }
 }

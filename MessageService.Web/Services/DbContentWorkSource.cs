@@ -87,7 +87,7 @@ public class DbContentWorkSource(MessageDbContext dbContext, IOptions<ContentDow
             return null;
         }
 
-        return new ContentWorkItem(content.Id, content.GroupMessage.LineMessageId, content.GroupMessage.MessageType);
+        return new ContentWorkItem(content.Id, content.GroupMessage.LineMessageId, content.GroupMessage.MessageType, content.GroupMessage.StickerId);
     }
 
     /// <summary>blob 寫入先於中繼資料更新：中斷時（例如服務被殺）狀態最壞停在 Downloading，

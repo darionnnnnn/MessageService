@@ -132,11 +132,20 @@ public class ContentDownloadService(
             }
         }
 
+        if (item.MessageType == "sticker" && item.StickerId == null)
+        {
+            logger.LogWarning("Message content {MessageContentId} has MessageType 'sticker' but null StickerId, marking as Failed", messageContentId);
+            await workSource.FailAsync(messageContentId, cancellationToken);
+            return;
+        }
+
         for (var attempt = 1; attempt <= _options.MaxRetries; attempt++)
         {
             try
             {
-                await using var result = await contentClient.GetContentAsync(item.LineMessageId, cancellationToken);
+                await using var result = item.MessageType == "sticker"
+                    ? await contentClient.GetStickerAsync(item.StickerId!, cancellationToken)
+                    : await contentClient.GetContentAsync(item.LineMessageId, cancellationToken);
                 var bytesWritten = await CompleteFromResultAsync(workSource, messageContentId, result, cancellationToken);
                 logger.LogInformation("Downloaded content {MessageContentId} for message {LineMessageId} ({Bytes} bytes, {ContentType})",
                     messageContentId, item.LineMessageId, bytesWritten, result.ContentType);

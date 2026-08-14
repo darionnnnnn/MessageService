@@ -63,7 +63,7 @@ public class WebhookEventHandlerTests
         var envelope = Assert.Single(_outbox.Enqueued);
         Assert.Equal("sticker", envelope.MessageType);
         Assert.Equal("(貼圖)", envelope.Text);
-        Assert.False(envelope.HasContent);
+        Assert.True(envelope.HasContent);
     }
 
     [Fact]

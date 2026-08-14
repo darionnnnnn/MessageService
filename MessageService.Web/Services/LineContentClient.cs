@@ -8,8 +8,10 @@ namespace MessageService.Services;
 public class LineContentClient : ILineContentClient
 {
     public const string HttpClientName = "LineContent";
+    public const string StickerHttpClientName = "LineSticker";
 
     private readonly HttpClient _httpClient;
+    private readonly HttpClient _stickerHttpClient;
 
     public LineContentClient(IHttpClientFactory httpClientFactory, IOptions<LineOptions> options)
     {
@@ -17,6 +19,9 @@ public class LineContentClient : ILineContentClient
         _httpClient.BaseAddress ??= new Uri("https://api-data.line.me/");
         _httpClient.DefaultRequestHeaders.Authorization =
             new AuthenticationHeaderValue("Bearer", options.Value.ChannelAccessToken);
+
+        _stickerHttpClient = httpClientFactory.CreateClient(StickerHttpClientName);
+        _stickerHttpClient.BaseAddress ??= new Uri("https://stickershop.line-scdn.net/");
     }
 
     public async Task<LineContentResult> GetContentAsync(string messageId, CancellationToken cancellationToken)
@@ -59,5 +64,26 @@ public class LineContentClient : ILineContentClient
             "failed" => TranscodingStatus.Failed,
             _ => TranscodingStatus.Processing
         };
+    }
+
+    public async Task<LineContentResult> GetStickerAsync(string stickerId, CancellationToken cancellationToken)
+    {
+        var url = $"stickershop/v1/sticker/{Uri.EscapeDataString(stickerId)}/android/sticker.png";
+        var response = await _stickerHttpClient.GetAsync(
+            url, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+        try
+        {
+            response.EnsureSuccessStatusCode();
+
+            var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            var contentType = response.Content.Headers.ContentType?.MediaType;
+            var contentLength = response.Content.Headers.ContentLength;
+            return new LineContentResult(stream, contentType, contentLength, response);
+        }
+        catch
+        {
+            response.Dispose();
+            throw;
+        }
     }
 }
