@@ -69,7 +69,7 @@ RetentionCleanupService（每日固定時間讀取檢視端設定頁存的保留
 | 型別 | Text 欄位 | 內容下載 |
 |---|---|---|
 | 文字 | 訊息內文 | — |
-| 貼圖 | `(貼圖)`（fallback 顯示用） | —（不下載檔案；`StickerId`/`PackageId` 另存兩個欄位，檢視端據此顯示真實貼圖圖片） |
+| 貼圖 | `(貼圖)`（fallback 顯示用） | 原檔，跟圖片走同一條管線存進 `MessageContents`（`StickerId` 保留供下載時組網址，檢視端不再直連 CDN） |
 | 圖片 | null | 原圖（非縮圖），背景下載 |
 | 影片 | null | 原檔，先輪詢 LINE transcoding 完成才下載 |
 | 語音 | null | 原檔，同影片先等 transcoding 完成才下載 |
@@ -137,7 +137,7 @@ dotnet user-secrets set "Line:ChannelAccessToken" "<你的 access token>"
 - **側欄寬度與收合（桌面版）**：分隔線可拖曳調整寬度（200–480px，Pointer Events + `setPointerCapture`；拖到 <140px 吸附成窄欄、窄欄拖出 >180px 回展開，兩門檻錯開防臨界抖動；雙擊重設 320px；分隔線可 Tab 聚焦，←→/Home/End 鍵盤調整）；標題列「‹」鈕兩段式收合：全寬 → 72px 窄欄（只剩頭貼，原生 title 提示群組名、未讀 badge 疊頭貼右上、點頭貼即切換群組）→ 完全隱藏（聊天標頭出現「☰」展開鈕）。寬度與收合狀態各自記在 localStorage（`chat-sidebar-width`/`chat-sidebar-state`）；手機版（≤768px）一律停用（單欄全螢幕切換，桌面存的狀態不生效）
 - **側欄未讀數**：每群組的「最後已讀訊息 Id」記在 localStorage（`chat-read-state`，每台裝置各自算，不進 DB），輪詢 `/api/groups?read=` 帶上基準由後端計數（上限 99+）。開著的群組視為已讀（切入群組、新訊息接進畫面時都會推進基準）；本裝置第一次看到的群組直接以最後一則為基準（不會初次開啟整排 99+）；已消失的群組基準自動清掉
 - **聊天面板**：標頭白底＋細分隔線（`--line-header-bg`/`--line-header-border`，仿 LINE 桌面版，與藍色訊息區明確分界；群組頭貼＋名稱＋成員數＋🔍搜尋＋「Aa」字級下拉）；訊息泡泡首顆帶指向頭貼的小尾巴（左上角、跟著字級用 em 縮放，避免大字級時圓角比尾巴大造成脫節）、時間戳貼泡泡外側；同一人連續訊息間距收緊、換人／換日的首則才拉開（LINE 的節奏）；對話寬度桌面版預設佔版面 2/3、手機版 75%，設定可勾選「全版面」改成滿版（影片／語音另有 30rem 絕對上限，加寬只給文字）；底部仿 LINE 輸入列但唯讀化（圖示灰化不可點、中央膠囊顯示同步狀態）
-- **頭貼**：`Original` 模式顯示真實 LINE 頭貼（`referrerpolicy="no-referrer"`，載入失敗 fallback 代號圖示）；其他模式一律顯示伺服器指派的動植物代號圖示（emoji 渲染，前端 `ICON_EMOJI` 對照表需與後端 `AvatarIconCatalog` 的 IconKey 同步維護）
+- **頭貼**：`Original` 模式顯示後端快取的頭貼，走自家 API（`api/groups/.../avatar`），前端不再直連 LINE CDN（載入失敗仍 fallback 代號圖示）；其他模式一律顯示伺服器指派的動植物代號圖示（emoji 渲染，前端 `ICON_EMOJI` 對照表需與後端 `AvatarIconCatalog` 的 IconKey 同步維護）
 - **字級**：設定「字體大小」數值輸入（px）＝聊天頁「中」檔泡泡文字的實際大小，小／大依比例（.87×／1.13×）跟著調整；聊天頁全部文字（不含頭貼/圖示）與設定 modal 本身的文字都吃同一份 `--font-base-px`（localStorage key `chat-font-base-px`，設在 `document.documentElement` 上、透過 inline style 覆寫、不寫死在樣式表裡，才不會被 CSS cascade 蓋掉）。設定 modal 跟聊天頁是同一個頁面，調字級時背後的聊天畫面會即時跟著變
 - 預設載入 3 天內對話，「載入更早 7 天」膠囊以最舊訊息 Id 當游標往前翻頁，沒有更早歷史時自動 disable。兩個「按了會沒反應」的空窗情況都有處理：畫面上一則訊息都沒有（沒有游標可用）時改成放大天數視窗重繪；群組沉寂比一個視窗還久時由 API 把視窗錨定到下一則更早訊息，保證每次點擊都會前進。膠囊本身（可按的「載入更早」）常駐顯示；沒有更早歷史時的「沒有更早的訊息」是單純的狀態告知，只在捲到最頂部附近才顯示，捲到畫面中間看到會很突兀
 - 「回到最新」浮動按鈕：使用者往上捲動時自動退出跟隨模式並顯示未讀數，點擊或捲回底部即恢復跟隨並自動捲到新訊息
@@ -145,7 +145,7 @@ dotnet user-secrets set "Line:ChannelAccessToken" "<你的 access token>"
 - 每 3 秒輪詢新訊息與 Pending 內容的下載狀態，每 10 秒輪詢側欄群組列表（新群組/預覽/排序，歷史檢視期間依然照跑）；分頁隱藏（`document.hidden`）時皆暫停輪詢
 - 新訊息進場有淡入＋位移動效（`prefers-reduced-motion` 使用者會停用）
 - 圖片／影片／語音／檔案依 `DownloadStatus` 顯示 spinner／播放器／下載連結／失敗訊息；圖片點擊開全螢幕燈箱（白框＋右上角 ✕，點空白處或 Esc 皆可關閉），預設縮到剛好符合視窗（不放大本來就比較小的圖），再點一次切換原始尺寸並可捲動查看局部
-- 貼圖顯示真實圖片（LINE 公開貼圖 CDN），浮貼在背景上不裝進白色泡泡；載入失敗或訊息本身沒有 `StickerId`（改版前收到的貼圖沒有這個欄位，LINE 不提供舊訊息回溯查詢）一律 fallback 回「(貼圖)」文字
+- 貼圖走自家 API 顯示真實圖片，浮貼在背景上不裝進白色泡泡；下載中顯示既有的「內容抓取中…」狀態並由輪詢自動替換；下載失敗、或訊息本身沒有 `StickerId`（改版前收到的貼圖沒有這個欄位，LINE 不提供舊訊息回溯查詢）一律 fallback 回「(貼圖)」文字
 - 文字訊息中的網址會轉成可點連結（`target="_blank"` + `rel="noopener noreferrer"`）；所有內容（含搜尋高亮）一律用 DOM 節點組裝（`textContent`／`createElement`），不用 `innerHTML`，避免訊息內容造成 XSS
 - **手機版（<768px）**：群組列表與聊天面板全螢幕切換，標頭出現「‹」返回鈕，仿 LINE 手機版導覽
 
@@ -183,12 +183,12 @@ dotnet user-secrets set "Line:ChannelAccessToken" "<你的 access token>"
 - **關鍵字遮蔽**：不分大小寫的純字串比對（不用 regex），可設定全部群組或指定群組套用；預設遮蔽為與關鍵字等長的 `*`，也可設定自訂替換字串
 - **台灣個資自動遮蔽**：跟關鍵字規則互補的第二層——不需要事先知道要輸入什麼關鍵字，只要「長得像」就遮。身分證／統一證號、手機、市話、健保卡四種格式各有獨立開關（存 `ViewerSettings`，前三種預設開啟、健保卡預設關閉——12 碼數字跟宅配貨運單號撞格式，設定頁可調），命中的字串一律套用跟名稱遮蔽同一套「首尾保留、中間 `*`」。實作在 `MaskingRuleSet.MaskText`，四組 regex 的邊界處理見下方「設計決策備忘」；搜尋端因為是拿遮蔽後的文字重新驗證，所以個資遮蔽自動也是搜尋的過濾條件，不會變成後門
 - **名稱顯示四模式**：
-  - `Original`：顯示原始快取的 LINE 顯示名稱，沒有快取則顯示 UserId；唯一會回傳真實頭貼 URL 的模式
+  - `Original`：顯示原始快取的 LINE 顯示名稱，沒有快取則顯示 UserId；唯一會回傳頭貼 URL（自家相對路徑）的模式
   - `MaskMiddle`：首尾字保留、中間 `*`（1 字全遮；2 字只留首字，如「小明」→「小*」；3 字以上首尾各留一字，如「王小明」→「王*明」）
   - `CustomAlias`：依 `UserAliases` 對照表顯示别名；沒設定別名的人 fallback 為 `MaskMiddle`
   - `Anonymous`：名稱與頭貼一律替換為動植物代號（如「小熊」），由 `IAnonymousIdentityService` 依群組+使用者永久指派並存進 `AnonymousIdentities`，翻閱舊訊息時代號不會變、可分辨是否為同一人但認不出真實身分
 
-以上四種模式（`Original` 除外）回應中一律不含真實 `PictureUrl`，即使前端不渲染也不外流，因為 URL 本身就是身分線索。
+以上四種模式（`Original` 除外）回應中一律不含 `PictureUrl`，即使前端不渲染也不外流，且 `AvatarsController` 會對非 `Original` 模式直接回 404 防止繞過遮蔽，因為頭貼與 URL 本身都是身分線索。真實的 LINE URL 不會外流到前端，只存在資料庫的 `PictureFetchedUrl` 欄位供判斷頭貼是否更新。
 
 ### 訊息搜尋
 
@@ -252,7 +252,7 @@ dotnet user-secrets set "Line:ChannelAccessToken" "<你的 access token>"
 | MessageType | nvarchar(20) | text / sticker / image / video / audio / file |
 | Text | nvarchar(max), null | 文字內容或 `(貼圖)`（顯示時會套遮蔽規則；應用層加密開啟時此欄位以 `ENC2:` 前綴整值加密存放，見 [docs/ENCRYPTION.md](docs/ENCRYPTION.md)） |
 | StickerId | nvarchar(max), null | 貼圖識別碼（僅 sticker 型別；此欄位加入前收到的貼圖為 null，檢視端 fallback 顯示文字） |
-| PackageId | nvarchar(max), null | 貼圖包識別碼（同上；渲染目前只用 StickerId，一併保存供未來使用） |
+| PackageId | nvarchar(max), null | 貼圖包識別碼（同上；渲染現已改走 `MessageContents`，`StickerId` 只在下載時用來組 CDN 網址，一併保存供未來使用） |
 | EventTimestamp | datetimeoffset | LINE 事件時間 |
 | ReceivedAt | datetimeoffset | 收錄端收到時間 |
 
@@ -271,6 +271,14 @@ dotnet user-secrets set "Line:ChannelAccessToken" "<你的 access token>"
 | LastAttemptAt | datetimeoffset, null | 最後一次嘗試下載的時間 |
 
 **Groups** / **GroupMembers**：收錄端背景快取的群組名稱、成員顯示名稱與頭像 URL（7 天 TTL，來源是 LINE 的 group summary / member profile API），檢視端用來把 GroupId/UserId 轉成人看得懂的名稱。快取失敗時 fallback 顯示原始 ID；`ProfileCache:FailureRetryAfter`（預設 10 分鐘）冷卻期內失敗不會重複呼叫 LINE API。加密開啟時群組名稱/顯示名稱/頭像 URL 同樣走 `ENC2:` 整值加密。檢視端也會寫這張表：`Groups.LastMessageId` 指向的訊息若被保留期清除刪掉，`GroupsController.RecoverDriftedLastMessageAsync` 會即時查回目前真正的最後一則並修正這一列（見 `docs/DEPLOYMENT-GUIDE.md` 的 Viewer 帳號權限說明）。
+
+| 欄位 | 型別 | 說明 |
+|---|---|---|
+| PictureUrl | nvarchar(max), null | LINE 端的來源位址，不會直接送給前端 |
+| PictureContent | varbinary(max), null | 圖檔本體（加密開啟時同 MessageContents 走 ChunkedBlobCipher 分塊加密） |
+| PictureContentType | nvarchar(max), null | MIME 型別（例如 image/jpeg） |
+| PictureFetchedUrl | nvarchar(max), null | 下載當時的來源 URL（用於判斷 LINE 頭貼是否更新） |
+| PictureUpdatedAt | datetimeoffset, null | 圖檔下載完成時間 |
 
 **ViewerSettings**（單列，Id 固定為 1）：除既有的名稱顯示模式外，新增 `RetentionDays`（保留天數，預設 1095＝3 年，`RetentionCleanupService` 每次執行讀取）與 `MaskNationalId`/`MaskMobilePhone`/`MaskLandline`（預設全開）/`MaskNhiCard`（台灣個資自動遮蔽四開關；`MaskNhiCard` 預設關閉——12 碼純數字的偵測規則跟宅配貨運單號格式相同，開啟前請先確認群組內容性質）。
 
@@ -313,6 +321,7 @@ mutex，避免兩邊同時建 `__EFMigrationsHistory` 互相打架。
 
 ## 設計決策備忘
 
+- **外部圖檔一律由連得到外網的主機下載後存 DB，前端只走自家 API**：拆機拓撲下檢視端可能完全沒有對外網路；這也順帶讓去識別化模式能真正生效，因為圖檔不再由瀏覽器直接向 LINE 索取。
 - **圖片/影片/語音/檔案存 DB（varbinary）而非磁碟**：檢視端只要連 DB 就能讀到；保留期清除靠 CASCADE 一次帶走，不會產生孤兒檔案。代價是 DB 容量成長快，若量大屆時再評估 FILESTREAM 或磁碟存放（內容獨立一表已為搬遷留好最小改動面）
 - **webhook 除了「outbox 寫不進去」以外一律回 200**（簽章合法後）：回非 2xx 會讓 LINE 重送並可能判定 webhook 失效，所以 JSON 解析失敗、個別事件處理失敗都只記 log 並回 200（畸形 payload 重送也不會變好）。唯一的例外是寫本機 outbox 本身失敗（磁碟滿、檔案鎖住、DB 損毀）——那是唯一會真的把訊息弄丟的情況，改回 500 讓 LINE 的 redelivery 接手，重送造成的重複由 `WebhookEventId` 唯一索引擋掉。**前提是 LINE Developers Console 要開啟 webhook redelivery**（預設關閉，見 [docs/LINE-BOT-SETUP.md](docs/LINE-BOT-SETUP.md)）；沒開的話回 500 等於直接放棄那則事件
 - **webhook 收進來後只寫本機 outbox，不直接碰資料庫**：落地（含防重送）延後到背景排空時才做，webhook 回應時間因此跟資料庫是否可用完全脫鉤，短暫斷線不會掉訊息；這也是收錄端支援網段分離部署（`Deployment:Mode`）的基礎，詳見 [docs/DEPLOYMENT-MODES.md](docs/DEPLOYMENT-MODES.md)

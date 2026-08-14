@@ -23,7 +23,8 @@
 | 落地方式 | outbox → `DirectIngestSink` | outbox → `HttpIngestSink` → 對方的 `/api/ingest/events(-batch)` | `IngestController` → `DirectIngestSink` | 不適用 |
 
 內容下載／頭貼快取完全獨立於模式，只看 `Line:OutboundHere`（`bool?`，未顯式設定時依模式
-推導，見上表）——這台主機要不要對外呼叫 LINE API。有資料庫的一端用
+推導，見上表）——這台主機要不要對外呼叫 LINE API。「頭貼快取」除了名稱與來源 URL，也包含
+圖檔本體；貼圖同樣走內容下載管線（見 README 的訊息型別表）。有資料庫的一端用
 `DbContentWorkSource`／`DbProfileStore` 直接查表；沒有資料庫的一端（Edge）用
 `ApiContentWorkSource`／`ApiProfileStore` 打 ingest API。一對拆機主機理論上兩邊都能設
 `OutboundHere=true`（例如 Core 端自己也連得到 LINE），但實務上通常只有一台需要。
@@ -110,8 +111,8 @@ LINE ──▶ LineWebhookController ──▶ WebhookEventHandler
           ┌───────────────┴───────────────┐                          ┌───────────────┴───────────────┐
    DbContentWorkSource            ApiContentWorkSource          DbProfileStore              ApiProfileStore
   （有資料庫那端，直查表）      （Edge，打 ingest API 的            （有資料庫那端）          （Edge，打 ingest API
-                                content-work／content 端點，                                  的 profiles 端點）
-                                 X-Ingest-Key 在具名 HttpClient
+                                content-work／content 端點，                                  的 profiles 端點，頭貼
+                                 X-Ingest-Key 在具名 HttpClient                               圖檔位元組也是走此既有端點傳輸）
                                  註冊時就設好）
 ```
 
@@ -148,7 +149,10 @@ Edge 端排空 outbox 時預設一次 HTTP 請求送整批（`Outbox:BatchSize` 
   `OutboxForwarderService` 每小時記一次目前死信筆數，量大時要考慮補一個管理介面。
 - **`Line:OutboundHere` 設錯無法跨主機驗證**：一對拆機主機理論上恰好一台要設 `true`，
   但啟動驗證只能看到自己這台的設定，兩台都 `true`（重複下載，浪費 LINE 配額，但有
-  唯一約束擋著不會產生髒資料）或兩台都 `false`（媒體永遠 `Pending`）都不會啟動失敗，
-  只能靠部署檢查表把關。
+  唯一約束擋著不會產生髒資料）或兩台都 `false` 都不會啟動失敗。兩台都 `false` 的後果比
+  「媒體永遠 `Pending`」更廣：貼圖與頭貼圖檔一樣不會下載，名稱也不會回填，前台看到的會是
+  LINE 的原始 ID——很容易被誤判成檢視端壞掉。`DeploymentValidator` 會對
+  `Core + OutboundHere=false` 記一則說明性 log 指出線索在 Edge 端，但最終仍只能靠
+  部署檢查表把關。
 - **outbox 批次排空的吞吐量提升沒有正式量測**：Edge→Core 的 round-trip 從逐筆改成整批，
   理論上吞吐量會明顯提升，但目前只有功能面的等價性測試，沒有實際負載下的量測數據。

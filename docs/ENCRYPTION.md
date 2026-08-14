@@ -57,10 +57,13 @@ $bytes = New-Object byte[] 32
 | `MessageContents.Content`（圖片/影片/語音/檔案本體） | ✓（分塊加密，見下） |
 | `MessageContents.FileName` | ✓ |
 | `Groups.GroupName` / `PictureUrl` | ✓ |
+| `Groups.PictureContent` | ✓（ChunkedBlobCipher 分塊加密） |
 | `GroupMembers.DisplayName` / `PictureUrl` | ✓ |
+| `GroupMembers.PictureContent` | ✓（ChunkedBlobCipher 分塊加密） |
 | `UserAliases.Alias` | ✓ |
 | `GroupMessages.GroupId` / `UserId` | ✗（刻意不加密，見下） |
 | `MessageContents.ContentType`（如 `image/jpeg`） | ✗ |
+| `PictureContentType` / `PictureFetchedUrl` / `PictureUpdatedAt` | ✗（中繼資料不加密） |
 | `MaskKeywords.Keyword` / `Replacement` | ✗（**注意**：遮蔽關鍵字往往就是人名、案號這類敏感字串，等於一份敏感字典以明文留在 DB 裡。功能上要加密沒有障礙——`MaskingRuleSet` 是整批載進記憶體比對、沒有下推到 SQL——只是目前尚未納入範圍） |
 | `AnonymousIdentities.Label`（如「小熊」） | ✗（代號本身不含個資） |
 | `ViewerSettings` 的各項設定 | ✗ |
@@ -119,7 +122,8 @@ Range 請求時，只把涵蓋該區間的 chunk 解密、串流寫進回應，�
 
 跟文字欄位一樣支援新舊資料混存：讀取端一律先偷看 blob 前 16 bytes 判斷是不是這個格式
 （看資料本身的 magic，不是看 `Encryption:Enabled` 設定）。認得出 `MSE1`（沒有 key id 的
-舊格式，加密啟用初期寫入）與 `MSE2` 兩種；magic 都對不上就當成加密啟用前的明文舊 blob，
+舊格式，加密啟用初期寫入）與 `MSE2` 兩種；magic 都對不上就當成加密啟用前的明文舊 blob
+（既有的明文頭貼 blob 讀取時也會被 `IsEncryptedHeader` 判定為明文而直接輸出，與訊息媒體的既有行為一致），
 直接原樣提供。`MSE2` 的 key id 跟目前設定的金鑰不符時，判定為「內容不可用」直接回 404，
 理由跟文字欄位的 keyId 檢查一樣——這裡多一個原因：blob 的解密是邊串流邊解，等 AES-GCM
 認證標籤驗證失敗才發現的話，回應可能已經開始寫入，來不及乾淨地改成 404。
