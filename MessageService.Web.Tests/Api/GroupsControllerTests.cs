@@ -326,4 +326,30 @@ public class GroupsControllerTests : IDisposable
         Assert.Null(group.LastMessageId);
         Assert.Null(group.LastMessageAt);
     }
+    [Fact]
+    public async Task GetGroups_OutputsRelativePictureUrl_WhenPictureExists()
+    {
+        var now = DateTimeOffset.UtcNow;
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            dbContext.Groups.Add(new Group
+            {
+                GroupId = "G1",
+                GroupName = "工作群組A",
+                PictureContent = new byte[] { 0x00 },
+                UpdatedAt = now
+            });
+            dbContext.GroupMessages.Add(new GroupMessage
+            {
+                WebhookEventId = "e1", LineMessageId = "m1", GroupId = "G1", MessageType = "text", Text = "hi",
+                EventTimestamp = now, ReceivedAt = now
+            });
+            await Task.CompletedTask;
+        });
+
+        var groups = await _fixture.Client.GetFromJsonAsync<List<GroupDto>>("/api/groups");
+
+        var group = Assert.Single(groups!);
+        Assert.Equal("api/groups/G1/avatar", group.PictureUrl);
+    }
 }

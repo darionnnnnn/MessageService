@@ -50,7 +50,7 @@ public class ContentStreamService(MessageDbContext dbContext, FieldCipher cipher
     /// 都能繞過黑名單再被前綴規則判成安全。收錄端兩條寫入路徑的值格式並不一致
     /// （LineContentClient 取 MediaType 已剝參數，IngestController 是把 Request.ContentType
     /// 原樣存下、會帶參數），所以正規化必須在這裡做。</summary>
-    private static string? NormalizeContentType(string? contentType)
+    public static string? NormalizeContentType(string? contentType)
     {
         if (string.IsNullOrWhiteSpace(contentType))
         {
@@ -63,7 +63,7 @@ public class ContentStreamService(MessageDbContext dbContext, FieldCipher cipher
         return mediaType.Length == 0 ? null : mediaType;
     }
 
-    private static bool IsSafeToInline(string? normalizedContentType) =>
+    public static bool IsSafeToInline(string? normalizedContentType) =>
         normalizedContentType is not null && InlineSafeContentTypes.Contains(normalizedContentType);
 
     public async Task<ContentStreamResult> StreamAsync(

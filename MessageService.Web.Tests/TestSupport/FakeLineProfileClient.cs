@@ -13,13 +13,13 @@ public class FakeLineProfileClient : ILineProfileClient
     public Func<string, string, MemberProfile?> OnGetGroupMemberProfile { get; set; } =
         (_, userId) => new MemberProfile(userId, "Test User", null);
 
-    public Task<GroupSummary?> GetGroupSummaryAsync(string groupId, CancellationToken cancellationToken)
+    public Task<GroupSummary?> GetGroupSummaryAsync(string groupId, string? knownPictureUrl, bool hasPicture, CancellationToken cancellationToken)
     {
         GroupSummaryCalls.Add(groupId);
         return Task.FromResult(OnGetGroupSummary(groupId));
     }
 
-    public Task<MemberProfile?> GetGroupMemberProfileAsync(string groupId, string userId, CancellationToken cancellationToken)
+    public Task<MemberProfile?> GetGroupMemberProfileAsync(string groupId, string userId, string? knownPictureUrl, bool hasPicture, CancellationToken cancellationToken)
     {
         MemberProfileCalls.Add((groupId, userId));
         return Task.FromResult(OnGetGroupMemberProfile(groupId, userId));

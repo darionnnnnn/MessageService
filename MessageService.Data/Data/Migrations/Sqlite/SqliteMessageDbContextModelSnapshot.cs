@@ -55,6 +55,18 @@ namespace MessageService.Data.Migrations.Sqlite
                     b.Property<long?>("LastMessageId")
                         .HasColumnType("INTEGER");
 
+                    b.Property<byte[]>("PictureContent")
+                        .HasColumnType("BLOB");
+
+                    b.Property<string>("PictureContentType")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("PictureFetchedUrl")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTimeOffset?>("PictureUpdatedAt")
+                        .HasColumnType("TEXT");
+
                     b.Property<string>("PictureUrl")
                         .HasColumnType("TEXT");
 
@@ -75,6 +87,18 @@ namespace MessageService.Data.Migrations.Sqlite
                         .HasColumnType("TEXT");
 
                     b.Property<string>("DisplayName")
+                        .HasColumnType("TEXT");
+
+                    b.Property<byte[]>("PictureContent")
+                        .HasColumnType("BLOB");
+
+                    b.Property<string>("PictureContentType")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("PictureFetchedUrl")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTimeOffset?>("PictureUpdatedAt")
                         .HasColumnType("TEXT");
 
                     b.Property<string>("PictureUrl")

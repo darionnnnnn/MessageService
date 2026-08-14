@@ -230,6 +230,8 @@ public static class MessageServiceCoreServiceCollectionExtensions
                 client => client.Timeout = TimeSpan.FromMinutes(10));
             builder.Services.AddHttpClient(LineContentClient.StickerHttpClientName);
             builder.Services.AddHttpClient(LineProfileClient.HttpClientName);
+            builder.Services.AddHttpClient(LineProfileClient.ImageHttpClientName,
+                client => client.MaxResponseContentBufferSize = LineProfileClient.MaxImageSize);
 
             builder.Services.AddHostedService<ContentDownloadService>();
             builder.Services.AddHostedService<ProfileRefreshService>();

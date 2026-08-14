@@ -118,6 +118,7 @@ public class MessagesController(
         var members = await dbContext.GroupMembers
             .AsNoTracking()
             .Where(m => m.GroupId == groupId && userIds.Contains(m.UserId))
+            .Select(m => new { m.UserId, m.DisplayName, HasPicture = m.PictureContent != null })
             .ToDictionaryAsync(m => m.UserId, cancellationToken);
 
         // 一個請求只載入一次遮蔽規則，套用到每則訊息時全是同步運算，不會每則訊息各打一次 DB
@@ -159,7 +160,7 @@ public class MessagesController(
             {
                 displayName = maskingRules.ResolveDisplayName(r.UserId, member?.DisplayName);
                 // 非 Original 模式下真實頭貼一律不外流，即使前端不渲染，URL 本身就是身分線索
-                pictureUrl = maskingRules.RevealsOriginalProfile ? member?.PictureUrl : null;
+                pictureUrl = maskingRules.RevealsOriginalProfile && member?.HasPicture == true ? $"api/groups/{groupId}/members/{r.UserId}/avatar" : null;
                 // 一律附上決定性的 fallback 圖示 key，前端在 PictureUrl 缺失或載入失敗時可以直接換上
                 avatarIcon = AvatarIconCatalog.ForHash(r.UserId).IconKey;
             }

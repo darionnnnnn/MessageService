@@ -24,6 +24,7 @@ public class ProfileRefreshServiceTests : IDisposable
 
         var services = new ServiceCollection();
         services.AddDbContext<MessageDbContext>(o => o.UseSqlite(_connection));
+        services.AddSingleton(MessageService.Data.Crypto.FieldCipher.Disabled);
         services.AddScoped<IProfileStore, DbProfileStore>();
         services.AddSingleton(typeof(ILogger<>), typeof(NullLogger<>));
         services.AddSingleton<ILineProfileClient>(_profileClient);

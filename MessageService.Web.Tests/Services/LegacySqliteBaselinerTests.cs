@@ -65,6 +65,14 @@ public class LegacySqliteBaselinerTests : IDisposable
             ALTER TABLE ViewerSettings DROP COLUMN MaskNhiCard;
             ALTER TABLE Groups DROP COLUMN LastMessageId;
             ALTER TABLE Groups DROP COLUMN LastMessageAt;
+            ALTER TABLE Groups DROP COLUMN PictureContent;
+            ALTER TABLE Groups DROP COLUMN PictureContentType;
+            ALTER TABLE Groups DROP COLUMN PictureFetchedUrl;
+            ALTER TABLE Groups DROP COLUMN PictureUpdatedAt;
+            ALTER TABLE GroupMembers DROP COLUMN PictureContent;
+            ALTER TABLE GroupMembers DROP COLUMN PictureContentType;
+            ALTER TABLE GroupMembers DROP COLUMN PictureFetchedUrl;
+            ALTER TABLE GroupMembers DROP COLUMN PictureUpdatedAt;
             DROP INDEX IF EXISTS IX_GroupMessages_GroupId_Id;
             DROP INDEX IF EXISTS IX_GroupMessages_GroupId_EventTimestamp;
             DROP INDEX IF EXISTS IX_MessageContents_DownloadStatus;

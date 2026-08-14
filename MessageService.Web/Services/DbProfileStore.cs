@@ -1,27 +1,32 @@
+using System.IO;
 using MessageService.Data;
+using MessageService.Data.Crypto;
 using MessageService.Models;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 
 namespace MessageService.Services;
 
 /// <summary>Full／Db 模式用：ProfileRefreshService 原本直接開 scope 拿 MessageDbContext
 /// 判斷 TTL、upsert 的那段邏輯搬過來，行為刻意保持一致。</summary>
-public class DbProfileStore(MessageDbContext dbContext, ILogger<DbProfileStore> logger) : IProfileStore
+public class DbProfileStore(MessageDbContext dbContext, FieldCipher cipher, ILogger<DbProfileStore> logger) : IProfileStore
 {
     public async Task<ProfileStaleness> GetStalenessAsync(
         string groupId, string? userId, DateTimeOffset cutoff, CancellationToken cancellationToken)
     {
         var group = await dbContext.Groups.FindAsync([groupId], cancellationToken);
         var groupStale = group is null || group.UpdatedAt < cutoff;
+        var groupFetchedUrl = group?.PictureFetchedUrl;
+        var hasGroupPicture = group?.PictureContent != null;
 
         if (userId is null)
         {
-            return new ProfileStaleness(groupStale, false);
+            return new ProfileStaleness(groupStale, false, groupFetchedUrl, null, hasGroupPicture, false);
         }
 
         var member = await dbContext.GroupMembers.FindAsync([groupId, userId], cancellationToken);
         var memberStale = member is null || member.UpdatedAt < cutoff;
-        return new ProfileStaleness(groupStale, memberStale);
+        return new ProfileStaleness(groupStale, memberStale, groupFetchedUrl, member?.PictureFetchedUrl, hasGroupPicture, member?.PictureContent != null);
     }
 
     public async Task UpsertGroupAsync(string groupId, GroupSummary summary, CancellationToken cancellationToken)
@@ -48,19 +53,22 @@ public class DbProfileStore(MessageDbContext dbContext, ILogger<DbProfileStore> 
         var existing = await dbContext.Groups.FindAsync([groupId], cancellationToken);
         if (existing is null)
         {
-            dbContext.Groups.Add(new Group
+            var entity = new Group
             {
                 GroupId = groupId,
                 GroupName = summary.GroupName,
                 PictureUrl = summary.PictureUrl,
                 UpdatedAt = DateTimeOffset.UtcNow
-            });
+            };
+            ApplyPicture(entity, summary.PictureBytes, summary.PictureUrl, summary.PictureContentType);
+            dbContext.Groups.Add(entity);
         }
         else
         {
             existing.GroupName = summary.GroupName;
             existing.PictureUrl = summary.PictureUrl;
             existing.UpdatedAt = DateTimeOffset.UtcNow;
+            ApplyPicture(existing, summary.PictureBytes, summary.PictureUrl, summary.PictureContentType);
         }
 
         await dbContext.SaveChangesAsync(cancellationToken);
@@ -71,22 +79,60 @@ public class DbProfileStore(MessageDbContext dbContext, ILogger<DbProfileStore> 
         var existing = await dbContext.GroupMembers.FindAsync([groupId, userId], cancellationToken);
         if (existing is null)
         {
-            dbContext.GroupMembers.Add(new GroupMember
+            var entity = new GroupMember
             {
                 GroupId = groupId,
                 UserId = userId,
                 DisplayName = profile.DisplayName,
                 PictureUrl = profile.PictureUrl,
                 UpdatedAt = DateTimeOffset.UtcNow
-            });
+            };
+            ApplyPicture(entity, profile.PictureBytes, profile.PictureUrl, profile.PictureContentType);
+            dbContext.GroupMembers.Add(entity);
         }
         else
         {
             existing.DisplayName = profile.DisplayName;
             existing.PictureUrl = profile.PictureUrl;
             existing.UpdatedAt = DateTimeOffset.UtcNow;
+            ApplyPicture(existing, profile.PictureBytes, profile.PictureUrl, profile.PictureContentType);
         }
 
         await dbContext.SaveChangesAsync(cancellationToken);
+    }
+
+    private void ApplyPicture(Group entity, byte[]? bytes, string? url, string? contentType)
+    {
+        if (bytes != null)
+        {
+            entity.PictureContent = EncryptPictureContent(bytes);
+            entity.PictureContentType = contentType;
+            entity.PictureFetchedUrl = url;
+            entity.PictureUpdatedAt = entity.UpdatedAt;
+        }
+    }
+
+    private void ApplyPicture(GroupMember entity, byte[]? bytes, string? url, string? contentType)
+    {
+        if (bytes != null)
+        {
+            entity.PictureContent = EncryptPictureContent(bytes);
+            entity.PictureContentType = contentType;
+            entity.PictureFetchedUrl = url;
+            entity.PictureUpdatedAt = entity.UpdatedAt;
+        }
+    }
+
+    private byte[] EncryptPictureContent(byte[] plaintextBytes)
+    {
+        if (!cipher.Enabled)
+        {
+            return plaintextBytes;
+        }
+        using var source = new MemoryStream(plaintextBytes);
+        using var encryptingStream = cipher.CreateEncryptingStream(source, plaintextBytes.Length);
+        using var ms = new MemoryStream();
+        encryptingStream.CopyTo(ms);
+        return ms.ToArray();
     }
 }

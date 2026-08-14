@@ -49,12 +49,12 @@ public class ProfileRefreshService(
 
         if (staleness.GroupStale && !IsInCooldown(task.GroupId))
         {
-            await RefreshGroupAsync(profileStore, profileClient, task.GroupId, cancellationToken);
+            await RefreshGroupAsync(profileStore, profileClient, task.GroupId, staleness.GroupPictureFetchedUrl, staleness.HasGroupPicture, cancellationToken);
         }
 
         if (task.UserId is not null && staleness.MemberStale && !IsInCooldown(MemberCooldownKey(task.GroupId, task.UserId)))
         {
-            await RefreshMemberAsync(profileStore, profileClient, task.GroupId, task.UserId, cancellationToken);
+            await RefreshMemberAsync(profileStore, profileClient, task.GroupId, task.UserId, staleness.MemberPictureFetchedUrl, staleness.HasMemberPicture, cancellationToken);
         }
     }
 
@@ -72,12 +72,12 @@ public class ProfileRefreshService(
     // LINE API：429 的情況等於用訊息速率持續加壓，把限流拖得更久。原本實際被保護到的只剩
     // 「bot 被踢出群組／使用者退群」這個 404 情境，跟這個功能的初衷正好相反。
     private async Task RefreshGroupAsync(
-        IProfileStore profileStore, ILineProfileClient profileClient, string groupId, CancellationToken cancellationToken)
+        IProfileStore profileStore, ILineProfileClient profileClient, string groupId, string? knownPictureUrl, bool hasPicture, CancellationToken cancellationToken)
     {
         GroupSummary? summary;
         try
         {
-            summary = await profileClient.GetGroupSummaryAsync(groupId, cancellationToken);
+            summary = await profileClient.GetGroupSummaryAsync(groupId, knownPictureUrl, hasPicture, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -98,12 +98,12 @@ public class ProfileRefreshService(
     }
 
     private async Task RefreshMemberAsync(
-        IProfileStore profileStore, ILineProfileClient profileClient, string groupId, string userId, CancellationToken cancellationToken)
+        IProfileStore profileStore, ILineProfileClient profileClient, string groupId, string userId, string? knownPictureUrl, bool hasPicture, CancellationToken cancellationToken)
     {
         MemberProfile? profile;
         try
         {
-            profile = await profileClient.GetGroupMemberProfileAsync(groupId, userId, cancellationToken);
+            profile = await profileClient.GetGroupMemberProfileAsync(groupId, userId, knownPictureUrl, hasPicture, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

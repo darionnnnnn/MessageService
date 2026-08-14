@@ -29,7 +29,7 @@ public class GroupsController(MessageDbContext dbContext, IMaskingService maskin
         var groups = await dbContext.Groups
             .AsNoTracking()
             .Where(g => g.LastMessageId != null)
-            .Select(g => new { g.GroupId, g.GroupName, g.PictureUrl, LastMessageId = g.LastMessageId!.Value })
+            .Select(g => new { g.GroupId, g.GroupName, HasPicture = g.PictureContent != null, LastMessageId = g.LastMessageId!.Value })
             .ToListAsync(cancellationToken);
 
         if (groups.Count == 0)
@@ -97,7 +97,7 @@ public class GroupsController(MessageDbContext dbContext, IMaskingService maskin
             result.Add(new GroupDto(
                 g.GroupId,
                 g.GroupName ?? g.GroupId,
-                g.PictureUrl,
+                g.HasPicture ? $"api/groups/{g.GroupId}/avatar" : null,
                 preview,
                 lastMessage.EventTimestamp,
                 memberCounts.GetValueOrDefault(g.GroupId, 0),

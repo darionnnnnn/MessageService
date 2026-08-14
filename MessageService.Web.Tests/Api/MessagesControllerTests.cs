@@ -338,7 +338,7 @@ public class MessagesControllerTests : IDisposable
             (await dbContext.ViewerSettings.SingleAsync()).NameDisplayMode = NameDisplayMode.Original;
             dbContext.GroupMembers.Add(new GroupMember
             {
-                GroupId = GroupId, UserId = "U1", DisplayName = "小明", PictureUrl = "https://example.com/u1.jpg", UpdatedAt = now
+                GroupId = GroupId, UserId = "U1", DisplayName = "小明", PictureUrl = "https://example.com/u1.jpg", PictureContent = new byte[] { 0x00 }, UpdatedAt = now
             });
             dbContext.GroupMessages.Add(TextMessage("e1", "U1", now, "hi"));
         });
@@ -347,7 +347,7 @@ public class MessagesControllerTests : IDisposable
 
         var message = Assert.Single(page!.Messages);
         Assert.Equal("小明", message.DisplayName);
-        Assert.Equal("https://example.com/u1.jpg", message.PictureUrl);
+        Assert.Equal($"api/groups/{GroupId}/members/U1/avatar", message.PictureUrl);
         Assert.False(string.IsNullOrEmpty(message.AvatarIcon)); // fallback key for onerror
     }
 
