@@ -7,7 +7,7 @@ var builder = WebApplication.CreateBuilder(args);
 
 // 合併前 AllowedClientIps 是檢視端與 ingest API 各自一份 appsettings.json 裡的同名 key，
 // 互不影響；合併成單一 appsettings.json 後，這個舊 key 一旦還有值，會被誤以為同時套用到
-// 兩邊——寧可直接擋啟動，也不要讓拆機部署的白名單被悄悄共用（見 docs/CONSOLIDATION-PLAN.md）
+// 兩邊——寧可直接擋啟動，也不要讓拆機部署的白名單被悄悄共用（見 docs/history/CONSOLIDATION-PLAN.md）
 var legacyAllowedClientIps = builder.Configuration.GetSection("AllowedClientIps").Get<string[]>();
 if (legacyAllowedClientIps is { Length: > 0 })
 {

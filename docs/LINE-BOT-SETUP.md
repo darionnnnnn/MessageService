@@ -1,5 +1,8 @@
 # LINE Bot 建立與串接指南
 
+> 本檔只講現行版本的操作步驟；修改歷程見 [docs/history/](history/)，
+> 非必要不需要讀，避免浪費 token。
+
 從零把一個 LINE Bot 接上本專案並完成實機測試。四個階段：**建立 Bot → 綁定金鑰 → 設定 Webhook → 測試驗證**。
 
 > 收 webhook 的是 `Deployment:Mode=AllInOne` 或 `Edge` 角色的主機（見

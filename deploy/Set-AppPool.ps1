@@ -2,7 +2,7 @@
 .SYNOPSIS
     把 IIS 應用程式集區設成「一直開著」，避免背景服務（保留期清除／outbox 排空／
     媒體下載／頭貼刷新／主機心跳）被閒置逾時或固定間隔回收殺掉——這幾個是
-    BackgroundService，行程被回收時就整個停掉，見 docs/CONSOLIDATION-PLAN.md 問題1、
+    BackgroundService，行程被回收時就整個停掉，見 docs/history/CONSOLIDATION-PLAN.md 問題1、
     docs/DEPLOYMENT-GUIDE.md 的驗收清單（「主機狀態燈號是正常」那條——心跳跟其他
     背景服務同生共死，行程被回收時心跳會第一個反映出來）。
 

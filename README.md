@@ -1,5 +1,8 @@
 # MessageService
 
+> 本檔只講現行版本的事實；歷次規劃、審查回饋、設計決策理由等修改歷程放在
+> [docs/history/](docs/history/)，非必要不需要讀，避免浪費 token。
+
 LINE 群組訊息收錄與檢視系統，單一 ASP.NET Core 專案，依部署模式決定角色：
 
 - **收錄**：LINE bot webhook，收訊息、下載媒體、每日清除逾期資料。
@@ -15,15 +18,12 @@ MessageService.sln
 └── MessageService.Web.Tests/  # 唯一的測試專案
 ```
 
-> 2026-08-13 之前這是兩個各自發佈的專案（`MessageService` 收錄端＋`MessageService.Web`
-> 檢視端），部署收斂輪合併成一個，理由與過程見
-> [docs/CONSOLIDATION-PLAN.md](docs/CONSOLIDATION-PLAN.md)。
-
 **其他文件**：[docs/DEPLOYMENT-GUIDE.md](docs/DEPLOYMENT-GUIDE.md)（從零上線的部署操作手冊：IIS、SQL Server／SQLite、LINE 設定，第一次接觸本專案的人從這份開始）、
 [docs/LINE-BOT-SETUP.md](docs/LINE-BOT-SETUP.md)（建立 Bot 與串接的逐步操作、疑難排解）、
-[docs/WEB-UI-DESIGN-NOTES.md](docs/WEB-UI-DESIGN-NOTES.md)（檢視端歷次改版的設計決策理由與放棄的替代方案）、
-[docs/DEPLOYMENT-MODES.md](docs/DEPLOYMENT-MODES.md)（四種部署角色：架構、設定、決策理由、目前進度）、
+[docs/DEPLOYMENT-MODES.md](docs/DEPLOYMENT-MODES.md)（四種部署角色：架構與能力矩陣）、
 [docs/ENCRYPTION.md](docs/ENCRYPTION.md)（應用層欄位加密：範圍、金鑰設定、搜尋限制）。
+檢視端歷次改版的設計決策理由與放棄的替代方案是修改歷程，見
+[docs/history/WEB-UI-DESIGN-NOTES.md](docs/history/WEB-UI-DESIGN-NOTES.md)。
 
 ---
 
@@ -224,7 +224,7 @@ dotnet user-secrets set "Line:ChannelAccessToken" "<你的 access token>"
 
 ### 資料庫存取
 
-`MessageDbContext` 不設全域 `NoTracking`：查詢型端點（對話、群組、遮蔽規則載入）各自在查詢上加 `.AsNoTracking()`，設定的「讀取實體→改屬性→存檔」寫入流程才能正常被 change tracker 偵測到。這是實測踩到的坑——曾經設過全域 `NoTracking` 以為整個 Web 專案只讀，結果讓 `UpdateKeyword`/`UpsertAlias` 的更新靜默失敗（改了值但沒真的寫進 DB，因為沒有東西被追蹤）。
+`MessageDbContext` 不設全域 `NoTracking`：查詢型端點（對話、群組、遮蔽規則載入）各自在查詢上加 `.AsNoTracking()`，設定的「讀取實體→改屬性→存檔」寫入流程才能正常被 change tracker 偵測到——若改回全域 `NoTracking`，`UpdateKeyword`/`UpsertAlias` 這類更新會靜默失敗（改了值但沒真的寫進 DB）。
 
 ### 設定
 
@@ -325,9 +325,9 @@ mutex，避免兩邊同時建 `__EFMigrationsHistory` 互相打架。
 - **`ViewerSettings.Id` 是固定值而非資料庫產生**（`ValueGeneratedNever`）：這是單列設定，Id 恆為 1。留成 SQL Server identity 的話，程式碼補建這列時帶著 Id=1 會撞上 `IDENTITY_INSERT` 關閉而失敗
 - **往前翻頁一定要能前進**：純粹「以游標時間往前 N 天」開窗，遇到比視窗還長的沉寂期會永遠回空、游標不動，按鈕看起來可按卻沒反應。API 因此會在視窗落空時把視窗錨定到下一則更早訊息
 - **outbox 暫時性失敗永遠重試，不設死信門檻**：webhook 落地失敗如果重試幾次就放棄，等於默默掉訊息且不易察覺；改成指數退避（`BaseRetryDelaySeconds`×2^(N-1)，封頂 `MaxRetryDelaySeconds`）無限重試，只有 `PermanentIngestException`（payload 本身格式不合、重試也不會成功的情況）才第一次遇到就死信。`OutboxForwarderService` 每小時記一次目前死信筆數，供人工排查
-- **加密的 EF 模型快取陷阱**：EF Core 預設的 `IModelCacheKeyFactory` 只用 DbContext 的 CLR 型別當快取鍵，不看建構子帶進來的 `FieldCipher` 狀態——若不處理，同一支程式裡第一個建立的 `MessageDbContext` 實例會決定「加密轉換器要不要套用」給後續所有實例，不管它們實際的加密設定為何。`MessageDbContext` 因此自訂了 `IModelCacheKeyFactory`，把 `EncryptionEnabled` 一併納入快取鍵
-- **PII 正規表示式不能用 `\b`**：.NET regex 的 `\b` 是以 `\w` 邊界判斷，而中日韓文字本身就算 `\w`，導致「身分證字號A123456789」這種中文緊貼英數字元的真實場景會匹配失敗。四組個資 regex 一律改用 `(?<!\d)`/`(?<![A-Za-z0-9])`/`(?!\d)` 環視斷言取代 `\b`
-- **內容端點只信任白名單 MIME type 內嵌顯示**：任何內容都直接沿用 LINE 回傳的 `Content-Type` 內嵌到頁面，等於讓攻擊者能上傳偽裝成 `text/html` 的檔案觸發儲存型 XSS；改成只有白名單內的圖片/影片/音訊型別才原樣顯示，其餘一律 `application/octet-stream` + `nosniff`
+- **加密的 EF 模型快取鍵含 `EncryptionEnabled`**：EF Core 預設的 `IModelCacheKeyFactory` 只用 DbContext 的 CLR 型別當快取鍵，不看建構子帶進來的 `FieldCipher` 狀態，會讓同一支程式裡第一個建立的 `MessageDbContext` 實例決定「加密轉換器要不要套用」給後續所有實例。`MessageDbContext` 自訂了 `IModelCacheKeyFactory`，把 `EncryptionEnabled` 一併納入快取鍵
+- **PII 正規表示式用環視斷言取代 `\b`**：四組個資 regex 用 `(?<!\d)`/`(?<![A-Za-z0-9])`/`(?!\d)`，不用 `\b`——.NET regex 的 `\b` 以 `\w` 邊界判斷，中日韓文字本身算 `\w`，會導致「身分證字號A123456789」這種中文緊貼英數字元的情況比對失敗
+- **內容端點只信任白名單 MIME type 內嵌顯示**：只有白名單內的圖片/影片/音訊型別才用原始 `Content-Type` 顯示，其餘一律 `application/octet-stream` + `nosniff`，防止偽裝檔案觸發儲存型 XSS
 
 ## 日誌（NLog）
 
@@ -342,8 +342,7 @@ NLog 輸出到 Console 與**執行檔目錄下的 `logs/messageservice-{日期}.
 dotnet test
 ```
 
-只有一個測試專案 `MessageService.Web.Tests`（2026-08-13 部署收斂輪合併前是
-`MessageService.Tests`＋`MessageService.Web.Tests` 兩個），依原本各自的職責分兩段列：
+只有一個測試專案 `MessageService.Web.Tests`，依收錄／檢視兩塊職責分兩段列：
 
 - **收錄相關**：webhook 事件解析（五種型別分流含 audio、過濾規則）、outbox 落地（`DirectIngestSink` 的防重送——`WebhookEventId` 唯一索引、撞鍵與暫時性儲存失敗以回查分辨〔前者當重複成功、後者拋回 outbox 重試不掉訊息〕、change tracker 不污染同批後續、各型別存檔行為、重複情境也正確回傳既有 ContentId、側欄 Groups.LastMessageId／LastMessageAt 追蹤）、outbox 批次排空（到期判斷、批次上限、指數退避與封頂、批次中途暫時性失敗整批重試、僅 `PermanentIngestException` 那一筆立即死信其餘照常、成功後依 IngestSideEffects 決定要不要入列本機佇列、每小時死信計數記錄）、outbox schema 升級（既有 outbox.db 補欄位不動既有資料、啟用 WAL、新舊 schema 皆冪等）、部署角色（能力推導單元測試＋真實 host 整合驗證：四種角色的路由閘門、Edge／Core 啟動驗證缺漏擋下、OutboundHere 與 ChannelAccessToken 的啟動驗證、ingest API 認證〔缺金鑰 404／錯金鑰 401／IP 不在白名單 403／正確金鑰經真實 DirectIngestSink 寫入並確認去重〕、content-work 與 profiles 端點的真實 HTTP 生命週期、批次端點）、`HttpIngestSink`（狀態碼分流：2xx 成功並解析回應帶出 ContentId、400 永久失敗、其餘與連線層錯誤皆可重試；批次端點 404 時自動退回逐筆模式）、`IContentWorkSource`／`IProfileStore` 兩套實作、Null 佇列（入列後 ReadAllAsync 永不產出）、`IngestSideEffects`（依 ContentId 有無決定要不要入列、Null 佇列搭配無錯誤）、**兩套 IIngestSink 落地路徑的等價性測試**（同一批 envelope 分別走 DirectIngestSink 與 HttpIngestSink→真實 Core 模式 host，斷言產生的 GroupMessages／MessageContents 完全相同，含重複送出時兩邊都回傳同一個 ContentId、批次落地路徑也逐欄位比對）、背景下載（成功/轉檔延遲重排/轉檔輪詢上限/重試耗盡/啟動接續/**多 worker 並行下載**〔gate 機制證明同時有多筆在下載〕/**轉檔中的影片不擋住排在後面的圖片**〔並發回歸測試〕/**Failed 重試視窗**〔超過 `FailedRetryWindowDays` 或 `MaxFailedRetries` 不再撿回〕）、`LineContentClient`（狀態碼分流、失敗時不洩漏連線）、`DbContentWorkSource`（SQLite 的 `zeroblob`/`SqliteBlob` 分塊寫入路徑、寫入長度與宣稱長度不符時拒絕標成 Completed）、群組/成員名稱快取（新增/過期更新/API 失敗 fallback/失敗冷卻期內不重複呼叫）、保留期清除（DB 讀取保留天數、分批刪除、含 CASCADE 驗證、清除後重算 Groups 側欄指標）、`LegacySqliteBaseliner`（既有 SQLite 檔案橋接到 migrations baseline，含「橋接後 Migrate() 跟全新 Migrate() 逐欄位等價」的關鍵測試）、兩個 provider 的 migrations 一致性守門測試、Controller 整合測試（401/200/畸形 body 仍 200 但 outbox 寫入失敗回 500、webhook 經真實 outbox＋背景排空落地資料庫）、加密（`FieldCipher` 整值加解密/`ENC2:` 前綴帶 key id、keyId 不符時原樣回傳/`ENC1:` 舊格式與舊明文混讀、`ChunkedBlobCipher`/`ChunkedEncryptingStream` 分塊格式與邊界情況、`MessageDbContext` 不同 `FieldCipher` 狀態間的模型快取隔離）
 - **檢視相關**：Groups/Messages API（分頁游標、hasMore、空視窗仍回 latestId、沉寂期長於視窗仍能翻頁、遮蔽套用、視窗上限 500 筆與 `Truncated` 旗標、`aroundId` 雙段查詢〔錨點在群組最舊訊息時另一側不借用未用完額度、兩側都不足半窗不截斷〕、側欄未讀數〔依 `?read=` 基準計數、上限 100、畸形參數容錯、未帶參數為 0〕、側欄 Groups 指標漂移回退並順手修正）、訊息搜尋（文字/名稱各自 50 筆配額獨立生效）、內容串流（200/206/304/416/malformed Range、無 Range 直讀、XSS 白名單 MIME 判定、RFC5987 檔名編碼、ETag 產生與 `If-None-Match` 命中）、Settings API（CRUD、群組範圍替換、單列設定被刪後補建、保留天數驗證範圍、PII 遮蔽開關讀寫）、`/api/users`（Anonymous 模式回代號不觸發新指派、其他模式回真實姓名）、`MaskingService`/`MaskingRuleSet`（含名稱遮蔽邊界情況、四種台灣個資 regex 含 CJK 緊鄰英數字元的真實場景）、IP 白名單 middleware（允許/拒絕/空白名單/CIDR，檢視端與 ingest 端各自獨立設定）、加密端到端（開啟加密後整個請求生命週期的文字與 blob 加解密、Range 請求跨分塊邊界）

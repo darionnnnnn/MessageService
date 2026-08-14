@@ -1,5 +1,8 @@
 # 部署指南
 
+> 本檔只講現行版本的操作步驟；歷次規劃與審查回饋的修改歷程見 [docs/history/](history/)，
+> 非必要不需要讀，避免浪費 token。
+
 從零把 MessageService 部署上線的操作手冊，面向沒碰過這個專案的人。只講「怎麼做」；
 「為什麼這樣設計」查 [README.md](../README.md)、[DEPLOYMENT-MODES.md](DEPLOYMENT-MODES.md)、
 [ENCRYPTION.md](ENCRYPTION.md)。

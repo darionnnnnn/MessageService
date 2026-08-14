@@ -1,5 +1,9 @@
 # 部署收斂與體檢回饋實作規劃（CONSOLIDATION-PLAN）
 
+> 本檔屬於 `docs/history/`（修改歷程／決策記錄），非必要不需要讀，避免浪費 token。
+> 本輪的現行結論已併入 [README.md](../../README.md)、[docs/DEPLOYMENT-GUIDE.md](../DEPLOYMENT-GUIDE.md)、
+> [docs/DEPLOYMENT-MODES.md](../DEPLOYMENT-MODES.md)、[docs/ENCRYPTION.md](../ENCRYPTION.md)。
+
 > 狀態：**全案完成（階段1~7，含體檢輪），僅 IIS 實機驗收待手動執行**——逐階段進度見下方
 > 「執行進度」節。本文件其餘部分保留規劃原文作為歷史紀錄。原規劃 2026-08-13 依外部體檢回饋
 > （九項問題）＋使用者需求（第三節四項）逐條對原始碼查證後產出，查證結論：九項全部屬實。

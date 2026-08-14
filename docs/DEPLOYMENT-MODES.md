@@ -1,15 +1,13 @@
 # 部署角色（Deployment Modes）
 
+> 本文件只講現行的四種角色定義與設定；合併專案的原因、設計決策理由、雙行程端到端驗證紀錄
+> 見 [docs/history/DEPLOYMENT-MODES-DECISIONS.md](history/DEPLOYMENT-MODES-DECISIONS.md)——
+> 非必要不需要讀，避免浪費 token。
+
 `MessageService.Web` 是唯一的可發佈專案，同一份成品可以部署成一台包辦，也可以拆成兩三台，
 由每台主機各自的 `Deployment:Mode` 設定決定角色——不是不同的部署產物，只是設定差異。
-
-> **2026-08-13 部署收斂輪**：原本收錄端（`MessageService`）與檢視端（`MessageService.Web`）
-> 是兩個各自發佈的專案，模式叫 `Full`／`Line`／`Db`。這輪把兩者合併成一個專案、
-> Schema 管理改用 EF `Database.Migrate()`、模式改名為 `AllInOne`／`Edge`／`Core`，並新增
-> `Viewer` 這個第四種角色支援三台拓撲。舊名稱保留為列舉別名（`Full=AllInOne`／
-> `Line=Edge`／`Db=Core`），既有 `appsettings.Production.json` 不用改也能繼續啟動，
-> 詳見下方「設定鍵升級對照」。合併與改名之前的建置歷史（本文件「端到端驗證紀錄」
-> 與「原始建置分期」兩節）予以保留，作為這些保證最初怎麼被驗證出來的紀錄。
+`Deployment:Mode` 的合法值是 `AllInOne`／`Edge`／`Core`／`Viewer`；舊名稱 `Full`／`Line`／`Db`
+仍是相容別名（讀到時 log 記一則提醒，不擋啟動）。
 
 ## 四種角色
 
@@ -114,18 +112,18 @@ LINE ──▶ LineWebhookController ──▶ WebhookEventHandler
   （有資料庫那端，直查表）      （Edge，打 ingest API 的            （有資料庫那端）          （Edge，打 ingest API
                                 content-work／content 端點，                                  的 profiles 端點）
                                  X-Ingest-Key 在具名 HttpClient
-                                 註冊時就設好，見設計決策）
+                                 註冊時就設好）
 ```
 
 webhook 回應時間因此跟資料庫或遠端 API 是否可用完全脫鉤：即使主資料庫短暫斷線，
 AllInOne 模式的訊息也只是在 outbox 裡等，恢復後自動排空，不會遺失。
 
-### 批次 ingest（問題9：拆機模式的 outbox 排空吞吐）
+### 批次 ingest（拆機模式的 outbox 排空吞吐）
 
 Edge 端排空 outbox 時預設一次 HTTP 請求送整批（`Outbox:BatchSize` 筆為單位），取代逐筆各自
 一次 round-trip。Core 端依序落地、回傳逐筆結果（成功／永久拒絕各自標記）；批次中途遇到
 **暫時性失敗**（例如連線中斷）視為整批這次沒處理完，直接讓 outbox 那批整體照退避排程重試——
-已經成功的項目重送是安全的（`IIngestSink` 的冪等保證，見下方設計決策），不需要逐筆記錄
+已經成功的項目重送是安全的（`IIngestSink` 的冪等保證），不需要逐筆記錄
 「處理到哪」；批次中途遇到**永久拒絕**（`PermanentIngestException`，例如某筆 payload 格式
 不合）只影響那一筆，其餘照常處理並從 outbox 移除。
 
@@ -135,136 +133,14 @@ Edge 端排空 outbox 時預設一次 HTTP 請求送整批（`Outbox:BatchSize` 
 
 ## 設定
 
-| 設定鍵 | 說明 |
-|---|---|
-| `Deployment:Mode` | `AllInOne`（預設）／`Edge`／`Core`／`Viewer`（舊名 `Full`／`Line`／`Db` 相容） |
-| `ConnectionStrings:Outbox` | 本機 outbox 的 SQLite 檔（`AllInOne`／`Edge` 才用得到），預設 `Data Source=Db/outbox.db`（相對路徑以 ContentRootPath 為基準，第一次啟動自動建立目錄） |
-| `Line:OutboundHere` | `bool?`，這台要不要對外呼叫 LINE API（媒體下載＋頭貼快取）。未設定時依模式推導（`AllInOne`／`Edge`＝`true`，`Core`／`Viewer`＝`false`）。決定 `ContentDownloadService`／`ProfileRefreshService` 會不會在這台主機啟動，以及 `IContentDownloadQueue`／`IProfileRefreshQueue` 是真的 Channel 還是 Null 實作。判定為 `true` 時必須同時設定 `Line:ChannelAccessToken`，否則啟動失敗 |
-| `Line:ChannelAccessToken` | 呼叫 LINE content／profile API 要用的權杖。只有 `OutboundHere` 判定為 `true` 時才需要 |
-| `Viewer:Enabled` | `bool?`，這台要不要開檢視端。未設定時依模式推導（`AllInOne`／`Core`／`Viewer`＝`true`，`Edge`＝`false`）。三台拓撲下 Core 端顯式設 `false` 把檢視端交給獨立的 Viewer 主機 |
-| `Viewer:AllowedClientIps` | 檢視端頁面／API 的 IP 白名單，空白名單視為全拒 |
-| `Ingest:BaseUrl` | Edge 模式打去哪個 Core 模式主機的 ingest API（如 `https://core-host/`） |
-| `Ingest:ApiKey` | 雙邊共用密鑰：Edge 端當 `X-Ingest-Key` 標頭送出、Core／AllInOne 端驗證進來的請求，兩邊必須一致。**留空時 `/api/ingest/*` 整個不存在（404）**——避免單機部署意外多開一個沒人保護的寫入端點 |
-| `Ingest:AllowedClientIps` | `/api/ingest/*` 的 IP 白名單（跟 `Viewer:AllowedClientIps` 是分開的兩份設定，語意不同），空白名單視為全拒 |
-| `Ingest:MaxContentBytes` | `PUT /api/ingest/content/{id}` 單次上傳允許的最大位元組數，預設 300MB（Kestrel 預設請求上限 30MB 擋得住 LINE 的大檔，這裡動態放寬，見 `IngestController.UploadContent`；IIS 前面還有一層 `web.config` 的 `maxAllowedContentLength`，要跟這個值對齊） |
-| `Outbox:PollIntervalSeconds` | outbox 空的時候的保底輪詢間隔（寫入會立刻叫醒，這只是撿回到期重試項目用），預設 5 |
-| `Outbox:BatchSize` | 一輪最多處理幾筆（也是批次 ingest 一次請求送幾筆的上限），預設 50 |
-| `Outbox:BaseRetryDelaySeconds` / `MaxRetryDelaySeconds` | 指數退避：第 N 次失敗延遲 `Base × 2^(N-1)`，封頂 `Max`，預設 5／300。**沒有累計次數上限**——暫時性失敗永遠重試，只有 `PermanentIngestException` 第一次遇到就直接標記死信 |
-| `Database:Provider` | `Sqlite`／`SqlServer`，選填。未設定時依 `ConnectionStrings:SqlServer` 有沒有值推導（有→`SqlServer`，沒有→`Sqlite`），顯式設定永遠優先於推導（見 `DatabaseProviderResolver`） |
-| `Database:SqliteFallback` | `bool`，預設 `true`，只在 `Deployment:Mode=AllInOne` 有效。有效 provider 為 `SqlServer` 時，啟動當下先探測連得上、schema 也對（`AutoMigrate` 開啟時一併驗證 schema），探測失敗就改用本機 SQLite 撐起服務並記一則 Error log；設 `false` 改成探測失敗就直接啟動失敗。決定只在啟動當下做一次，行程存續期間不變（不做執行中動態切換），見 `DatabaseStartupProbe`／`DatabaseStartupDecision` |
-| `Database:AutoMigrate` | 啟動時是否自動跑 `Database.Migrate()`，預設 `true`。嚴管環境可關閉，改成手動在部署流程裡跑 `dotnet ef database update` |
-| `Heartbeat:IntervalSeconds` | 每台主機回報存活狀態的間隔，預設 60。**所有主機要設成一致**——設定頁「主機狀態」的 Online/Delayed/Offline 門檻是以檢視端這台的設定為基準判斷（見 `SettingsController.ComputeStatus`），各主機間隔不同時燈號會用錯的基準 |
+模式判斷本身只看 `Deployment:Mode`；其餘設定鍵（`Line:OutboundHere`、`Viewer:Enabled`、
+`Ingest:*`、`Database:*`、`Heartbeat:*` 等）的完整清單與說明見
+[README.md](../README.md#收錄) 的設定表，這裡不重複一份。
 
-## 設計決策
+合併專案與模式改名的原因、逐項設計決策的推演過程、雙行程端到端驗證紀錄見
+[docs/history/DEPLOYMENT-MODES-DECISIONS.md](history/DEPLOYMENT-MODES-DECISIONS.md)。
 
-- **為什麼合併成單一專案**：原本規劃是兩個各自發佈的專案（`MessageService` 收錄端 +
-  `MessageService.Web` 檢視端），部署複雜度大部分來自「兩份成品、兩份 web.config、
-  `Encryption:Key` 與 `Database:Provider` 兩邊要手動保持一致」，不是設定本身太多。合併成
-  單一專案、單一發佈成品之後，這些「兩邊要一致」的約束從設計上直接消失（只有一份，不可能
-  不一致），也順帶讓 `Full`（現 `AllInOne`）模式從「兩個行程共用同一顆 SQLite」變成單行程，
-  跨行程鎖競爭與啟動順序約束一併消除。
-- **只有 `IIngestSink` 有兩套實作**：webhook 收進來的路徑永遠只有「寫 outbox」一種。
-  若改成每個資料庫操作（訊息、內容下載、頭貼快取）各自抽一層，雙實作的維護量會多出四五處。
-- **防重送整個交給落地端**：`GroupMessages.WebhookEventId` 本來就有唯一索引
-  （`MessageDbContext`），`DbUpdateException` 攔截也早就存在。`WebhookEventHandler`
-  因此完全不需要任何資料庫讀取路徑——這是「webhook 只寫本機、不碰網路」能夠成立的前提，
-  不然還是得先查一次資料庫才能決定要不要收。
-- **outbox 用本機 SQLite，不是共用資料庫**：跟主資料庫（`MessageDbContext`）完全獨立、
-  無論哪個模式都不共用，這是特意的——outbox 排空失敗不該卡住任何跟主資料庫有關的邏輯，
-  反之亦然。因此 Schema 管理改用 `Database.Migrate()` 這輪也刻意不動 outbox.db，維持
-  `EnsureCreated()`＋`OutboxSchemaUpgrader`：單表、單 provider、schema 極少變動，改制收益低。
-- **`DbUpdateException` 用回查分辨「重複」與「暫時性失敗」**：撞鍵（真重複）要當成功讓 outbox
-  刪掉該筆，儲存中途斷線／逾時要往外拋讓 outbox 重試——兩者都以 `DbUpdateException` 現身，
-  一律當重複吞掉就會在暫時性失敗時把訊息弄丟，直接違反 outbox 的核心承諾。
-- **路由閘門是「從 application model 移除 controller」，不是清空 Selectors**：清 Selectors
-  會讓 action 被視為 conventional routing，與 `[ApiController]` 強制啟用的 ApiExplorer 衝突，
-  host 啟動就丟例外——這是體檢時被真實 host 整合測試抓到的（單元測試看不到路由內部行為，
-  所以 `DeploymentModeTests` 用 `WebApplicationFactory` 驗到「請求真的 404」為止）。合併專案
-  時把這套機制從「依模式列舉」改成「依能力」（`RequiresCapabilityAttribute`）：能力可以被
-  個別 override（例如 Core 模式關掉 Viewer），若直接寫死模式清單，override 後 controller
-  的存在與否會跟能力的實際推導結果脫節。
-- **`IngestApiEnabled` 同時涵蓋「模式是否允許」與「金鑰是否配置」，不再獨立成兩道閘門**：
-  合併前 `ingestApiEnabled`（金鑰是否配置）純粹是「容器建好之前就要知道」的技術限制，
-  不是刻意的防禦分層；折成一個之後兩者不會再有「改一邊忘了改另一邊」的機會。
-- **`Line:OutboundHere` 而不是拆成「下載開關」＋「頭貼快取開關」**：媒體下載與頭貼快取
-  都只需要 outbound HTTPS，沒有理由拆成兩個獨立設定；一對主機恰好一台要設 `true`，
-  啟動時無法互相檢查，設錯（兩台都真或都假）不會啟動失敗，只會變成重複下載或永遠不下載。
-- **入列（媒體下載／頭貼刷新）責任在呼叫端，不在 `DirectIngestSink`**：`DirectIngestSink`
-  只管持久化、不碰任何佇列，`IngestController`（Core 端收到 Edge 轉來的請求）與
-  `OutboxForwarderService`（本機排空）兩個呼叫端各自用自己 host 本地的
-  `IContentDownloadQueue`／`IProfileRefreshQueue`，透過共用的 `IngestSideEffects.Apply`
-  靜態方法決定要不要接手——這台主機的佇列是真的還是 Null，呼叫端完全不用知道。
-- **`ContentId` 值得為此擴充 `IIngestSink` 契約**：`ContentId` 是**功能上必需**——沒有它，
-  拆機模式的媒體永遠不會知道要下載哪一筆。重複情境也必須回傳既有那筆的 `ContentId`
-  （不能回 `null`），否則 outbox 重試（代表前一次的回應可能遺失了）會讓那筆媒體卡到
-  下次服務重啟的啟動重撈才補回。
-- **`ApiContentWorkSource`／`ApiProfileStore` 忘記帶 `X-Ingest-Key`，只有真雙行程互打才測出來**：
-  改成在 `Program.cs` 註冊具名 `HttpClient` 時就把 `X-Ingest-Key` 設成預設標頭，一次到位，
-  不必要求每個方法自己記得加；並補一條整合測試直接從 DI 解析具名 client 檢查標頭在，
-  防止回歸。**教訓：純文字打字看不出「這段程式碼會不會被兩個獨立行程執行」，這種缺口
-  只有真的跑兩個行程互打才測得出來**——這在收發解耦與部署收斂兩輪各發生過一次。
-- **等價性測試與其他真實 host 整合測試不能用預設的 Development 環境**：`WebApplicationFactory`
-  預設環境是 Development，會自動載入 `dotnet user-secrets`——這台開發機的 user-secrets
-  存了一把真的 LINE Channel Access Token，會讓 `OutboundHere` 判定為 `true` 卻沒設
-  `ChannelAccessToken` 的啟動驗證規則被意外滿足，在**這台機器**「湊巧通過」，換一台乾淨
-  機器或 CI 就會炸。所有這類測試改成 `builder.UseEnvironment("Testing")`，讓
-  `appsettings.json`（值都是空字串或類別預設）成為唯一基底，不受任何本機殘留設定影響。
-- **ingest API 判定「重複」不回獨立狀態碼，一律 200**：對呼叫端而言「新寫入」與「判定為
-  重複」都是「這筆已經在後端了，outbox 可以刪掉」，沒有行為上的差異，純觀察用途不值得
-  為此打破一個已穩定的契約。
-- **合併後 Viewer 白名單與 Ingest 白名單拆成獨立 key（見上方升級對照）**：合併前是兩個
-  各自 `appsettings.json` 裡的同名 key，互不影響；合併成單一設定檔後，如果還共用同一個
-  key，會被迫套用同一份清單——這在真實拆機拓撲下是錯的（office LAN 不該同時也是 ingest
-  的允許來源）。
-- **IP 白名單解析失敗改成啟動丟例外，不再無聲略過**：`.NET` 的 `IPNetwork.TryParse` 要求
-  CIDR 主機位元全為 0，`10.1.0.5/24` 這種常見打字習慣會 parse 失敗——舊版直接把那條規則
-  丟掉，使用者被 403 之後 log 只會說「not in AllowedClientIps」，完全查不出是設定寫錯。
-  跟「空白名單全拒」的寧嚴勿鬆哲學一致，改成解析失敗直接擋啟動，訊息附上錯誤條目原文與
-  正確寫法範例。
-
-## 端到端驗證紀錄（收發解耦建置期，2026-08-12，早於部署收斂輪）
-
-兩輪都用真實本機雙行程驗證（非模擬、非單元測試 mock）——這是收發解耦這個功能本身唯一能
-真正證明「拆機版本跟單機版本一模一樣」的方式，過程中也各抓到一個自動化測試沒抓到的真 bug。
-下文用當時的模式名稱（`Db`／`Line`），對應現在的 `Core`／`Edge`。
-
-### 純文字訊息收送
-
-`Db`（`Core`）模式（`localhost:5081`，接資料庫，設 `Ingest:ApiKey`＋`AllowedClientIps`）與
-`Line`（`Edge`）模式（`localhost:5082`，`Ingest:BaseUrl` 指向前者）。用正確 HMAC-SHA256 簽章送
-真實格式的 LINE webhook payload：
-
-1. **正常路徑**：Edge 端驗簽通過 → 寫本機 outbox → 回 200 → forwarder 排空 → `HttpIngestSink`
-   打 Core 端 `/api/ingest/events` → 中介層放行 → `IngestController` → `DirectIngestSink`
-   寫入。直接查 Core 端 SQLite 確認訊息內容、`GroupId`、`UserId`、`LineMessageId`、
-   `WebhookEventId` 全部正確落地。
-2. **斷線容忍**：中途 `kill` 掉 Core 實體，Edge 端再收一則 webhook——**webhook 仍回 200**
-   （沒有因為後端不通就讓 LINE 判定失效重送），訊息留在 Edge 端本機 outbox（`Attempts` 遞增、
-   `LastError` 記錄連線失敗訊息），資料沒有遺失。
-3. **自動恢復**：重啟 Core 實體後，Edge 端的 `OutboxForwarderService` 在下一輪退避到期時
-   自動重試成功，outbox 排空回 0 筆，兩則訊息（含斷線期間那則）都正確落地、無重複列——
-   驗證了 `WebhookEventId` 唯一索引在拆機場景下確實擋住了 outbox 重試可能產生的重複寫入。
-
-### 媒體下載的完整 wiring
-
-同樣兩個實體，這次 Core 端設 `OutboundHere=false`、Edge 端設 `OutboundHere=true`
-（含一個假的 `ChannelAccessToken`——沒有真實 LINE 憑證能完成真正下載，但足以驗證
-除了「打 LINE API 本身」之外的每一段 wiring）：
-
-1. **第一次跑就抓到真 bug**：Edge 端啟動時 `ContentDownloadService.RequeuePendingAsync`
-   立刻收到 401——`ApiContentWorkSource` 打 Core 端的請求完全沒帶 `X-Ingest-Key`。
-   修好後（在具名 `HttpClient` 註冊時設定預設標頭）重新驗證：
-2. **正常路徑（含媒體）**：送一則圖片 webhook → Edge 端寫 outbox → 轉送到 Core 端
-   → `DirectIngestSink` 寫入 `GroupMessage`＋`MessageContent`（`Pending`）→ `ContentId`
-   透過 HTTP 回應帶回 Edge 端 → `IngestSideEffects.Apply` 用 Edge 端**自己的**
-   （因為 `OutboundHere=true` 而是真的）`IContentDownloadQueue` 入列 → Edge 端
-   `ContentDownloadService.ProcessAsync` 撿起工作 → `ApiContentWorkSource.GetAsync`
-   正確認證、成功取回 `ContentWorkItem` → 嘗試下載（假憑證，預期對真實 LINE API 404）
-   → 重試耗盡後 `ApiContentWorkSource.FailAsync` 呼叫 Core 端
-   `/api/ingest/content/{id}/failed` → 直接查 Core 端 SQLite 確認
-   `MessageContent.DownloadStatus` 正確變成 `Failed`。
-
-## 目前限制（誠實記錄，別誤以為做完了）
+## 已知限制
 
 - **outbox 死信沒有專用的重送介面**：收到 `PermanentIngestException` 的項目會被標記
   `DeadLetteredAt`、停止自動重試（暫時性失敗則永遠退避重試、不會死信），但資料留在
@@ -274,16 +150,5 @@ Edge 端排空 outbox 時預設一次 HTTP 請求送整批（`Outbox:BatchSize` 
   但啟動驗證只能看到自己這台的設定，兩台都 `true`（重複下載，浪費 LINE 配額，但有
   唯一約束擋著不會產生髒資料）或兩台都 `false`（媒體永遠 `Pending`）都不會啟動失敗，
   只能靠部署檢查表把關。
-- **outbox 批次排空的吞吐量提升沒有正式量測**：問題9的修復把 Edge→Core 的 round-trip
-  從逐筆改成整批，理論上吞吐量會明顯提升，但目前只有功能面的等價性測試，沒有實際負載
-  下的量測數據。
-
-## 原始建置分期（Stage 0～4，2026-08-12 之前完成；跟本文件開頭的部署收斂輪是不同的分期編號）
-
-| 階段 | 內容 | 狀態 |
-|---|---|---|
-| 0 | 模式列舉、設定、啟動驗證、路由閘門 | ✅ 已完成 |
-| 1 | outbox＋forwarder＋`IIngestSink`／`DirectIngestSink` | ✅ 已完成 |
-| 2 | ingest API controller＋`HttpIngestSink`＋死信 | ✅ 已完成，端到端驗證通過 |
-| 3 | `IContentWorkSource`／`IProfileStore` 的 API 實作＋入列責任重構 | ✅ 已完成，端到端驗證通過（含抓到並修復真 bug） |
-| 4 | blob 端到端串流、部署檢查表、設定樣板 | ✅ blob 串流已完成；部署檢查表與設定樣板由 2026-08-13 部署收斂輪的階段5接手完成 |
+- **outbox 批次排空的吞吐量提升沒有正式量測**：Edge→Core 的 round-trip 從逐筆改成整批，
+  理論上吞吐量會明顯提升，但目前只有功能面的等價性測試，沒有實際負載下的量測數據。

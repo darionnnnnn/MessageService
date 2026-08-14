@@ -1,5 +1,7 @@
 # deploy/
 
+> 修改歷程見 [../docs/history/](../docs/history/)，非必要不需要讀，避免浪費 token。
+
 部署用的樣板與指令稿，不參與編譯。完整部署流程見 `docs/DEPLOYMENT-GUIDE.md`；這裡只列這個
 目錄底下每個檔案的用途。
 

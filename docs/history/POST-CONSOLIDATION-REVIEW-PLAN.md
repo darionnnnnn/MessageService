@@ -1,5 +1,9 @@
 # 部署收斂後外部審查回饋輪——實作規劃
 
+> 本檔屬於 `docs/history/`（修改歷程／決策記錄），非必要不需要讀，避免浪費 token。
+> 本輪的現行結論已併入 [README.md](../../README.md)、[docs/DEPLOYMENT-GUIDE.md](../DEPLOYMENT-GUIDE.md)、
+> [docs/DEPLOYMENT-MODES.md](../DEPLOYMENT-MODES.md)、[docs/ENCRYPTION.md](../ENCRYPTION.md)。
+
 > 狀態：**全案 A～G 完成**（含批次G體檢輪，2026-08-13）。
 > 依據：外部審查（針對 dev@9b2451c）逐項查證結果——P0、B1～B7 與「其他觀察」全數屬實。
 > 已定案的四個方向：健康監測採「DB 心跳＋設定頁顯示」；ENC1/MSE1 現在加 key id；
