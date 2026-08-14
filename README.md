@@ -270,7 +270,9 @@ dotnet user-secrets set "Line:ChannelAccessToken" "<你的 access token>"
 | FailedAttempts | int | 累計下載失敗次數，`ContentDownload:MaxFailedRetries` 用它判斷是否放棄重試 |
 | LastAttemptAt | datetimeoffset, null | 最後一次嘗試下載的時間 |
 
-**Groups** / **GroupMembers**：收錄端背景快取的群組名稱、成員顯示名稱與頭像 URL（7 天 TTL，來源是 LINE 的 group summary / member profile API），檢視端用來把 GroupId/UserId 轉成人看得懂的名稱。快取失敗時 fallback 顯示原始 ID；`ProfileCache:FailureRetryAfter`（預設 10 分鐘）冷卻期內失敗不會重複呼叫 LINE API。加密開啟時群組名稱/顯示名稱/頭像 URL 同樣走 `ENC2:` 整值加密。檢視端也會寫這張表：`Groups.LastMessageId` 指向的訊息若被保留期清除刪掉，`GroupsController.RecoverDriftedLastMessageAsync` 會即時查回目前真正的最後一則並修正這一列（見 `docs/DEPLOYMENT-GUIDE.md` 的 Viewer 帳號權限說明）。
+**Groups** / **GroupMembers**：收錄端背景快取的群組名稱、成員顯示名稱與頭貼（7 天 TTL，來源是 LINE 的 group summary / member profile API），檢視端用來把 GroupId/UserId 轉成人看得懂的名稱。快取失敗時 fallback 顯示原始 ID；`ProfileCache:FailureRetryAfter`（預設 10 分鐘）冷卻期內失敗不會重複呼叫 LINE API。加密開啟時群組名稱/顯示名稱/頭貼 URL 同樣走 `ENC2:` 整值加密。檢視端也會寫這張表：`Groups.LastMessageId` 指向的訊息若被保留期清除刪掉，`GroupsController.RecoverDriftedLastMessageAsync` 會即時查回目前真正的最後一則並修正這一列（見 `docs/DEPLOYMENT-GUIDE.md` 的 Viewer 帳號權限說明）。
+
+兩張表的頭貼快取欄位相同（頭貼不再只存 URL，圖檔本體也一併快取，理由見「設計決策備忘」）：
 
 | 欄位 | 型別 | 說明 |
 |---|---|---|
