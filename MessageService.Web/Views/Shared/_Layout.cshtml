@@ -5,6 +5,11 @@
 <html lang="zh-Hant">
 <head>
     <meta charset="utf-8" />
+    @* 讓前端 fetch() 用的相對路徑（見 wwwroot/js/*.js）能正確對齊站台實際掛載的路徑——
+       不管站台是掛在網域根目錄還是某個子路徑（IIS 應用程式路徑），Url.Content("~/") 都會
+       算出當下這次請求對應的正確前綴，不用在前端寫死任何特定字串。一定要放在 <head> 最前面，
+       瀏覽器只認第一個 <base>，且要排在其他會用到相對路徑解析的元素之前 *@
+    <base href="@Url.Content("~/")" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>@ViewData["Title"] - 訊息紀錄</title>
     <script type="importmap"></script>

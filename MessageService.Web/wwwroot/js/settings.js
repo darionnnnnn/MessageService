@@ -77,7 +77,7 @@
     }
 
     async function loadKeywords() {
-        const keywords = await fetchJson('/api/settings/keywords');
+        const keywords = await fetchJson('api/settings/keywords');
         els.keywordTbody.innerHTML = '';
         for (const keyword of keywords) {
             els.keywordTbody.appendChild(renderKeywordRow(keyword));
@@ -86,7 +86,7 @@
 
     async function deleteKeyword(id) {
         try {
-            await fetchJson(`/api/settings/keywords/${id}`, { method: 'DELETE' });
+            await fetchJson(`api/settings/keywords/${id}`, { method: 'DELETE' });
             settingsDirty = true;
             showToast('已刪除規則');
             await loadKeywords();
@@ -132,7 +132,7 @@
             : Array.from(els.scopeGroupCheckboxes.querySelectorAll('input:checked')).map(i => i.value);
 
         try {
-            await fetchJson('/api/settings/keywords', {
+            await fetchJson('api/settings/keywords', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ keyword, replacement, applyToAllGroups, groupIds })
@@ -151,7 +151,7 @@
     // === 名稱顯示 ===
 
     async function loadDisplaySettings() {
-        const settings = await fetchJson('/api/settings/display');
+        const settings = await fetchJson('api/settings/display');
         const radio = document.querySelector(`input[name="display-mode"][value="${settings.nameDisplayMode}"]`);
         if (radio) {
             radio.checked = true;
@@ -162,7 +162,7 @@
     async function handleDisplayModeChange() {
         const mode = document.querySelector('input[name="display-mode"]:checked').value;
         try {
-            await fetchJson('/api/settings/display', {
+            await fetchJson('api/settings/display', {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ nameDisplayMode: mode })
@@ -185,10 +185,10 @@
 
     async function loadAliasEditor() {
         const groupId = els.aliasGroupFilter.value;
-        const url = groupId ? `/api/users?groupId=${encodeURIComponent(groupId)}` : '/api/users';
+        const url = groupId ? `api/users?groupId=${encodeURIComponent(groupId)}` : 'api/users';
         const [users, aliases] = await Promise.all([
             fetchJson(url),
-            fetchJson('/api/settings/aliases')
+            fetchJson('api/settings/aliases')
         ]);
         const aliasMap = new Map(aliases.map(a => [a.userId, a.alias]));
 
@@ -225,7 +225,7 @@
     async function saveAlias(userId, alias) {
         try {
             if (alias) {
-                await fetchJson(`/api/settings/aliases/${encodeURIComponent(userId)}`, {
+                await fetchJson(`api/settings/aliases/${encodeURIComponent(userId)}`, {
                     method: 'PUT',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ alias })
@@ -233,7 +233,7 @@
             } else {
                 // 清空別名等於刪除；本來就沒有別名時會回 404，那也是想要的結果，
                 // 但其他錯誤碼要真的當成失敗，不能一律當成功
-                const response = await fetch(`/api/settings/aliases/${encodeURIComponent(userId)}`, { method: 'DELETE' });
+                const response = await fetch(`api/settings/aliases/${encodeURIComponent(userId)}`, { method: 'DELETE' });
                 if (!response.ok && response.status !== 404) {
                     throw new Error(`HTTP ${response.status}`);
                 }
@@ -248,7 +248,7 @@
     // === 個資自動遮蔽（身分證／手機／市話／健保卡，格式比對，跟關鍵字規則是互補的兩層）===
 
     async function loadPiiMaskingSettings() {
-        const settings = await fetchJson('/api/settings/pii-masking');
+        const settings = await fetchJson('api/settings/pii-masking');
         els.piiNationalIdToggle.checked = settings.maskNationalId;
         els.piiMobileToggle.checked = settings.maskMobilePhone;
         els.piiLandlineToggle.checked = settings.maskLandline;
@@ -263,7 +263,7 @@
     async function handlePiiMaskingChange(event) {
         const toggle = event?.target ?? null;
         try {
-            await fetchJson('/api/settings/pii-masking', {
+            await fetchJson('api/settings/pii-masking', {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -286,7 +286,7 @@
     // === 訊息保留天數：不可逆操作，送出前要求二次確認（見 SettingsController 的說明）===
 
     async function loadRetentionSettings() {
-        const settings = await fetchJson('/api/settings/retention');
+        const settings = await fetchJson('api/settings/retention');
         els.retentionDaysInput.value = settings.retentionDays;
     }
 
@@ -304,7 +304,7 @@
         }
 
         try {
-            await fetchJson('/api/settings/retention', {
+            await fetchJson('api/settings/retention', {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ retentionDays: days })
@@ -504,7 +504,7 @@
         }
 
         try {
-            await fetchJson(`/api/settings/host-heartbeats/${encodeURIComponent(role)}/${encodeURIComponent(machineName)}`,
+            await fetchJson(`api/settings/host-heartbeats/${encodeURIComponent(role)}/${encodeURIComponent(machineName)}`,
                 { method: 'DELETE' });
             await Promise.all([loadDatabaseStatus(), loadHostHeartbeats()]);
             showToast('已移除');
@@ -514,7 +514,7 @@
     }
 
     async function loadDatabaseStatus() {
-        const status = await fetchJson('/api/settings/database-status');
+        const status = await fetchJson('api/settings/database-status');
 
         // 只有本機這台主機的狀態（見 DatabaseStartupDecision 說明）——AllInOne 以外的模式
         // sqliteFallbackActive 恆為 false，這裡不用特別分模式處理
@@ -532,7 +532,7 @@
     }
 
     async function loadHostHeartbeats() {
-        const rows = await fetchJson('/api/settings/host-heartbeats');
+        const rows = await fetchJson('api/settings/host-heartbeats');
 
         els.hostHeartbeatsEmpty.classList.toggle('d-none', rows.length > 0);
 
@@ -647,7 +647,7 @@
     }
 
     async function loadInitialData() {
-        groupsCache = await fetchJson('/api/groups');
+        groupsCache = await fetchJson('api/groups');
         renderScopeCheckboxes();
 
         els.aliasGroupFilter.innerHTML = '';
