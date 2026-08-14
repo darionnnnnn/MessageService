@@ -246,7 +246,7 @@
     }
 
     function buildReadyContentNode(messageType, contentId, fileName) {
-        const url = `/api/messages/${contentId}/content`;
+        const url = `api/messages/${contentId}/content`;
 
         if (messageType === 'sticker') {
             const img = document.createElement('img');
@@ -734,7 +734,7 @@
         }
 
         const token = ++state.searchRequestToken;
-        let url = `/api/messages/search?q=${encodeURIComponent(query)}`;
+        let url = `api/messages/search?q=${encodeURIComponent(query)}`;
         if (state.searchScope === 'group' && state.groupId) {
             url += `&groupId=${encodeURIComponent(state.groupId)}`;
         }
@@ -825,7 +825,7 @@
 
         try {
             const page = await fetchJson(
-                `/api/groups/${encodeURIComponent(result.groupId)}/messages?aroundId=${result.messageId}&days=${INITIAL_DAYS}`);
+                `api/groups/${encodeURIComponent(result.groupId)}/messages?aroundId=${result.messageId}&days=${INITIAL_DAYS}`);
             if (token !== state.requestToken) {
                 return;
             }
@@ -854,7 +854,7 @@
     // === 資料載入 ===
 
     async function loadGroups() {
-        const groups = await fetchJson('/api/groups' + readQuerySuffix());
+        const groups = await fetchJson('api/groups' + readQuerySuffix());
         state.groups = groups;
         seedReadStateForNewGroups(groups);
         renderGroupList(els.groupSearch.value);
@@ -874,7 +874,7 @@
         }
         state.groupsPolling = true;
         try {
-            const groups = await fetchJson('/api/groups' + readQuerySuffix());
+            const groups = await fetchJson('api/groups' + readQuerySuffix());
             state.groups = groups;
             seedReadStateForNewGroups(groups);
 
@@ -928,7 +928,7 @@
 
         try {
             const page = await fetchJson(
-                `/api/groups/${encodeURIComponent(groupId)}/messages?days=${state.daysWindow}`);
+                `api/groups/${encodeURIComponent(groupId)}/messages?days=${state.daysWindow}`);
             if (token !== state.requestToken) {
                 return;
             }
@@ -991,8 +991,8 @@
         els.loadMoreBtn.disabled = true;
         try {
             const url = growWindow
-                ? `/api/groups/${encodeURIComponent(state.groupId)}/messages?days=${state.daysWindow + LOAD_MORE_DAYS}`
-                : `/api/groups/${encodeURIComponent(state.groupId)}/messages?beforeId=${state.oldestId}&days=${LOAD_MORE_DAYS}`;
+                ? `api/groups/${encodeURIComponent(state.groupId)}/messages?days=${state.daysWindow + LOAD_MORE_DAYS}`
+                : `api/groups/${encodeURIComponent(state.groupId)}/messages?beforeId=${state.oldestId}&days=${LOAD_MORE_DAYS}`;
             const page = await fetchJson(url);
             if (token !== state.requestToken) {
                 return;
@@ -1029,7 +1029,7 @@
             // Pending 內容狀態輪詢照常，跟目前看的是不是即時畫面無關
             if (state.newestId != null && !state.historicalView) {
                 const page = await fetchJson(
-                    `/api/groups/${encodeURIComponent(state.groupId)}/messages?afterId=${state.newestId}`);
+                    `api/groups/${encodeURIComponent(state.groupId)}/messages?afterId=${state.newestId}`);
                 if (token !== state.requestToken) {
                     return;
                 }
@@ -1061,7 +1061,7 @@
             return;
         }
         const ids = Array.from(state.pendingContentIds).join(',');
-        const statuses = await fetchJson(`/api/messages/statuses?ids=${ids}`);
+        const statuses = await fetchJson(`api/messages/statuses?ids=${ids}`);
         if (token !== state.requestToken) {
             return;
         }
@@ -1506,7 +1506,7 @@
     // 這只是提醒層，不該因為它把聊天頁弄壞
     async function checkDatabaseFallback() {
         try {
-            const response = await fetch('/api/settings/database-status');
+            const response = await fetch('api/settings/database-status');
             if (!response.ok) {
                 return;
             }
