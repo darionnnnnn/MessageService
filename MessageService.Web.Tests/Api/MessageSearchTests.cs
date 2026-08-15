@@ -292,4 +292,82 @@ public class MessageSearchTests : IDisposable
 
         Assert.Equal(10, results!.Count);
     }
+
+    [Fact]
+    public async Task Search_MemberWithPictureContent_ScopedToGroupId_ReturnsMatchingMessages()
+    {
+        var now = DateTimeOffset.UtcNow;
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            dbContext.GroupMembers.Add(new GroupMember
+            {
+                GroupId = "G1",
+                UserId = "U1",
+                DisplayName = "小明",
+                PictureContent = new byte[] { 1, 2, 3 },
+                UpdatedAt = now
+            });
+            (await dbContext.ViewerSettings.SingleAsync()).NameDisplayMode = NameDisplayMode.Original;
+            dbContext.GroupMessages.Add(TextMessage("e1", "G1", "U1", now, "晚安"));
+        });
+
+        var results = await _fixture.Client.GetFromJsonAsync<List<MessageSearchResultDto>>("/api/messages/search?q=小明&groupId=G1");
+
+        var hit = Assert.Single(results!);
+        Assert.Equal("G1", hit.GroupId);
+        Assert.Equal("小明", hit.DisplayName);
+        Assert.Equal("晚安", hit.Snippet);
+    }
+
+    [Fact]
+    public async Task Search_MemberWithPictureContent_CrossGroupSearch_ReturnsOnlyMatchingGroupMessages()
+    {
+        var now = DateTimeOffset.UtcNow;
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            dbContext.GroupMembers.Add(new GroupMember
+            {
+                GroupId = "G1",
+                UserId = "U1",
+                DisplayName = "小明",
+                PictureContent = new byte[] { 1, 2, 3 },
+                UpdatedAt = now
+            });
+            dbContext.GroupMembers.Add(new GroupMember
+            {
+                GroupId = "G2",
+                UserId = "U2",
+                DisplayName = "小華",
+                PictureContent = new byte[] { 4, 5, 6 },
+                UpdatedAt = now
+            });
+            (await dbContext.ViewerSettings.SingleAsync()).NameDisplayMode = NameDisplayMode.Original;
+            dbContext.GroupMessages.Add(TextMessage("e1", "G1", "U1", now, "G1訊息"));
+            dbContext.GroupMessages.Add(TextMessage("e2", "G2", "U2", now, "G2訊息"));
+        });
+
+        var results = await _fixture.Client.GetFromJsonAsync<List<MessageSearchResultDto>>("/api/messages/search?q=小明");
+
+        var hit = Assert.Single(results!);
+        Assert.Equal("G1", hit.GroupId);
+        Assert.Equal("小明", hit.DisplayName);
+        Assert.Equal("G1訊息", hit.Snippet);
+    }
+
+    [Fact]
+    public async Task Search_SystemMessageWithNullUserId_ReturnsUnknownDisplayNameWithoutException()
+    {
+        var now = DateTimeOffset.UtcNow;
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            dbContext.GroupMessages.Add(TextMessage("e1", "G1", null, now, "系統訊息通知"));
+            await Task.CompletedTask;
+        });
+
+        var results = await _fixture.Client.GetFromJsonAsync<List<MessageSearchResultDto>>("/api/messages/search?q=系統訊息");
+
+        var hit = Assert.Single(results!);
+        Assert.Equal("(未知)", hit.DisplayName);
+        Assert.Equal("系統訊息通知", hit.Snippet);
+    }
 }

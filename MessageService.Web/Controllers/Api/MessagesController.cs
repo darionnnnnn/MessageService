@@ -273,7 +273,9 @@ public class MessagesController(
         {
             memberQuery = memberQuery.Where(m => m.GroupId == groupId);
         }
-        var members = await memberQuery.ToListAsync(cancellationToken);
+        var members = await memberQuery
+            .Select(m => new { m.GroupId, m.UserId, m.DisplayName })
+            .ToListAsync(cancellationToken);
 
         // Anonymous 模式的代號只讀不指派——沒被指派過代號的人姓名比對略過是正確行為，
         // 指派只應該發生在訊息視窗端點（使用者實際看到訊息時）
@@ -405,14 +407,17 @@ public class MessagesController(
         }
 
         var resultGroupIds = top.Select(kv => kv.Value.GroupId).Distinct().ToList();
+        var resultUserIds = top.Select(kv => kv.Value.UserId).Where(id => id is not null).Cast<string>().Distinct().ToList();
         var groupCache = await dbContext.Groups
             .AsNoTracking()
             .Where(g => resultGroupIds.Contains(g.GroupId))
             .ToDictionaryAsync(g => g.GroupId, cancellationToken);
 
+        // EF Core 無法轉譯 tuple 的 Contains，故以群組與使用者的獨立 Contains 條件收斂範圍
         var resultMembers = await dbContext.GroupMembers
             .AsNoTracking()
-            .Where(m => resultGroupIds.Contains(m.GroupId))
+            .Where(m => resultGroupIds.Contains(m.GroupId) && resultUserIds.Contains(m.UserId))
+            .Select(m => new { m.GroupId, m.UserId, m.DisplayName })
             .ToDictionaryAsync(m => (m.GroupId, m.UserId), cancellationToken);
 
         var results = top.Select(kv =>
