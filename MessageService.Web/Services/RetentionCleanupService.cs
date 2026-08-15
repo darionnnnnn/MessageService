@@ -120,6 +120,24 @@ public class RetentionCleanupService(
         logger.LogInformation(
             "Retention cleanup removed {Count} group messages older than {Cutoff:yyyy-MM-dd} (retention: {RetentionDays} days)",
             totalDeleted, cutoff, retentionDays);
+
+        if (totalDeleted > 0 && dbContext.Database.IsSqlite())
+        {
+            try
+            {
+                var dbPath = dbContext.Database.GetDbConnection().DataSource;
+                var sizeMb = new FileInfo(dbPath).Length / (1024.0 * 1024.0);
+                logger.LogWarning(
+                    "保留期清除已刪除 {Count} 筆訊息，但 SQLite 不會自動回收磁碟空間（目前資料庫檔案大小：{SizeMb:F2} MB），若需釋放空間請人工執行 VACUUM。",
+                    totalDeleted, sizeMb);
+            }
+            catch (Exception)
+            {
+                logger.LogWarning(
+                    "保留期清除已刪除 {Count} 筆訊息，但 SQLite 不會自動回收磁碟空間，若需釋放空間請人工執行 VACUUM。",
+                    totalDeleted);
+            }
+        }
     }
 
     /// <summary>側欄改讀 Groups.LastMessageId／LastMessageAt（見 GroupsController）——這裡清完

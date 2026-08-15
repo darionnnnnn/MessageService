@@ -136,6 +136,7 @@ public class OutboxForwarderService(
         // 裡不可能出現兩列相同的 WebhookEventId（DB 層面保證），不需要為理論上不會發生的重複
         // 多寫一層 group 邏輯——見 SqliteOutboxWriter.EnqueueAsync 對撞鍵的處理
         var entriesByWebhookEventId = new Dictionary<string, OutboxEntry>();
+        var envelopesByWebhookEventId = new Dictionary<string, IngestEnvelope>();
         var envelopes = new List<IngestEnvelope>();
         foreach (var entry in batch)
         {
@@ -157,6 +158,7 @@ public class OutboxForwarderService(
             }
 
             entriesByWebhookEventId[entry.WebhookEventId] = entry;
+            envelopesByWebhookEventId[entry.WebhookEventId] = envelope;
             envelopes.Add(envelope);
         }
 
@@ -207,7 +209,7 @@ public class OutboxForwarderService(
                 // 這台主機（不是落地端那台）要不要接手媒體下載／頭貼刷新，見 IngestSideEffects
                 // 說明——在 AllInOne 模式下 sink 是 DirectIngestSink，落地跟這裡是同一台主機；
                 // Edge 模式下 sink 是 HttpIngestSink，ContentId 是從遠端 ingest API 的回應帶回來的
-                var envelope = envelopes.First(e => e.WebhookEventId == item.WebhookEventId);
+                var envelope = envelopesByWebhookEventId[item.WebhookEventId];
                 IngestSideEffects.Apply(envelope, new IngestResult(item.ContentId), downloadQueue, profileRefreshQueue);
 
                 dbContext.Entries.Remove(entry);

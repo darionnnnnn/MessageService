@@ -69,7 +69,7 @@ public class HttpIngestSink(HttpClient httpClient, IOptions<IngestOptions> optio
             {
                 logger.LogWarning(
                     "Core 端 ingest API 找不到批次端點 POST /api/ingest/events-batch（404）——" +
-                    "可能還沒升級，暫時退回逐筆模式（{Count} 筆各自一次 HTTP round-trip）。" +
+                    "可能還沒升級或 Core 端未設定 Ingest:ApiKey，暫時退回逐筆模式（{Count} 筆各自一次 HTTP round-trip）。" +
                     "升級順序請先升 Core 再升 Edge，見 docs/DEPLOYMENT-MODES.md。",
                     envelopes.Count);
             }
