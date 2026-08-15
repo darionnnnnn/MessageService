@@ -25,18 +25,37 @@ public class AvatarsController(
             return NotFound();
         }
 
-        var group = await dbContext.Groups
+        // 採取兩段查詢：先投影出輕量中繼資料比對 ETag，若命中 304 即可避免撈取 blob 本體；
+        // 雖然 200 路徑會多一次輕量查詢，但因 no-cache 快取策略使 304 成為常態，這筆交易是划算的。
+        var meta = await dbContext.Groups
             .AsNoTracking()
             .Where(g => g.GroupId == groupId)
-            .Select(g => new { g.PictureContent, g.PictureContentType, g.PictureUpdatedAt })
+            .Select(g => new { HasPicture = g.PictureContent != null, g.PictureContentType, g.PictureUpdatedAt })
             .FirstOrDefaultAsync(cancellationToken);
 
-        if (group?.PictureContent is null)
+        if (meta is null || !meta.HasPicture)
         {
             return NotFound();
         }
 
-        return ProcessAvatarContent(groupId, group.PictureContent, group.PictureContentType, group.PictureUpdatedAt);
+        var etag = FormatETag(groupId, meta.PictureUpdatedAt);
+        if (IsIfNoneMatchHit(etag))
+        {
+            return StatusCode(StatusCodes.Status304NotModified);
+        }
+
+        var content = await dbContext.Groups
+            .AsNoTracking()
+            .Where(g => g.GroupId == groupId)
+            .Select(g => g.PictureContent)
+            .FirstOrDefaultAsync(cancellationToken);
+
+        if (content is null)
+        {
+            return NotFound();
+        }
+
+        return ProcessAvatarContent(groupId, content, meta.PictureContentType, etag);
     }
 
     [HttpGet("api/groups/{groupId}/members/{userId}/avatar")]
@@ -48,30 +67,50 @@ public class AvatarsController(
             return NotFound();
         }
 
-        var member = await dbContext.GroupMembers
+        // 採取兩段查詢：先投影出輕量中繼資料比對 ETag，若命中 304 即可避免撈取 blob 本體；
+        // 雖然 200 路徑會多一次輕量查詢，但因 no-cache 快取策略使 304 成為常態，這筆交易是划算的。
+        var meta = await dbContext.GroupMembers
             .AsNoTracking()
             .Where(m => m.GroupId == groupId && m.UserId == userId)
-            .Select(m => new { m.PictureContent, m.PictureContentType, m.PictureUpdatedAt })
+            .Select(m => new { HasPicture = m.PictureContent != null, m.PictureContentType, m.PictureUpdatedAt })
             .FirstOrDefaultAsync(cancellationToken);
 
-        if (member?.PictureContent is null)
+        if (meta is null || !meta.HasPicture)
         {
             return NotFound();
         }
 
-        return ProcessAvatarContent(userId, member.PictureContent, member.PictureContentType, member.PictureUpdatedAt);
-    }
-
-    private IActionResult ProcessAvatarContent(string idForLog, byte[] content, string? contentType, DateTimeOffset? updatedAt)
-    {
-        var etag = $"\"avatar-{idForLog}-{updatedAt?.UtcTicks ?? 0:x}\"";
-        
-        var ifNoneMatch = Request.Headers.IfNoneMatch.ToString();
-        if (!string.IsNullOrEmpty(ifNoneMatch) && (ifNoneMatch == "*" || ifNoneMatch.Contains(etag)))
+        var etag = FormatETag(userId, meta.PictureUpdatedAt);
+        if (IsIfNoneMatchHit(etag))
         {
             return StatusCode(StatusCodes.Status304NotModified);
         }
 
+        var content = await dbContext.GroupMembers
+            .AsNoTracking()
+            .Where(m => m.GroupId == groupId && m.UserId == userId)
+            .Select(m => m.PictureContent)
+            .FirstOrDefaultAsync(cancellationToken);
+
+        if (content is null)
+        {
+            return NotFound();
+        }
+
+        return ProcessAvatarContent(userId, content, meta.PictureContentType, etag);
+    }
+
+    private static string FormatETag(string idForLog, DateTimeOffset? updatedAt) =>
+        $"\"avatar-{idForLog}-{updatedAt?.UtcTicks ?? 0:x}\"";
+
+    private bool IsIfNoneMatchHit(string etag)
+    {
+        var ifNoneMatch = Request.Headers.IfNoneMatch.ToString();
+        return !string.IsNullOrEmpty(ifNoneMatch) && (ifNoneMatch == "*" || ifNoneMatch.Contains(etag));
+    }
+
+    private IActionResult ProcessAvatarContent(string idForLog, byte[] content, string? contentType, string etag)
+    {
         var isEncrypted = ChunkedBlobCipher.IsEncryptedHeader(content);
         if (isEncrypted)
         {

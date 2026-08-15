@@ -162,6 +162,74 @@ public class AvatarsControllerTests : IDisposable
         var response2 = await _fixture.Client.SendAsync(request2);
 
         Assert.Equal(HttpStatusCode.NotModified, response2.StatusCode);
+        var body = await response2.Content.ReadAsByteArrayAsync();
+        Assert.Empty(body);
+    }
+
+    [Fact]
+    public async Task GetGroupAvatar_WithMismatchedETag_ReturnsOkWithContent()
+    {
+        var pictureBytes = new byte[] { 0x01, 0x02, 0x03, 0x04 };
+        var now = DateTimeOffset.UtcNow;
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            dbContext.Groups.Add(new Group
+            {
+                GroupId = "G1",
+                GroupName = "Group 1",
+                PictureContent = pictureBytes,
+                PictureContentType = "image/jpeg",
+                PictureUpdatedAt = now
+            });
+            await Task.CompletedTask;
+        });
+
+        var request = new HttpRequestMessage(HttpMethod.Get, "/api/groups/G1/avatar");
+        request.Headers.IfNoneMatch.ParseAdd("\"avatar-wrong-0\"");
+        var response = await _fixture.Client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadAsByteArrayAsync();
+        Assert.Equal(pictureBytes, body);
+    }
+
+    [Fact]
+    public async Task GetGroupAvatar_WhenPictureUpdatedAtChanges_ReturnsDifferentETag()
+    {
+        var pictureBytes = new byte[] { 0x01, 0x02, 0x03, 0x04 };
+        var t1 = DateTimeOffset.UtcNow;
+        var t2 = t1.AddMinutes(10);
+
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            dbContext.Groups.Add(new Group
+            {
+                GroupId = "G1",
+                GroupName = "Group 1",
+                PictureContent = pictureBytes,
+                PictureContentType = "image/jpeg",
+                PictureUpdatedAt = t1
+            });
+            await Task.CompletedTask;
+        });
+
+        var response1 = await _fixture.Client.GetAsync("/api/groups/G1/avatar");
+        Assert.Equal(HttpStatusCode.OK, response1.StatusCode);
+        var etag1 = response1.Headers.ETag?.Tag;
+        Assert.NotNull(etag1);
+
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            var group = await dbContext.Groups.SingleAsync(g => g.GroupId == "G1");
+            group.PictureUpdatedAt = t2;
+        });
+
+        var response2 = await _fixture.Client.GetAsync("/api/groups/G1/avatar");
+        Assert.Equal(HttpStatusCode.OK, response2.StatusCode);
+        var etag2 = response2.Headers.ETag?.Tag;
+        Assert.NotNull(etag2);
+
+        Assert.NotEqual(etag1, etag2);
     }
 
     [Fact]
@@ -190,5 +258,154 @@ public class AvatarsControllerTests : IDisposable
         
         var body = await response.Content.ReadAsByteArrayAsync();
         Assert.Equal(pictureBytes, body);
+    }
+
+    [Fact]
+    public async Task GetMemberAvatar_WithoutIfNoneMatch_ReturnsOkWithPictureContent()
+    {
+        var pictureBytes = new byte[] { 0x05, 0x06, 0x07, 0x08 };
+        var now = DateTimeOffset.UtcNow;
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            dbContext.GroupMembers.Add(new GroupMember
+            {
+                GroupId = "G1",
+                UserId = "U1",
+                DisplayName = "User 1",
+                PictureContent = pictureBytes,
+                PictureContentType = "image/png",
+                PictureUpdatedAt = now
+            });
+            await Task.CompletedTask;
+        });
+
+        var response = await _fixture.Client.GetAsync("/api/groups/G1/members/U1/avatar");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.NotNull(response.Headers.ETag);
+        var body = await response.Content.ReadAsByteArrayAsync();
+        Assert.Equal(pictureBytes, body);
+    }
+
+    [Fact]
+    public async Task GetMemberAvatar_WhenNoPicture_ReturnsNotFound()
+    {
+        var now = DateTimeOffset.UtcNow;
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            dbContext.GroupMembers.Add(new GroupMember
+            {
+                GroupId = "G1",
+                UserId = "U1",
+                DisplayName = "User 1",
+                PictureContent = null,
+                PictureUpdatedAt = now
+            });
+            await Task.CompletedTask;
+        });
+
+        var response = await _fixture.Client.GetAsync("/api/groups/G1/members/U1/avatar");
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task GetMemberAvatar_WithMatchingETag_ReturnsNotModifiedWithEmptyBody()
+    {
+        var pictureBytes = new byte[] { 0x01, 0x02, 0x03, 0x04 };
+        var now = DateTimeOffset.UtcNow;
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            dbContext.GroupMembers.Add(new GroupMember
+            {
+                GroupId = "G1",
+                UserId = "U1",
+                DisplayName = "User 1",
+                PictureContent = pictureBytes,
+                PictureContentType = "image/png",
+                PictureUpdatedAt = now
+            });
+            await Task.CompletedTask;
+        });
+
+        var response1 = await _fixture.Client.GetAsync("/api/groups/G1/members/U1/avatar");
+        var etag = response1.Headers.ETag?.Tag;
+        Assert.NotNull(etag);
+
+        var request2 = new HttpRequestMessage(HttpMethod.Get, "/api/groups/G1/members/U1/avatar");
+        request2.Headers.IfNoneMatch.ParseAdd(etag);
+        var response2 = await _fixture.Client.SendAsync(request2);
+
+        Assert.Equal(HttpStatusCode.NotModified, response2.StatusCode);
+        var body = await response2.Content.ReadAsByteArrayAsync();
+        Assert.Empty(body);
+    }
+
+    [Fact]
+    public async Task GetMemberAvatar_WithMismatchedETag_ReturnsOkWithContent()
+    {
+        var pictureBytes = new byte[] { 0x01, 0x02, 0x03, 0x04 };
+        var now = DateTimeOffset.UtcNow;
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            dbContext.GroupMembers.Add(new GroupMember
+            {
+                GroupId = "G1",
+                UserId = "U1",
+                DisplayName = "User 1",
+                PictureContent = pictureBytes,
+                PictureContentType = "image/png",
+                PictureUpdatedAt = now
+            });
+            await Task.CompletedTask;
+        });
+
+        var request = new HttpRequestMessage(HttpMethod.Get, "/api/groups/G1/members/U1/avatar");
+        request.Headers.IfNoneMatch.ParseAdd("\"avatar-wrong-0\"");
+        var response = await _fixture.Client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadAsByteArrayAsync();
+        Assert.Equal(pictureBytes, body);
+    }
+
+    [Fact]
+    public async Task GetMemberAvatar_WhenPictureUpdatedAtChanges_ReturnsDifferentETag()
+    {
+        var pictureBytes = new byte[] { 0x01, 0x02, 0x03, 0x04 };
+        var t1 = DateTimeOffset.UtcNow;
+        var t2 = t1.AddMinutes(10);
+
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            dbContext.GroupMembers.Add(new GroupMember
+            {
+                GroupId = "G1",
+                UserId = "U1",
+                DisplayName = "User 1",
+                PictureContent = pictureBytes,
+                PictureContentType = "image/png",
+                PictureUpdatedAt = t1
+            });
+            await Task.CompletedTask;
+        });
+
+        var response1 = await _fixture.Client.GetAsync("/api/groups/G1/members/U1/avatar");
+        Assert.Equal(HttpStatusCode.OK, response1.StatusCode);
+        var etag1 = response1.Headers.ETag?.Tag;
+        Assert.NotNull(etag1);
+
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            var member = await dbContext.GroupMembers.SingleAsync(m => m.GroupId == "G1" && m.UserId == "U1");
+            member.PictureUpdatedAt = t2;
+        });
+
+        var response2 = await _fixture.Client.GetAsync("/api/groups/G1/members/U1/avatar");
+        Assert.Equal(HttpStatusCode.OK, response2.StatusCode);
+        var etag2 = response2.Headers.ETag?.Tag;
+        Assert.NotNull(etag2);
+
+        Assert.NotEqual(etag1, etag2);
     }
 }
