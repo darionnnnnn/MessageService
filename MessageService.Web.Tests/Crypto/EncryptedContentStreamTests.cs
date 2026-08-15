@@ -284,4 +284,142 @@ public class EncryptedContentStreamTests : IDisposable
 
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
+
+    private static byte[] GeneratePatternBytes(int length)
+    {
+        var result = new byte[length];
+        for (var i = 0; i < length; i++)
+        {
+            result[i] = (byte)(i % 251);
+        }
+        return result;
+    }
+
+    // === SQLite Blob / Range 請求規格測試（密文路徑）===
+
+    /// <summary>情境 1：Range: bytes=0-（從頭到尾）→ 206，內容等於完整原始位元組。</summary>
+    [Fact]
+    public async Task GetContent_EncryptedBlob_RangeFromZeroWithoutEnd_Returns206WithFullDecryptedContent()
+    {
+        var plaintext = GeneratePatternBytes(500);
+        var contentId = await SeedEncryptedContentAsync(plaintext);
+
+        var request = new HttpRequestMessage(HttpMethod.Get, $"/api/messages/{contentId}/content");
+        request.Headers.Range = new RangeHeaderValue(0, null);
+
+        var response = await _fixture.Client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.PartialContent, response.StatusCode);
+        Assert.Equal("bytes 0-499/500", response.Content.Headers.ContentRange?.ToString());
+        Assert.Equal(500, response.Content.Headers.ContentLength);
+        var body = await response.Content.ReadAsByteArrayAsync();
+        Assert.Equal(plaintext, body);
+    }
+
+    /// <summary>情境 2：Range: bytes=N-（N 在檔案中段）→ 206，內容等於原始位元組從 N 到結尾那一段。</summary>
+    [Fact]
+    public async Task GetContent_EncryptedBlob_RangeFromMiddleWithoutEnd_Returns206WithSliceToEnd()
+    {
+        var plaintext = GeneratePatternBytes(500);
+        var contentId = await SeedEncryptedContentAsync(plaintext);
+
+        var request = new HttpRequestMessage(HttpMethod.Get, $"/api/messages/{contentId}/content");
+        request.Headers.Range = new RangeHeaderValue(150, null);
+
+        var response = await _fixture.Client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.PartialContent, response.StatusCode);
+        Assert.Equal("bytes 150-499/500", response.Content.Headers.ContentRange?.ToString());
+        Assert.Equal(350, response.Content.Headers.ContentLength);
+        var body = await response.Content.ReadAsByteArrayAsync();
+        Assert.Equal(plaintext.Skip(150).ToArray(), body);
+    }
+
+    /// <summary>情境 3：Range: bytes=N-M（中段的有限區間）→ 206，內容等於原始位元組的 [N, M]，
+    /// 且 Content-Range 標頭正確、Content-Length 等於 M-N+1。</summary>
+    [Fact]
+    public async Task GetContent_EncryptedBlob_RangeMiddleBoundedSlice_Returns206WithExactSliceAndHeaders()
+    {
+        var plaintext = GeneratePatternBytes(500);
+        var contentId = await SeedEncryptedContentAsync(plaintext);
+
+        var request = new HttpRequestMessage(HttpMethod.Get, $"/api/messages/{contentId}/content");
+        request.Headers.Range = new RangeHeaderValue(100, 299);
+
+        var response = await _fixture.Client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.PartialContent, response.StatusCode);
+        Assert.Equal("bytes 100-299/500", response.Content.Headers.ContentRange?.ToString());
+        Assert.Equal(200, response.Content.Headers.ContentLength);
+        var body = await response.Content.ReadAsByteArrayAsync();
+        Assert.Equal(plaintext.Skip(100).Take(200).ToArray(), body);
+    }
+
+    /// <summary>情境 4：跨 chunk 邊界的區間：內容長度大於 ChunkedBlobCipher.ChunkSize，
+    /// Range 區間跨過 chunk 邊界，斷言內容正確。</summary>
+    [Fact]
+    public async Task GetContent_EncryptedBlob_RangeSpanningAcrossChunkBoundaries_ReturnsCorrectData()
+    {
+        var totalLength = ChunkedBlobCipher.ChunkSize + 4000;
+        var plaintext = GeneratePatternBytes(totalLength);
+        var contentId = await SeedEncryptedContentAsync(plaintext);
+
+        var start = ChunkedBlobCipher.ChunkSize - 500;
+        var end = ChunkedBlobCipher.ChunkSize + 500;
+        var request = new HttpRequestMessage(HttpMethod.Get, $"/api/messages/{contentId}/content");
+        request.Headers.Range = new RangeHeaderValue(start, end);
+
+        var response = await _fixture.Client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.PartialContent, response.StatusCode);
+        Assert.Equal($"bytes {start}-{end}/{totalLength}", response.Content.Headers.ContentRange?.ToString());
+        Assert.Equal(end - start + 1, response.Content.Headers.ContentLength);
+        var body = await response.Content.ReadAsByteArrayAsync();
+        Assert.Equal(plaintext.Skip(start).Take(end - start + 1).ToArray(), body);
+    }
+
+    /// <summary>情境 5：越界 Range（start 大於等於總長度）→ 416。</summary>
+    [Fact]
+    public async Task GetContent_EncryptedBlob_RangeStartEqualToTotalLength_Returns416()
+    {
+        var plaintext = GeneratePatternBytes(100);
+        var contentId = await SeedEncryptedContentAsync(plaintext);
+
+        var request = new HttpRequestMessage(HttpMethod.Get, $"/api/messages/{contentId}/content");
+        request.Headers.Range = new RangeHeaderValue(100, null);
+
+        var response = await _fixture.Client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.RequestedRangeNotSatisfiable, response.StatusCode);
+        Assert.Equal("bytes */100", response.Content.Headers.ContentRange?.ToString());
+    }
+
+    [Fact]
+    public async Task GetContent_EncryptedBlob_RangeStartBeyondTotalLength_Returns416()
+    {
+        var plaintext = GeneratePatternBytes(100);
+        var contentId = await SeedEncryptedContentAsync(plaintext);
+
+        var request = new HttpRequestMessage(HttpMethod.Get, $"/api/messages/{contentId}/content");
+        request.Headers.Range = new RangeHeaderValue(150, 200);
+
+        var response = await _fixture.Client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.RequestedRangeNotSatisfiable, response.StatusCode);
+        Assert.Equal("bytes */100", response.Content.Headers.ContentRange?.ToString());
+    }
+
+    /// <summary>情境 6：0 bytes 的內容 + 無 Range → 200 且 Content-Length: 0（既有保護沒被破壞）。</summary>
+    [Fact]
+    public async Task GetContent_EncryptedBlob_ZeroLengthContent_WithoutRange_Returns200WithZeroContentLength()
+    {
+        var plaintext = Array.Empty<byte>();
+        var contentId = await SeedEncryptedContentAsync(plaintext);
+
+        var response = await _fixture.Client.GetAsync($"/api/messages/{contentId}/content");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(0, response.Content.Headers.ContentLength);
+        Assert.Empty(await response.Content.ReadAsByteArrayAsync());
+    }
 }

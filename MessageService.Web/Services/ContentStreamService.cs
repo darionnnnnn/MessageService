@@ -3,15 +3,19 @@ using System.Data.Common;
 using MessageService.Data;
 using MessageService.Data.Crypto;
 using MessageService.Models;
+using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 
 namespace MessageService.Web.Services;
 
 /// <summary>
-/// 把 MessageContents.Content（varbinary(max)）串流給 HTTP 回應，支援 Range 請求（影片/語音拖拉進度）。
-/// 不用 EF 把整個 blob 讀進記憶體：Range 請求直接在 SQL 端用 SUBSTRING/substr 切出所需片段，
-/// 只讀取實際要傳送的位元組；ADO.NET 的 blob stream 是 forward-only，不支援 Seek，
-/// 所以「拖進度」是靠瀏覽器對同一個 URL 發出新的 Range 請求，而非在單一連線內做 Seek。
+/// 把 MessageContents.Content（varbinary(max)／BLOB）串流給 HTTP 回應，支援 Range 請求（影片/語音拖拉進度）。
+/// 不用 EF 把整個 blob 讀進記憶體。
+/// 在 SQLite 下，Range 請求不能使用 SQL 運算式 substr，因為 substr 屬於純量運算式，
+/// SQLite 必須先將整個 blob 欄位物化至記憶體後才能切片；因此 SQLite 改採 Microsoft.Data.Sqlite.SqliteBlob
+/// 原生增量讀取，以 Seek() 搭配區間複製只讀取實際需要的位元組，避免記憶體暴增。
+/// 而 SQL Server 的 SUBSTRING 原生即支援部分讀取，不會物化整份 blob，因此維持既有的 ADO.NET 串流查詢。
+/// 兩種 provider 都不會在單一連線內做 Seek，瀏覽器的拖曳進度條是透過發出新的 Range 請求來達成。
 ///
 /// 加密啟用時 blob 存的是分塊密文（格式見 ChunkedBlobCipher，MSE1／MSE2 兩種都認，
 /// DbContentWorkSource 寫入）——讀取端一律先偷看前 16 bytes 表頭判斷是不是這個格式
@@ -205,19 +209,31 @@ public class ContentStreamService(MessageDbContext dbContext, FieldCipher cipher
                 return ContentStreamResult.Handled;
             }
 
+            if (isSqlite && isPartial)
+            {
+                // SQLite 的 substr 是 SQL 純量運算式，執行時必須先把整個 blob 物化到記憶體才能進行切片；
+                // 當檔案較大（例如數百 MB 的影片或音訊）且使用者拖拉進度條時，每一次 Range 請求都會把整份 blob 物化進記憶體再丟掉絕大部分。
+                // 改用 Microsoft.Data.Sqlite.SqliteBlob 進行原生增量讀取，以 Seek() 搭配 CopyRangeAsync()，
+                // 只讀取實際請求的區間，不會物化整個 blob。
+                // 註：SQL Server 的 SUBSTRING 原生支援局部讀取，無此物化問題，因此維持既有的 ADO.NET 串流查詢。
+                await using var blob = new SqliteBlob((SqliteConnection)connection, "MessageContents", "Content", messageContentId, readOnly: true);
+                blob.Seek(start.Value, SeekOrigin.Begin);
+                await CopyRangeAsync(blob, response.Body, length, cancellationToken);
+                return ContentStreamResult.Handled;
+            }
+
             await using var command = connection.CreateCommand();
             if (isPartial)
             {
-                command.CommandText = isSqlite
-                    ? "SELECT substr(Content, @start, @length) FROM MessageContents WHERE Id = @id"
-                    : "SELECT SUBSTRING(Content, @start, @length) FROM MessageContents WHERE Id = @id";
-                AddParameter(command, "@start", start.Value + 1); // SUBSTRING/substr 都是 1-indexed
+                command.CommandText = "SELECT SUBSTRING(Content, @start, @length) FROM MessageContents WHERE Id = @id";
+                AddParameter(command, "@start", start.Value + 1); // SUBSTRING 是 1-indexed
                 AddParameter(command, "@length", length);
             }
             else
             {
-                // 沒有 Range 就是要整份——直接 SELECT 原始欄位，不必再繞去 SUBSTRING/substr 切出
-                // 「從頭到尾」這個等於整份的區間，省掉 SQL Server 端多一次的整份複製
+                // 沒有 Range 就是要整份——直接 SELECT 原始欄位，不必再繞去 SUBSTRING 切出
+                // 「從頭到尾」這個等於整份的區間，省掉 SQL Server 端多一次的整份複製。
+                // SQLite 非 Range 路徑透過 reader.GetStream(0) 本身即為增量串流，亦無物化問題。
                 command.CommandText = "SELECT Content FROM MessageContents WHERE Id = @id";
             }
             AddParameter(command, "@id", messageContentId);
@@ -242,10 +258,10 @@ public class ContentStreamService(MessageDbContext dbContext, FieldCipher cipher
     }
 
     /// <summary>只把使用者實際要的明文區間 [start, start+length) 涵蓋到的 chunk 解密、寫進
-    /// response——用一次 SUBSTRING/substr 把這些 chunk 的密文連續段一次撈回來（chunk 在磁碟上
-    /// 是緊接著排列的，見 ChunkedBlobCipher.ChunkByteRangeOnDisk），透過 SequentialAccess 的
-    /// DbDataReader 串流讀取，一次只解一個 chunk（至多 1MB）進記憶體，不管請求範圍多大都
-    /// 不會整份解密進記憶體。</summary>
+    /// response。SQLite 下使用 SqliteBlob 原生增量串流並 Seek 到 spanStart；SQL Server 下
+    /// 則用一次 SUBSTRING 把這些 chunk 的密文連續段一次撈回來（chunk 在磁碟上是緊接著排列的，
+    /// 見 ChunkedBlobCipher.ChunkByteRangeOnDisk），透過 SequentialAccess 的 DbDataReader 串流讀取。
+    /// 兩者皆一次只解一個 chunk（至多 1MB）進記憶體，不管請求範圍多大都不會整份解密進記憶體。</summary>
     private async Task StreamEncryptedContentAsync(
         DbConnection connection, bool isSqlite, long messageContentId,
         long start, long length, int chunkSize, long totalPlaintextLength,
@@ -264,45 +280,94 @@ public class ContentStreamService(MessageDbContext dbContext, FieldCipher cipher
         var (lastChunkOffset, lastChunkOnDiskLength) = ChunkedBlobCipher.ChunkByteRangeOnDisk(lastChunk, totalPlaintextLength, chunkSize);
         var spanLength = lastChunkOffset + lastChunkOnDiskLength - spanStart;
 
-        await using var command = connection.CreateCommand();
-        command.CommandText = isSqlite
-            ? "SELECT substr(Content, @start, @length) FROM MessageContents WHERE Id = @id"
-            : "SELECT SUBSTRING(Content, @start, @length) FROM MessageContents WHERE Id = @id";
-        AddParameter(command, "@id", messageContentId);
-        AddParameter(command, "@start", spanStart + 1); // SUBSTRING/substr 都是 1-indexed
-        AddParameter(command, "@length", spanLength);
+        Stream onDiskStream;
+        await using var sqliteBlob = isSqlite
+            ? new SqliteBlob((SqliteConnection)connection, "MessageContents", "Content", messageContentId, readOnly: true)
+            : null;
+        await using var command = isSqlite ? null : connection.CreateCommand();
+        DbDataReader? reader = null;
 
-        await using var reader = await command.ExecuteReaderAsync(
-            CommandBehavior.SequentialAccess | CommandBehavior.SingleRow, cancellationToken);
-        if (!await reader.ReadAsync(cancellationToken))
+        if (isSqlite)
         {
-            return;
+            sqliteBlob!.Seek(spanStart, SeekOrigin.Begin);
+            onDiskStream = sqliteBlob;
         }
-
-        await using var onDiskStream = reader.GetStream(0);
-        var chunkBuffer = new byte[ChunkedBlobCipher.ChunkOnDiskOverhead + chunkSize];
-        var plaintextCursor = firstChunk * (long)chunkSize;
-
-        for (var chunkIndex = firstChunk; chunkIndex <= lastChunk; chunkIndex++)
+        else
         {
-            var (_, onDiskChunkLength) = ChunkedBlobCipher.ChunkByteRangeOnDisk(chunkIndex, totalPlaintextLength, chunkSize);
-            await ReadExactlyAsync(onDiskStream, chunkBuffer.AsMemory(0, onDiskChunkLength), cancellationToken);
-            var plaintextChunk = cipher.DecryptChunk(chunkBuffer.AsSpan(0, onDiskChunkLength));
+            command!.CommandText = "SELECT SUBSTRING(Content, @start, @length) FROM MessageContents WHERE Id = @id";
+            AddParameter(command, "@id", messageContentId);
+            AddParameter(command, "@start", spanStart + 1); // SUBSTRING 是 1-indexed
+            AddParameter(command, "@length", spanLength);
 
-            // 這塊明文對應到整份檔案的 [chunkStart, chunkEnd)，跟使用者實際要的
-            // [start, start+length) 取交集，只把交集部分寫進 response（頭尾兩塊通常只需要部分）
-            var chunkStart = plaintextCursor;
-            var chunkEnd = plaintextCursor + plaintextChunk.Length;
-            var wantStart = Math.Max(chunkStart, start);
-            var wantEnd = Math.Min(chunkEnd, start + length);
-            if (wantEnd > wantStart)
+            reader = await command.ExecuteReaderAsync(
+                CommandBehavior.SequentialAccess | CommandBehavior.SingleRow, cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken))
             {
-                var sliceOffset = (int)(wantStart - chunkStart);
-                var sliceLength = (int)(wantEnd - wantStart);
-                await response.Body.WriteAsync(plaintextChunk.AsMemory(sliceOffset, sliceLength), cancellationToken);
+                // 這個提早 return 在下面的 try 之外，finally 不會執行，所以要自己收掉 reader
+                await reader.DisposeAsync();
+                return;
             }
 
-            plaintextCursor = chunkEnd;
+            onDiskStream = reader.GetStream(0);
+        }
+
+        try
+        {
+            var chunkBuffer = new byte[ChunkedBlobCipher.ChunkOnDiskOverhead + chunkSize];
+            var plaintextCursor = firstChunk * (long)chunkSize;
+
+            for (var chunkIndex = firstChunk; chunkIndex <= lastChunk; chunkIndex++)
+            {
+                var (_, onDiskChunkLength) = ChunkedBlobCipher.ChunkByteRangeOnDisk(chunkIndex, totalPlaintextLength, chunkSize);
+                await ReadExactlyAsync(onDiskStream, chunkBuffer.AsMemory(0, onDiskChunkLength), cancellationToken);
+                var plaintextChunk = cipher.DecryptChunk(chunkBuffer.AsSpan(0, onDiskChunkLength));
+
+                // 這塊明文對應到整份檔案的 [chunkStart, chunkEnd)，跟使用者實際要的
+                // [start, start+length) 取交集，只把交集部分寫進 response（頭尾兩塊通常只需要部分）
+                var chunkStart = plaintextCursor;
+                var chunkEnd = plaintextCursor + plaintextChunk.Length;
+                var wantStart = Math.Max(chunkStart, start);
+                var wantEnd = Math.Min(chunkEnd, start + length);
+                if (wantEnd > wantStart)
+                {
+                    var sliceOffset = (int)(wantStart - chunkStart);
+                    var sliceLength = (int)(wantEnd - wantStart);
+                    await response.Body.WriteAsync(plaintextChunk.AsMemory(sliceOffset, sliceLength), cancellationToken);
+                }
+
+                plaintextCursor = chunkEnd;
+            }
+        }
+        finally
+        {
+            // SQLite 那條的 onDiskStream 就是 sqliteBlob，已由上面的 await using 收掉；
+            // SQL Server 這條的 onDiskStream 是 reader 開出來的，reader 之外要自己收
+            if (reader is not null)
+            {
+                await onDiskStream.DisposeAsync();
+                await reader.DisposeAsync();
+            }
+        }
+    }
+
+    /// <summary>把來源串流的前 length 個位元組複製到目的地串流。不能直接用 Stream.CopyToAsync，
+    /// 因為 CopyToAsync 會一路複製到串流結尾，Range 請求會多送出區間之外的資料。</summary>
+    private static async Task CopyRangeAsync(
+        Stream source, Stream destination, long length, CancellationToken cancellationToken)
+    {
+        var buffer = new byte[BufferSize];
+        var remaining = length;
+        while (remaining > 0)
+        {
+            var toRead = (int)Math.Min(buffer.Length, remaining);
+            var read = await source.ReadAsync(buffer.AsMemory(0, toRead), cancellationToken);
+            if (read == 0)
+            {
+                break;
+            }
+
+            await destination.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
+            remaining -= read;
         }
     }
 

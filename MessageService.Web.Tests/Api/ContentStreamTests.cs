@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Headers;
+using MessageService.Data.Crypto;
 using MessageService.Models;
 using MessageService.Web.Tests.TestSupport;
 using Microsoft.EntityFrameworkCore;
@@ -330,6 +331,186 @@ public class ContentStreamTests : IDisposable
         var response = await _fixture.Client.SendAsync(request);
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(bytes, await response.Content.ReadAsByteArrayAsync());
+    }
+
+    private static byte[] GeneratePatternBytes(int length)
+    {
+        var result = new byte[length];
+        for (var i = 0; i < length; i++)
+        {
+            result[i] = (byte)(i % 251);
+        }
+        return result;
+    }
+
+    // === SQLite Blob / Range 請求規格測試（明文路徑）===
+
+    /// <summary>情境 1：Range: bytes=0-（從頭到尾）→ 206，內容等於完整原始位元組。</summary>
+    [Fact]
+    public async Task GetContent_RangeFromZeroWithoutEnd_Returns206WithFullBody()
+    {
+        var bytes = GeneratePatternBytes(500);
+        var contentId = await SeedCompletedContentAsync(bytes);
+
+        var request = new HttpRequestMessage(HttpMethod.Get, $"/api/messages/{contentId}/content");
+        request.Headers.Range = new RangeHeaderValue(0, null);
+
+        var response = await _fixture.Client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.PartialContent, response.StatusCode);
+        Assert.Equal("bytes 0-499/500", response.Content.Headers.ContentRange?.ToString());
+        Assert.Equal(500, response.Content.Headers.ContentLength);
+        var body = await response.Content.ReadAsByteArrayAsync();
+        Assert.Equal(bytes, body);
+    }
+
+    /// <summary>情境 2：Range: bytes=N-（N 在檔案中段）→ 206，內容等於原始位元組從 N 到結尾那一段。</summary>
+    [Fact]
+    public async Task GetContent_RangeFromMiddleWithoutEnd_Returns206WithSliceToEnd()
+    {
+        var bytes = GeneratePatternBytes(500);
+        var contentId = await SeedCompletedContentAsync(bytes);
+
+        var request = new HttpRequestMessage(HttpMethod.Get, $"/api/messages/{contentId}/content");
+        request.Headers.Range = new RangeHeaderValue(150, null);
+
+        var response = await _fixture.Client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.PartialContent, response.StatusCode);
+        Assert.Equal("bytes 150-499/500", response.Content.Headers.ContentRange?.ToString());
+        Assert.Equal(350, response.Content.Headers.ContentLength);
+        var body = await response.Content.ReadAsByteArrayAsync();
+        Assert.Equal(bytes.Skip(150).ToArray(), body);
+    }
+
+    /// <summary>情境 3：Range: bytes=N-M（中段的有限區間）→ 206，內容等於原始位元組的 [N, M]，
+    /// 且 Content-Range 標頭正確、Content-Length 等於 M-N+1。</summary>
+    [Fact]
+    public async Task GetContent_RangeMiddleBoundedSlice_Returns206WithExactSliceAndHeaders()
+    {
+        var bytes = GeneratePatternBytes(500);
+        var contentId = await SeedCompletedContentAsync(bytes);
+
+        var request = new HttpRequestMessage(HttpMethod.Get, $"/api/messages/{contentId}/content");
+        request.Headers.Range = new RangeHeaderValue(100, 299);
+
+        var response = await _fixture.Client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.PartialContent, response.StatusCode);
+        Assert.Equal("bytes 100-299/500", response.Content.Headers.ContentRange?.ToString());
+        Assert.Equal(200, response.Content.Headers.ContentLength);
+        var body = await response.Content.ReadAsByteArrayAsync();
+        Assert.Equal(bytes.Skip(100).Take(200).ToArray(), body);
+    }
+
+    /// <summary>情境 4：跨 chunk 邊界的區間：內容長度大於 ChunkedBlobCipher.ChunkSize，
+    /// Range 區間跨過 chunk 邊界，斷言內容正確。</summary>
+    [Fact]
+    public async Task GetContent_RangeSpanningChunkBoundary_Returns206WithCorrectData()
+    {
+        var totalLength = ChunkedBlobCipher.ChunkSize + 4000;
+        var bytes = GeneratePatternBytes(totalLength);
+        var contentId = await SeedCompletedContentAsync(bytes);
+
+        var start = ChunkedBlobCipher.ChunkSize - 500;
+        var end = ChunkedBlobCipher.ChunkSize + 500;
+        var request = new HttpRequestMessage(HttpMethod.Get, $"/api/messages/{contentId}/content");
+        request.Headers.Range = new RangeHeaderValue(start, end);
+
+        var response = await _fixture.Client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.PartialContent, response.StatusCode);
+        Assert.Equal($"bytes {start}-{end}/{totalLength}", response.Content.Headers.ContentRange?.ToString());
+        Assert.Equal(end - start + 1, response.Content.Headers.ContentLength);
+        var body = await response.Content.ReadAsByteArrayAsync();
+        Assert.Equal(bytes.Skip(start).Take(end - start + 1).ToArray(), body);
+    }
+
+    /// <summary>情境 5：越界 Range（start 大於等於總長度）→ 416。</summary>
+    [Fact]
+    public async Task GetContent_RangeStartEqualToTotalLength_Returns416()
+    {
+        var bytes = GeneratePatternBytes(100);
+        var contentId = await SeedCompletedContentAsync(bytes);
+
+        var request = new HttpRequestMessage(HttpMethod.Get, $"/api/messages/{contentId}/content");
+        request.Headers.Range = new RangeHeaderValue(100, null);
+
+        var response = await _fixture.Client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.RequestedRangeNotSatisfiable, response.StatusCode);
+        Assert.Equal("bytes */100", response.Content.Headers.ContentRange?.ToString());
+    }
+
+    [Fact]
+    public async Task GetContent_RangeStartBeyondTotalLength_Returns416()
+    {
+        var bytes = GeneratePatternBytes(100);
+        var contentId = await SeedCompletedContentAsync(bytes);
+
+        var request = new HttpRequestMessage(HttpMethod.Get, $"/api/messages/{contentId}/content");
+        request.Headers.Range = new RangeHeaderValue(150, 200);
+
+        var response = await _fixture.Client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.RequestedRangeNotSatisfiable, response.StatusCode);
+        Assert.Equal("bytes */100", response.Content.Headers.ContentRange?.ToString());
+    }
+
+    /// <summary>情境 6：0 bytes 的內容 + 無 Range → 200 且 Content-Length: 0（既有保護沒被破壞）。</summary>
+    [Fact]
+    public async Task GetContent_ZeroLengthContent_WithoutRange_Returns200WithZeroContentLength()
+    {
+        var bytes = Array.Empty<byte>();
+        var contentId = await SeedCompletedContentAsync(bytes);
+
+        var response = await _fixture.Client.GetAsync($"/api/messages/{contentId}/content");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(0, response.Content.Headers.ContentLength);
+        Assert.Empty(await response.Content.ReadAsByteArrayAsync());
+    }
+
+    /// <summary>內容型別涵蓋：對 image/jpeg、video/mp4、audio/mpeg 三種 ContentType，
+    /// 各驗一次帶 Range 的請求回 206 且內容正確、Content-Disposition 為 inline。</summary>
+    [Theory]
+    [InlineData("image/jpeg")]
+    [InlineData("video/mp4")]
+    [InlineData("audio/mpeg")]
+    public async Task GetContent_RangeRequest_ForInlineMediaTypes_Returns206WithCorrectSliceAndInlineDisposition(string contentType)
+    {
+        var bytes = GeneratePatternBytes(300);
+        var contentId = await SeedCompletedContentAsync(bytes, contentType, "media.file");
+
+        var request = new HttpRequestMessage(HttpMethod.Get, $"/api/messages/{contentId}/content");
+        request.Headers.Range = new RangeHeaderValue(50, 149);
+
+        var response = await _fixture.Client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.PartialContent, response.StatusCode);
+        Assert.Equal(contentType, response.Content.Headers.ContentType?.MediaType);
+        Assert.Equal("inline", response.Content.Headers.ContentDisposition?.DispositionType);
+        Assert.Equal("bytes 50-149/300", response.Content.Headers.ContentRange?.ToString());
+        Assert.Equal(100, response.Content.Headers.ContentLength);
+        var body = await response.Content.ReadAsByteArrayAsync();
+        Assert.Equal(bytes.Skip(50).Take(100).ToArray(), body);
+    }
+
+    /// <summary>內容型別涵蓋：對 file 這種不在 inline 白名單的型別（例如 application/pdf），
+    /// 驗證回應是 Content-Disposition: attachment 且內容完整。</summary>
+    [Fact]
+    public async Task GetContent_NonInlineFileType_ReturnsAttachmentWithFullContent()
+    {
+        var bytes = GeneratePatternBytes(200);
+        var contentId = await SeedCompletedContentAsync(bytes, "application/pdf", "document.pdf");
+
+        var response = await _fixture.Client.GetAsync($"/api/messages/{contentId}/content");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("application/octet-stream", response.Content.Headers.ContentType?.MediaType);
+        Assert.Equal("attachment", response.Content.Headers.ContentDisposition?.DispositionType);
+        Assert.Equal("document.pdf", response.Content.Headers.ContentDisposition?.FileName);
         Assert.Equal(bytes, await response.Content.ReadAsByteArrayAsync());
     }
 }
