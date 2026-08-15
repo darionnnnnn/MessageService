@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using MessageService.Options;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
 namespace MessageService.Services;
@@ -15,10 +16,24 @@ public class ProfileRefreshService(
 {
     private readonly ProfileCacheOptions _options = options.Value;
 
-    /// <summary>程序內失敗冷卻：group 用 GroupId 當鍵、member 用 "GroupId:UserId"，見
-    /// ProfileCacheOptions.FailureRetryAfter 的說明。單例 BackgroundService 的欄位，
-    /// 整個服務生命週期共用一份，重啟就重置。</summary>
-    private readonly ConcurrentDictionary<string, DateTimeOffset> _failureCooldowns = new();
+    /// <summary>清理過期抑制項目的門檻：當項目數超過此值時進行清理。</summary>
+    private const int CleanupThreshold = 1000;
+
+    /// <summary>成功或查無過期時的抑制窗口：固定為 5 分鐘。
+    /// 為什麼是 5 分鐘而不是 ProfileCacheOptions.RefreshAfter？
+    /// RefreshAfter 預設是 7 天。GetStalenessAsync 回報「不 stale」，只代表該筆資料的
+    /// UpdatedAt 落在 7 天內——可能是 6 天前更新的，再過 1 天就該刷新了。如果因為
+    /// 「這次查到不 stale」就記成「未來 7 天都不用查」，那筆資料會被延後將近一整個週期才刷新，
+    /// 等於把 TTL 悄悄變成最長兩倍。
+    /// 5 分鐘的抑制窗口則完全避開這個問題：真正要解決的痛點是「同一個人連發一串訊息，
+    /// 每則都查一次」的秒級到分鐘級突發；用 5 分鐘就能吃掉絕大部分重複，
+    /// 而對 7 天的刷新週期毫無影響（最多延後 5 分鐘）。</summary>
+    private static readonly TimeSpan SuppressWindow = TimeSpan.FromMinutes(5);
+
+    /// <summary>程序內抑制表：group 用 GroupId 當鍵、member 用 "GroupId:UserId"。
+    /// 包含打 LINE API 失敗後的退避冷卻（FailureRetryAfter），以及查詢確認不 stale 或 upsert 成功後的抑制窗口（SuppressWindow）。
+    /// 在抑制時間截止之前完全不需要重複查詢或處理。單例 BackgroundService 的欄位，整個服務生命週期共用一份，重啟就重置。</summary>
+    private readonly ConcurrentDictionary<string, DateTimeOffset> _suppressUntil = new();
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -38,6 +53,15 @@ public class ProfileRefreshService(
 
     public async Task ProcessAsync(ProfileRefreshTask task, CancellationToken cancellationToken)
     {
+        var groupSuppressed = IsSuppressed(task.GroupId);
+        var memberSuppressed = task.UserId is null || IsSuppressed(MemberKey(task.GroupId, task.UserId));
+
+        // 若 group 與 member 皆在抑制窗口內，直接短路返回，完全不建 scope 也省掉 staleness 查詢（尤其是 Edge 模式下的 HTTP round-trip）
+        if (groupSuppressed && memberSuppressed)
+        {
+            return;
+        }
+
         using var scope = scopeFactory.CreateScope();
         var profileStore = scope.ServiceProvider.GetRequiredService<IProfileStore>();
         var profileClient = scope.ServiceProvider.GetRequiredService<ILineProfileClient>();
@@ -47,24 +71,60 @@ public class ProfileRefreshService(
         // 這也是 IProfileStore 把 staleness 跟 upsert 拆成兩支方法的理由
         var staleness = await profileStore.GetStalenessAsync(task.GroupId, task.UserId, cutoff, cancellationToken);
 
-        if (staleness.GroupStale && !IsInCooldown(task.GroupId))
+        if (!groupSuppressed)
         {
-            await RefreshGroupAsync(profileStore, profileClient, task.GroupId, staleness.GroupPictureFetchedUrl, staleness.HasGroupPicture, cancellationToken);
+            if (staleness.GroupStale)
+            {
+                await RefreshGroupAsync(profileStore, profileClient, task.GroupId, staleness.GroupPictureFetchedUrl, staleness.HasGroupPicture, cancellationToken);
+            }
+            else
+            {
+                Suppress(task.GroupId, DateTimeOffset.UtcNow + SuppressWindow);
+            }
         }
 
-        if (task.UserId is not null && staleness.MemberStale && !IsInCooldown(MemberCooldownKey(task.GroupId, task.UserId)))
+        if (task.UserId is not null && !memberSuppressed)
         {
-            await RefreshMemberAsync(profileStore, profileClient, task.GroupId, task.UserId, staleness.MemberPictureFetchedUrl, staleness.HasMemberPicture, cancellationToken);
+            var memberKey = MemberKey(task.GroupId, task.UserId);
+            if (staleness.MemberStale)
+            {
+                await RefreshMemberAsync(profileStore, profileClient, task.GroupId, task.UserId, staleness.MemberPictureFetchedUrl, staleness.HasMemberPicture, cancellationToken);
+            }
+            else
+            {
+                Suppress(memberKey, DateTimeOffset.UtcNow + SuppressWindow);
+            }
         }
     }
 
-    private bool IsInCooldown(string key) =>
-        _failureCooldowns.TryGetValue(key, out var until) && until > DateTimeOffset.UtcNow;
+    private bool IsSuppressed(string key) =>
+        _suppressUntil.TryGetValue(key, out var until) && until > DateTimeOffset.UtcNow;
+
+    private void Suppress(string key, DateTimeOffset until)
+    {
+        _suppressUntil[key] = until;
+        if (_suppressUntil.Count > CleanupThreshold)
+        {
+            CleanupExpiredEntries();
+        }
+    }
 
     private void RecordFailure(string key) =>
-        _failureCooldowns[key] = DateTimeOffset.UtcNow + _options.FailureRetryAfter;
+        Suppress(key, DateTimeOffset.UtcNow + _options.FailureRetryAfter);
 
-    private static string MemberCooldownKey(string groupId, string userId) => $"{groupId}:{userId}";
+    private void CleanupExpiredEntries()
+    {
+        var now = DateTimeOffset.UtcNow;
+        foreach (var pair in _suppressUntil)
+        {
+            if (pair.Value <= now)
+            {
+                ((ICollection<KeyValuePair<string, DateTimeOffset>>)_suppressUntil).Remove(pair);
+            }
+        }
+    }
+
+    private static string MemberKey(string groupId, string userId) => $"{groupId}:{userId}";
 
     // 例外也要記冷卻，不能只記「回 null」那條路。LineProfileClient 只有 HTTP 404 會回 null，
     // 其餘（429 rate limit、5xx、連線逾時）一律拋例外——而那些正是負向快取想擋的「暫時性故障」。
@@ -93,8 +153,8 @@ public class ProfileRefreshService(
             return;
         }
 
-        _failureCooldowns.TryRemove(groupId, out _);
         await profileStore.UpsertGroupAsync(groupId, summary, cancellationToken);
+        Suppress(groupId, DateTimeOffset.UtcNow + SuppressWindow);
     }
 
     private async Task RefreshMemberAsync(
@@ -107,7 +167,7 @@ public class ProfileRefreshService(
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            RecordFailure(MemberCooldownKey(groupId, userId));
+            RecordFailure(MemberKey(groupId, userId));
             logger.LogWarning(ex, "Member profile lookup failed for group {GroupId} user {UserId}; backing off", groupId, userId);
             return;
         }
@@ -115,11 +175,11 @@ public class ProfileRefreshService(
         if (profile is null)
         {
             logger.LogWarning("Member profile unavailable for group {GroupId} user {UserId}", groupId, userId);
-            RecordFailure(MemberCooldownKey(groupId, userId));
+            RecordFailure(MemberKey(groupId, userId));
             return;
         }
 
-        _failureCooldowns.TryRemove(MemberCooldownKey(groupId, userId), out _);
         await profileStore.UpsertMemberAsync(groupId, userId, profile, cancellationToken);
+        Suppress(MemberKey(groupId, userId), DateTimeOffset.UtcNow + SuppressWindow);
     }
 }

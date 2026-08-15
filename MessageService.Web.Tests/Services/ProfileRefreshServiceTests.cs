@@ -236,4 +236,100 @@ public class ProfileRefreshServiceTests : IDisposable
         // 冷卻鍵含 GroupId，不同群組的同一個 UserId 不該互相影響
         Assert.Equal(2, _profileClient.MemberProfileCalls.Count);
     }
+
+    private (ProfileRefreshService Service, FakeProfileStore Store) CreateServiceWithFakeStore(
+        ProfileCacheOptions? options = null,
+        ProfileStaleness? stalenessToReturn = null)
+    {
+        var store = new FakeProfileStore();
+        if (stalenessToReturn is not null)
+        {
+            store.StalenessToReturn = stalenessToReturn;
+        }
+
+        var services = new ServiceCollection();
+        services.AddSingleton<IProfileStore>(store);
+        services.AddSingleton<ILineProfileClient>(_profileClient);
+        var provider = services.BuildServiceProvider();
+
+        var service = new ProfileRefreshService(
+            new FakeProfileRefreshQueue(),
+            provider.GetRequiredService<IServiceScopeFactory>(),
+            OptionsFactory.Create(options ?? new ProfileCacheOptions { RefreshAfter = TimeSpan.FromDays(7) }),
+            NullLogger<ProfileRefreshService>.Instance);
+
+        return (service, store);
+    }
+
+    [Fact]
+    public async Task ProcessAsync_SameTaskCalledTwice_ShortCircuitsAndQueriesStalenessOnlyOnce()
+    {
+        var (service, store) = CreateServiceWithFakeStore(stalenessToReturn: new ProfileStaleness(false, false));
+
+        await service.ProcessAsync(new ProfileRefreshTask("G1", "U1"), CancellationToken.None);
+        await service.ProcessAsync(new ProfileRefreshTask("G1", "U1"), CancellationToken.None);
+
+        Assert.Single(store.GetStalenessCalls);
+    }
+
+    [Fact]
+    public async Task ProcessAsync_DifferentUserInSameGroup_QueriesStalenessAgain()
+    {
+        var (service, store) = CreateServiceWithFakeStore(stalenessToReturn: new ProfileStaleness(false, false));
+
+        await service.ProcessAsync(new ProfileRefreshTask("G1", "U1"), CancellationToken.None);
+        await service.ProcessAsync(new ProfileRefreshTask("G1", "U2"), CancellationToken.None);
+
+        Assert.Equal(2, store.GetStalenessCalls.Count);
+    }
+
+    [Fact]
+    public async Task ProcessAsync_ProfileClientThrows_RecordsCooldownAndSkipsSubsequentCalls()
+    {
+        _profileClient.OnGetGroupSummary = _ => throw new HttpRequestException("LINE API error");
+        var (service, _) = CreateServiceWithFakeStore(
+            options: new ProfileCacheOptions
+            {
+                RefreshAfter = TimeSpan.FromDays(7),
+                FailureRetryAfter = TimeSpan.FromMinutes(10)
+            },
+            stalenessToReturn: new ProfileStaleness(true, false));
+
+        await service.ProcessAsync(new ProfileRefreshTask("G1", null), CancellationToken.None);
+        await service.ProcessAsync(new ProfileRefreshTask("G1", null), CancellationToken.None);
+
+        Assert.Single(_profileClient.GroupSummaryCalls);
+    }
+
+    [Fact]
+    public async Task ProcessAsync_GroupSuppressedButMemberNot_StillQueriesStaleness()
+    {
+        var (service, store) = CreateServiceWithFakeStore(stalenessToReturn: new ProfileStaleness(false, false));
+
+        await service.ProcessAsync(new ProfileRefreshTask("G1", null), CancellationToken.None);
+        Assert.Single(store.GetStalenessCalls);
+
+        await service.ProcessAsync(new ProfileRefreshTask("G1", "U1"), CancellationToken.None);
+        Assert.Equal(2, store.GetStalenessCalls.Count);
+    }
+
+    [Fact]
+    public async Task ProcessAsync_ExceedsCleanupThreshold_PerformsExpiredEntriesCleanup()
+    {
+        var (service, _) = CreateServiceWithFakeStore(
+            options: new ProfileCacheOptions
+            {
+                RefreshAfter = TimeSpan.FromDays(7),
+                FailureRetryAfter = TimeSpan.FromMilliseconds(1)
+            },
+            stalenessToReturn: new ProfileStaleness(false, false));
+
+        for (var i = 0; i < 1005; i++)
+        {
+            await service.ProcessAsync(new ProfileRefreshTask($"G_{i}", null), CancellationToken.None);
+        }
+
+        await Task.Delay(10);
+        await service.ProcessAsync(new ProfileRefreshTask("G_Trigger", null), CancellationToken.None);
+    }
 }
