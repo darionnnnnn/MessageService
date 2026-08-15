@@ -12,6 +12,7 @@
 | `CONSOLIDATION-PLAN.md` | 2026-08-13 部署收斂輪：兩專案合併成 `MessageService.Web`、模式改名 `AllInOne`/`Edge`/`Core`/`Viewer`、schema 改用 `Database.Migrate()` 的規劃與執行紀錄 |
 | `POST-CONSOLIDATION-REVIEW-PLAN.md` | 部署收斂後的外部審查回饋輪（P0 批次 ingest bug、心跳監測、加密信封 key id 等） |
 | `REVIEW-FEEDBACK-2-PLAN.md` | 部署收斂第二輪審查回饋（SQLite 路徑修正、provider 推導與救場、心跳強化等） |
+| `REVIEW-FEEDBACK-3-PLAN.md` | 第三輪審查回饋：效能與體驗 16 項。含頭貼快取不改 `max-age` 的理由、SQLite Range 改用 `SqliteBlob`、頭貼刷新抑制窗口為何是 5 分鐘、以及全文檢索索引對中文不適用的實測數據 |
 | `DEPLOYMENT-MODES-DECISIONS.md` | `docs/DEPLOYMENT-MODES.md` 移出的設計決策理由、雙行程端到端驗證紀錄、原始建置分期 |
 | `WEB-UI-DESIGN-NOTES.md` | 檢視端 UI 歷次改版的設計決策理由、放棄的替代方案、已知限制 |
 

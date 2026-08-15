@@ -327,6 +327,7 @@ Edge 端的 outbox 排空預設會打 Core 的批次 ingest 端點（`POST /api/
 ## Part H：部署後驗收清單
 
 - [ ] 站台啟動無錯誤（看 `logs/messageservice-{日期}.log`）
+- [ ] `GET /healthz` 與 `GET /healthz/ready` 都回 200（見下方「健康檢查端點」）
 - [ ] LINE Console 的 Webhook **Verify** 顯示 Success
 - [ ] Bot 加入測試群組後發一則文字，Edge／AllInOne 的 log 出現 `Saved text message`
 - [ ] 檢視端網頁看得到剛才那則訊息
@@ -354,6 +355,25 @@ Edge 端的 outbox 排空預設會打 Core 的批次 ingest 端點（`POST /api/
 - [ ] （多台直連資料庫）設定頁「主機狀態」區塊裡各主機的「加密金鑰指紋」欄位一致
       （或都是 `—`）——不一致的話代表某台的 `Encryption:Key` 設定跟其他台不同，
       見 [ENCRYPTION.md](ENCRYPTION.md) 的「金鑰指紋」一節
+
+---
+
+## 健康檢查端點
+
+給 IIS、負載平衡器與監控系統用的兩支端點。**所有部署模式都有**（包含沒有 UI 的 `Edge`），
+而且**不受 `Viewer:AllowedClientIps` 白名單限制**——監控來源的 IP 通常不在辦公室 LAN 的
+白名單裡。回應一律是空 body，不帶版本、主機名或任何設定值。
+
+| 端點 | 語意 | 回應 |
+|---|---|---|
+| `GET /healthz` | 存活探針。只證明行程還在跑、還能接請求，不碰資料庫 | 恆 200 |
+| `GET /healthz/ready` | 就緒探針。有資料庫的模式會 ping 一次資料庫 | 可連線 200；連不上 503 |
+
+`Edge` 模式沒有本機資料庫，`/healthz/ready` 直接回 200——那台主機的「就緒」本來就不依賴
+資料庫，統一回 200 才能讓監控用同一份設定涵蓋所有模式。
+
+監控設定建議：用 `/healthz` 判斷行程存活（失敗就重啟站台），用 `/healthz/ready` 判斷是否
+能承接流量（失敗通常是資料庫或連線字串的問題，重啟站台無濟於事）。
 
 ---
 
@@ -410,6 +430,36 @@ Edge 端的 outbox 排空預設會打 Core 的批次 ingest 端點（`POST /api/
 - 新環境上線時做一次「從備份完整還原」的演練，確認流程本身可行、耗時多久
 - 之後每半年到一年重複一次，尤其是資料量成長之後——還原耗時會隨資料量增加，
   過時的耗時估計會讓真正需要還原時的 RTO（復原時間目標）評估失準
+
+---
+
+## 保留期清除與磁碟空間（SQLite）
+
+`RetentionCleanupService` 每天依 `ViewerSettings.RetentionDays`（預設 3 年）刪除逾期訊息，
+連帶 CASCADE 帶走媒體內容。**SQLite 刪資料只會把 page 標成 free，資料庫檔案不會縮小**——
+釋出的空間會被之後寫入的資料重複使用，但磁碟上看到的檔案大小維持不變。三年保留期到期、
+清掉數十 GB 影片之後，磁碟可用空間一個 byte 都不會回來。
+
+清除完成且真的刪到資料時，log 會記一則 Warning 說明這件事並附上目前的資料庫檔案大小，
+不會讓人以為「清過了空間就會回來」。
+
+要實際回收空間只能人工執行 `VACUUM`：
+
+```bash
+sqlite3 messages.db "VACUUM;"
+```
+
+執行前必須知道的三件事：
+
+- **要停站台**。`VACUUM` 會整個重建資料庫檔案並持有寫入鎖，執行期間任何寫入都會失敗。
+- **需要暫存空間**。重建過程中磁碟上會同時存在新舊兩份，至少要準備等同目前資料庫大小的
+  可用空間。
+- **耗時隨檔案大小成長**。數十 GB 的資料庫可能要跑很久，排在維護時段。
+
+`PRAGMA incremental_vacuum` 不適用：它要求資料庫**建立時**就設定 `auto_vacuum=INCREMENTAL`，
+既有的資料庫改不了這個屬性。
+
+SQL Server 沒有這個問題，不需要對應的步驟。
 
 ---
 
