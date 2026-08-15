@@ -1,4 +1,5 @@
 using System.Net;
+using MessageService.Data;
 using MessageService.Middleware;
 using MessageService.Options;
 using MessageService.Services;
@@ -90,14 +91,16 @@ public static class MessageServiceRequestPipelineExtensions
             app.UseForwardedHeaders(forwardedHeadersOptions);
         }
 
-        // 檢視端 IP 白名單（沒有登入機制時的最低防護）：只包住非 webhook／非 ingest 的路徑——
-        // 這兩類端點各自有自己的防護層（簽章驗證／IP 白名單＋金鑰），且來源網段通常跟辦公室
-        // LAN（檢視端使用者）完全不同，不能共用同一份清單
+        // 檢視端 IP 白名單（沒有登入機制時的最低防護）：只包住非 webhook／非 ingest／非健康檢查的路徑——
+        // 前兩類端點各自有自己的防護層（簽章驗證／IP 白名單＋金鑰），且來源網段通常跟辦公室
+        // LAN（檢視端使用者）完全不同，不能共用同一份清單；健康檢查端點（/healthz 與 /healthz/ready）
+        // 同樣必須排除，因為監控系統與負載平衡器的來源 IP 通常不在檢視端的白名單內。
         if (capabilities.ViewerEnabled)
         {
             app.UseWhen(
                 context => !context.Request.Path.StartsWithSegments("/api/line")
-                    && !context.Request.Path.StartsWithSegments("/api/ingest"),
+                    && !context.Request.Path.StartsWithSegments("/api/ingest")
+                    && !context.Request.Path.StartsWithSegments("/healthz"),
                 viewerPipeline => viewerPipeline.UseMiddleware<IpAllowlistMiddleware>(
                     new IpAllowlistOptions("Viewer:AllowedClientIps", "viewer")));
         }
@@ -133,6 +136,35 @@ public static class MessageServiceRequestPipelineExtensions
         {
             app.MapStaticAssets();
         }
+
+        // 存活探針：只證明行程還在跑、還能接請求，刻意不碰資料庫也不碰任何服務。
+        // 回應不帶任何內容——健康檢查端點不吃 IP 白名單，不能讓它洩漏版本、主機名或設定。
+        app.MapGet("/healthz", () => Results.Ok());
+
+        // 就緒探針：依據部署模式的能力旗標決定檢查邏輯。
+        // - 有資料庫能力時：從請求服務取得 MessageDbContext 並檢查資料庫連線能力，
+        //   無法連線或發生例外時皆回傳 503 Service Unavailable，避免未處理例外變成 500。
+        // - 無資料庫能力時（Line／Edge 模式）：直接回傳 200 OK。該主機的就緒狀態本來就不依賴
+        //   本機資料庫；若此時回傳 404，監控系統會把「該模式沒有資料庫概念」誤判成「服務故障」，
+        //   統一回傳 200 才能讓監控用同一份設定涵蓋所有部署模式。
+        app.MapGet("/healthz/ready", async (HttpContext context, CancellationToken cancellationToken) =>
+        {
+            if (!capabilities.HasDatabaseAccess)
+            {
+                return Results.Ok();
+            }
+
+            try
+            {
+                var dbContext = context.RequestServices.GetRequiredService<MessageDbContext>();
+                var canConnect = await dbContext.Database.CanConnectAsync(cancellationToken);
+                return canConnect ? Results.Ok() : Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+            }
+            catch
+            {
+                return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+            }
+        });
 
         app.MapControllers();
 
