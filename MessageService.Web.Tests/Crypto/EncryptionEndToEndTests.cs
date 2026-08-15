@@ -110,7 +110,8 @@ public class EncryptionEndToEndTests : IDisposable
             await Task.CompletedTask;
         });
 
-        var results = await _fixture.Client.GetFromJsonAsync<List<MessageSearchResultDto>>("/api/messages/search?q=腳踏車");
+        var response = await _fixture.Client.GetFromJsonAsync<MessageSearchResponseDto>("/api/messages/search?q=腳踏車");
+        var results = response?.Results;
 
         var hit = Assert.Single(results!);
         Assert.Equal("今天去騎腳踏車", hit.Snippet);
@@ -131,7 +132,8 @@ public class EncryptionEndToEndTests : IDisposable
             await Task.CompletedTask;
         });
 
-        var results = await _fixture.Client.GetFromJsonAsync<List<MessageSearchResultDto>>("/api/messages/search?q=腳踏車");
+        var response = await _fixture.Client.GetFromJsonAsync<MessageSearchResponseDto>("/api/messages/search?q=腳踏車");
+        var results = response?.Results;
 
         Assert.Empty(results!);
     }

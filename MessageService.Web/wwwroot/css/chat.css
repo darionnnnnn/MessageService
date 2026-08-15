@@ -583,6 +583,15 @@ body.chat-page .chat-app {
     overflow-y: auto;
 }
 
+/* 加密啟用時搜尋範圍受限的提示：以小字及次要顏色呈現說明 */
+.search-encryption-notice {
+    padding: .6rem var(--gutter);
+    font-size: calc(var(--chat-base-current) * .85rem / 1.15rem);
+    color: var(--line-header-subtext);
+    line-height: 1.4;
+    border-bottom: 1px solid #f2f2f2;
+}
+
 .search-result-empty {
     padding: 1.5rem 1rem;
     text-align: center;

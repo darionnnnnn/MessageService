@@ -16,6 +16,8 @@
     const STATUS_POLL_BATCH_SIZE = 100;
     // 與後端 MessagesController.MessageWindowLimit 對齊
     const MESSAGE_WINDOW_LIMIT = 500;
+    // 與後端 MessagesController.SearchCandidateLimit 對齊
+    const SEARCH_CANDIDATE_LIMIT = 300;
     const AVATAR_COLORS = ['#f28b82', '#fbbc04', '#34a853', '#4285f4', '#a142f4', '#ff6d01', '#00acc1', '#c2185b'];
     const GROUP_AVATAR_COLOR = '#9AACC2';
     const FONT_SIZE_STORAGE_KEY = 'chat-font-size';
@@ -753,20 +755,27 @@
             url += `&groupId=${encodeURIComponent(state.groupId)}`;
         }
 
-        let results;
+        let response;
         try {
-            results = await fetchJson(url);
+            response = await fetchJson(url);
         } catch {
             return;
         }
         if (token !== state.searchRequestToken) {
             return;
         }
-        renderSearchResults(results, query);
+        renderSearchResults(response.results, response.limitedByEncryption, query);
     }
 
-    function renderSearchResults(results, query) {
+    function renderSearchResults(results, limitedByEncryption, query) {
         els.searchResults.innerHTML = '';
+
+        if (limitedByEncryption) {
+            const notice = document.createElement('div');
+            notice.className = 'search-encryption-notice';
+            notice.textContent = `訊息內容已加密，僅能搜尋最近 ${SEARCH_CANDIDATE_LIMIT} 則文字訊息。要找更早的內容，請指定單一群組縮小範圍。`;
+            els.searchResults.appendChild(notice);
+        }
 
         if (results.length === 0) {
             const empty = document.createElement('div');

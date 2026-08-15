@@ -28,7 +28,8 @@ public class MessageSearchTests : IDisposable
     [Fact]
     public async Task Search_EmptyQuery_ReturnsEmptyList()
     {
-        var results = await _fixture.Client.GetFromJsonAsync<List<MessageSearchResultDto>>("/api/messages/search?q=");
+        var response = await _fixture.Client.GetFromJsonAsync<MessageSearchResponseDto>("/api/messages/search?q=");
+        var results = response?.Results;
 
         Assert.NotNull(results);
         Assert.Empty(results!);
@@ -45,7 +46,8 @@ public class MessageSearchTests : IDisposable
             await Task.CompletedTask;
         });
 
-        var results = await _fixture.Client.GetFromJsonAsync<List<MessageSearchResultDto>>("/api/messages/search?q=腳踏車");
+        var response = await _fixture.Client.GetFromJsonAsync<MessageSearchResponseDto>("/api/messages/search?q=腳踏車");
+        var results = response?.Results;
 
         var hit = Assert.Single(results!);
         Assert.Equal("今天去騎腳踏車", hit.Snippet);
@@ -62,7 +64,8 @@ public class MessageSearchTests : IDisposable
             dbContext.GroupMessages.Add(TextMessage("e1", "G1", "U1", now, "晚安"));
         });
 
-        var results = await _fixture.Client.GetFromJsonAsync<List<MessageSearchResultDto>>("/api/messages/search?q=小明");
+        var response = await _fixture.Client.GetFromJsonAsync<MessageSearchResponseDto>("/api/messages/search?q=小明");
+        var results = response?.Results;
 
         var hit = Assert.Single(results!);
         Assert.Equal("小明", hit.DisplayName);
@@ -80,7 +83,8 @@ public class MessageSearchTests : IDisposable
             dbContext.GroupMessages.Add(TextMessage("e1", "G1", "U1", now, "我的密碼是1234"));
         });
 
-        var results = await _fixture.Client.GetFromJsonAsync<List<MessageSearchResultDto>>("/api/messages/search?q=密碼");
+        var response = await _fixture.Client.GetFromJsonAsync<MessageSearchResponseDto>("/api/messages/search?q=密碼");
+        var results = response?.Results;
 
         Assert.Empty(results!);
     }
@@ -95,7 +99,8 @@ public class MessageSearchTests : IDisposable
             dbContext.GroupMessages.Add(TextMessage("e1", "G1", "U1", now, "我的密碼是1234，記得騎腳踏車"));
         });
 
-        var results = await _fixture.Client.GetFromJsonAsync<List<MessageSearchResultDto>>("/api/messages/search?q=腳踏車");
+        var response = await _fixture.Client.GetFromJsonAsync<MessageSearchResponseDto>("/api/messages/search?q=腳踏車");
+        var results = response?.Results;
 
         var hit = Assert.Single(results!);
         Assert.DoesNotContain("密碼", hit.Snippet);
@@ -117,14 +122,16 @@ public class MessageSearchTests : IDisposable
         var assigned = await _fixture.Client.GetFromJsonAsync<MessagesPageDto>("/api/groups/G1/messages?days=3");
         var label = assigned!.Messages.Single().DisplayName;
 
-        var results = await _fixture.Client.GetFromJsonAsync<List<MessageSearchResultDto>>(
+        var response = await _fixture.Client.GetFromJsonAsync<MessageSearchResponseDto>(
             $"/api/messages/search?q={Uri.EscapeDataString(label)}");
+        var results = response?.Results;
 
         var hit = Assert.Single(results!);
         Assert.Equal(label, hit.DisplayName);
         Assert.NotEqual("小明", hit.DisplayName);
 
-        var realNameResults = await _fixture.Client.GetFromJsonAsync<List<MessageSearchResultDto>>("/api/messages/search?q=小明");
+        var realNameResponse = await _fixture.Client.GetFromJsonAsync<MessageSearchResponseDto>("/api/messages/search?q=小明");
+        var realNameResults = realNameResponse?.Results;
         Assert.Empty(realNameResults!);
     }
 
@@ -140,7 +147,7 @@ public class MessageSearchTests : IDisposable
             dbContext.GroupMessages.Add(TextMessage("e1", "G1", "U1", now, "早安"));
         });
 
-        await _fixture.Client.GetFromJsonAsync<List<MessageSearchResultDto>>("/api/messages/search?q=早安");
+        await _fixture.Client.GetFromJsonAsync<MessageSearchResponseDto>("/api/messages/search?q=早安");
 
         await _fixture.SeedAsync(async dbContext =>
         {
@@ -161,11 +168,13 @@ public class MessageSearchTests : IDisposable
             await Task.CompletedTask;
         });
 
-        var scoped = await _fixture.Client.GetFromJsonAsync<List<MessageSearchResultDto>>("/api/messages/search?q=共同關鍵字&groupId=G1");
+        var scopedResponse = await _fixture.Client.GetFromJsonAsync<MessageSearchResponseDto>("/api/messages/search?q=共同關鍵字&groupId=G1");
+        var scoped = scopedResponse?.Results;
         Assert.Single(scoped!);
         Assert.Equal("G1", scoped!.Single().GroupId);
 
-        var all = await _fixture.Client.GetFromJsonAsync<List<MessageSearchResultDto>>("/api/messages/search?q=共同關鍵字");
+        var allResponse = await _fixture.Client.GetFromJsonAsync<MessageSearchResponseDto>("/api/messages/search?q=共同關鍵字");
+        var all = allResponse?.Results;
         Assert.Equal(2, all!.Count);
     }
 
@@ -184,7 +193,8 @@ public class MessageSearchTests : IDisposable
             });
         });
 
-        var results = await _fixture.Client.GetFromJsonAsync<List<MessageSearchResultDto>>("/api/messages/search?q=小明");
+        var response = await _fixture.Client.GetFromJsonAsync<MessageSearchResponseDto>("/api/messages/search?q=小明");
+        var results = response?.Results;
 
         var hit = Assert.Single(results!);
         Assert.Equal("[圖片]", hit.Snippet);
@@ -201,7 +211,8 @@ public class MessageSearchTests : IDisposable
             await Task.CompletedTask;
         });
 
-        var results = await _fixture.Client.GetFromJsonAsync<List<MessageSearchResultDto>>("/api/messages/search?q=排序關鍵字");
+        var response = await _fixture.Client.GetFromJsonAsync<MessageSearchResponseDto>("/api/messages/search?q=排序關鍵字");
+        var results = response?.Results;
 
         Assert.Equal(["排序關鍵字 newer", "排序關鍵字 older"], results!.Select(r => r.Snippet));
     }
@@ -265,7 +276,8 @@ public class MessageSearchTests : IDisposable
             await Task.CompletedTask;
         });
 
-        var results = await _fixture.Client.GetFromJsonAsync<List<MessageSearchResultDto>>("/api/messages/search?q=小明");
+        var response = await _fixture.Client.GetFromJsonAsync<MessageSearchResponseDto>("/api/messages/search?q=小明");
+        var results = response?.Results;
 
         Assert.NotNull(results);
         var nameHitCount = results.Count(r => r.Snippet.StartsWith("name-hit-"));
@@ -288,7 +300,8 @@ public class MessageSearchTests : IDisposable
             await Task.CompletedTask;
         });
 
-        var results = await _fixture.Client.GetFromJsonAsync<List<MessageSearchResultDto>>("/api/messages/search?q=腳踏車");
+        var response = await _fixture.Client.GetFromJsonAsync<MessageSearchResponseDto>("/api/messages/search?q=腳踏車");
+        var results = response?.Results;
 
         Assert.Equal(10, results!.Count);
     }
@@ -311,7 +324,8 @@ public class MessageSearchTests : IDisposable
             dbContext.GroupMessages.Add(TextMessage("e1", "G1", "U1", now, "晚安"));
         });
 
-        var results = await _fixture.Client.GetFromJsonAsync<List<MessageSearchResultDto>>("/api/messages/search?q=小明&groupId=G1");
+        var response = await _fixture.Client.GetFromJsonAsync<MessageSearchResponseDto>("/api/messages/search?q=小明&groupId=G1");
+        var results = response?.Results;
 
         var hit = Assert.Single(results!);
         Assert.Equal("G1", hit.GroupId);
@@ -346,7 +360,8 @@ public class MessageSearchTests : IDisposable
             dbContext.GroupMessages.Add(TextMessage("e2", "G2", "U2", now, "G2訊息"));
         });
 
-        var results = await _fixture.Client.GetFromJsonAsync<List<MessageSearchResultDto>>("/api/messages/search?q=小明");
+        var response = await _fixture.Client.GetFromJsonAsync<MessageSearchResponseDto>("/api/messages/search?q=小明");
+        var results = response?.Results;
 
         var hit = Assert.Single(results!);
         Assert.Equal("G1", hit.GroupId);
@@ -364,10 +379,45 @@ public class MessageSearchTests : IDisposable
             await Task.CompletedTask;
         });
 
-        var results = await _fixture.Client.GetFromJsonAsync<List<MessageSearchResultDto>>("/api/messages/search?q=系統訊息");
+        var response = await _fixture.Client.GetFromJsonAsync<MessageSearchResponseDto>("/api/messages/search?q=系統訊息");
+        var results = response?.Results;
 
         var hit = Assert.Single(results!);
         Assert.Equal("(未知)", hit.DisplayName);
         Assert.Equal("系統訊息通知", hit.Snippet);
+    }
+
+    [Fact]
+    public async Task Search_EncryptionDisabled_ReturnsLimitedByEncryptionFalse()
+    {
+        var response = await _fixture.Client.GetFromJsonAsync<MessageSearchResponseDto>("/api/messages/search?q=測試");
+
+        Assert.NotNull(response);
+        Assert.False(response.LimitedByEncryption);
+    }
+
+    [Fact]
+    public async Task Search_EncryptionEnabled_ReturnsLimitedByEncryptionTrue()
+    {
+        var key = Convert.ToBase64String(Enumerable.Range(0, 32).Select(i => (byte)i).ToArray());
+        using var encryptedFixture = new WebAppFactoryFixture(encryptionKey: key);
+
+        var response = await encryptedFixture.Client.GetFromJsonAsync<MessageSearchResponseDto>("/api/messages/search?q=測試");
+
+        Assert.NotNull(response);
+        Assert.True(response.LimitedByEncryption);
+    }
+
+    [Fact]
+    public async Task Search_EmptyQuery_EncryptionEnabled_ReturnsLimitedByEncryptionTrue()
+    {
+        var key = Convert.ToBase64String(Enumerable.Range(0, 32).Select(i => (byte)i).ToArray());
+        using var encryptedFixture = new WebAppFactoryFixture(encryptionKey: key);
+
+        var response = await encryptedFixture.Client.GetFromJsonAsync<MessageSearchResponseDto>("/api/messages/search?q=");
+
+        Assert.NotNull(response);
+        Assert.True(response.LimitedByEncryption);
+        Assert.Empty(response.Results);
     }
 }

@@ -259,7 +259,7 @@ public class MessagesController(
     private const int SearchQuotaPerCategory = 50;
 
     [HttpGet("api/messages/search")]
-    public async Task<ActionResult<IReadOnlyList<MessageSearchResultDto>>> Search(
+    public async Task<ActionResult<MessageSearchResponseDto>> Search(
         [FromQuery] string? q,
         [FromQuery] string? groupId,
         CancellationToken cancellationToken)
@@ -267,7 +267,9 @@ public class MessagesController(
         q = q?.Trim();
         if (string.IsNullOrEmpty(q))
         {
-            return Ok(Array.Empty<MessageSearchResultDto>());
+            return Ok(new MessageSearchResponseDto(
+                Array.Empty<MessageSearchResultDto>(),
+                encryptionOptions.Value.Enabled));
         }
 
         var maskingRules = await maskingService.LoadRulesAsync(cancellationToken);
@@ -408,7 +410,9 @@ public class MessagesController(
 
         if (top.Count == 0)
         {
-            return Ok(Array.Empty<MessageSearchResultDto>());
+            return Ok(new MessageSearchResponseDto(
+                Array.Empty<MessageSearchResultDto>(),
+                encryptionOptions.Value.Enabled));
         }
 
         var resultGroupIds = top.Select(kv => kv.Value.GroupId).Distinct().ToList();
@@ -457,7 +461,7 @@ public class MessagesController(
             return new MessageSearchResultDto(id, rowGroupId, groupDisplayName, displayName, snippet, eventTimestamp);
         }).OrderByDescending(r => r.EventTimestamp).ToList();
 
-        return Ok(results);
+        return Ok(new MessageSearchResponseDto(results, encryptionOptions.Value.Enabled));
     }
 
     private static string EscapeLikePattern(string value) =>
