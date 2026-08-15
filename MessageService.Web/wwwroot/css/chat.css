@@ -714,6 +714,14 @@ body.chat-page .chat-app {
     border-radius: 1rem;
 }
 
+/* 訊息視窗超過上限被截斷時的提示；維持置中與小字級排版，以次要顏色呈現提示語意 */
+.truncated-notice {
+    text-align: center;
+    color: var(--line-timestamp);
+    font-size: calc(var(--chat-base-current) * .85rem / 1.15rem);
+    margin: .75rem 0;
+}
+
 /* LINE 的節奏：同一人連續訊息貼得很近，換人／換日的第一則（帶頭貼）才拉開間距。
    寬度上限走 --bubble-max-width（桌面 2/3、手機 75%、勾選全版面時 100%），見 :root 說明 */
 .message-row {
@@ -821,7 +829,10 @@ body.chat-page .chat-app {
     padding-bottom: .15rem;
 }
 
+/* lazy load 的圖片在載入前高度為 0，prependMessages 同步計算捲動位置時會算錯，
+   導致往上捲動時畫面跳動；設定 min-height 提供基本佔位空間 */
 .bubble img.msg-image {
+    min-height: 8rem;
     max-width: 100%;
     max-height: 16rem;
     border-radius: .5rem;

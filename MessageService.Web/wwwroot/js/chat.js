@@ -14,6 +14,8 @@
     // 與後端 MessagesController.MaxStatusIds 一致；超過的話整串 ?ids= 會撞上 IIS 預設的
     // maxQueryString（2048），而且失敗後那些內容會永遠卡在載入中，因為狀態輪詢再也回不來
     const STATUS_POLL_BATCH_SIZE = 100;
+    // 與後端 MessagesController.MessageWindowLimit 對齊
+    const MESSAGE_WINDOW_LIMIT = 500;
     const AVATAR_COLORS = ['#f28b82', '#fbbc04', '#34a853', '#4285f4', '#a142f4', '#ff6d01', '#00acc1', '#c2185b'];
     const GROUP_AVATAR_COLOR = '#9AACC2';
     const FONT_SIZE_STORAGE_KEY = 'chat-font-size';
@@ -167,6 +169,15 @@
         span.textContent = formatDateSeparator(iso);
         sep.appendChild(span);
         return sep;
+    }
+
+    function createTruncatedNotice() {
+        const notice = document.createElement('div');
+        notice.className = 'truncated-notice';
+        const span = document.createElement('span');
+        span.textContent = `此區間訊息過多，僅顯示最近 ${MESSAGE_WINDOW_LIMIT} 則`;
+        notice.appendChild(span);
+        return notice;
     }
 
     // === 訊息內容渲染 ===
@@ -833,6 +844,9 @@
                 return;
             }
             appendMessages(page.messages, false);
+            if (page.truncated) {
+                els.messageList.insertBefore(createTruncatedNotice(), els.messageList.firstChild);
+            }
             if (page.messages.length > 0) {
                 state.oldestId = page.messages[0].id;
             }
@@ -955,6 +969,9 @@
     function renderWindow(page) {
         clearMessageList();
         appendMessages(page.messages, false);
+        if (page.truncated) {
+            els.messageList.insertBefore(createTruncatedNotice(), els.messageList.firstChild);
+        }
         if (page.messages.length > 0) {
             state.oldestId = page.messages[0].id;
         }
