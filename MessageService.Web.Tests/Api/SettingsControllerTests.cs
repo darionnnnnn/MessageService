@@ -505,4 +505,50 @@ public class SettingsControllerTests : IDisposable
         var remaining = Assert.Single(rows!);
         Assert.Equal(("Core", "keep-me"), (remaining.Role, remaining.MachineName));
     }
+
+    [Fact]
+    public async Task UpdateDisplaySettings_InvalidatesMaskingCache_ImmediatelyAffectsMessagesEndpoint()
+    {
+        var now = DateTimeOffset.UtcNow;
+        const string groupId = "G_CACHE_TEST";
+        const string userId = "U_CACHE_TEST";
+
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            dbContext.GroupMembers.Add(new GroupMember
+            {
+                GroupId = groupId,
+                UserId = userId,
+                DisplayName = "陳小明",
+                UpdatedAt = now
+            });
+            dbContext.GroupMessages.Add(new GroupMessage
+            {
+                WebhookEventId = "e_cache_1",
+                LineMessageId = "m_cache_1",
+                GroupId = groupId,
+                UserId = userId,
+                MessageType = "text",
+                Text = "測試快取接線",
+                EventTimestamp = now,
+                ReceivedAt = now
+            });
+            await Task.CompletedTask;
+        });
+
+        // 第一次查詢訊息，觸發 LoadRulesAsync 快取當前設定（預設 Original）
+        var initialPage = await _fixture.Client.GetFromJsonAsync<MessagesPageDto>($"/api/groups/{groupId}/messages?days=3");
+        var initialMsg = Assert.Single(initialPage!.Messages);
+        Assert.Equal("陳小明", initialMsg.DisplayName);
+
+        // 呼叫 PUT /api/settings/display 更新為 MaskMiddle
+        var updateResponse = await _fixture.Client.PutAsJsonAsync(
+            "/api/settings/display", new DisplaySettingsDto(nameof(NameDisplayMode.MaskMiddle)));
+        Assert.Equal(HttpStatusCode.NoContent, updateResponse.StatusCode);
+
+        // 再次查詢訊息，斷言回傳的顯示名稱立刻反映新設定（若未失效則會繼續命中舊快取）
+        var updatedPage = await _fixture.Client.GetFromJsonAsync<MessagesPageDto>($"/api/groups/{groupId}/messages?days=3");
+        var updatedMsg = Assert.Single(updatedPage!.Messages);
+        Assert.Equal("陳*明", updatedMsg.DisplayName);
+    }
 }

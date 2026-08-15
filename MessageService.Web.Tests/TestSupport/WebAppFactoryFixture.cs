@@ -2,6 +2,7 @@ using System.Net;
 using MessageService.Data;
 using MessageService.Models;
 using MessageService.Services;
+using MessageService.Web.Services;
 using MessageService.Tests.TestSupport;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
@@ -98,6 +99,13 @@ public class WebAppFactoryFixture : IDisposable
         {
             await dbContext.SaveChangesAsync();
         }
+
+        // 遮蔽規則有 30 秒的程序內快取（見 MaskingService），而這裡是直接寫資料庫、繞過
+        // SettingsController 的失效呼叫。測試若在 seed 之前就打過任何會載入規則的端點，
+        // 之後改的 ViewerSettings／MaskKeywords／UserAliases 都不會生效，症狀是斷言拿到
+        // 舊的顯示名稱——而且只在那個先後順序下才發生，很難從失敗訊息看出原因。
+        // 在這裡一併失效，讓 seed 對測試而言維持「寫進去就算數」的直覺語意。
+        scope.ServiceProvider.GetService<IMaskingService>()?.InvalidateCache();
     }
 
     public void Dispose()

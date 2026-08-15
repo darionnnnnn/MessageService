@@ -3,6 +3,7 @@ using MessageService.Models;
 using MessageService.Options;
 using MessageService.Services;
 using MessageService.Web.Dtos;
+using MessageService.Web.Services;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
@@ -14,7 +15,10 @@ namespace MessageService.Web.Controllers.Api;
 [Route("api/settings")]
 [RequiresCapability(Capability.Viewer)]
 public class SettingsController(
-    MessageDbContext dbContext, IOptions<HeartbeatOptions> heartbeatOptions, DatabaseStartupDecision databaseStartupDecision)
+    MessageDbContext dbContext,
+    IMaskingService maskingService,
+    IOptions<HeartbeatOptions> heartbeatOptions,
+    DatabaseStartupDecision databaseStartupDecision)
     : ControllerBase
 {
     // 只有本機這台主機的救場狀態（見 DatabaseStartupDecision 的單例說明：只在啟動時決定一次，
@@ -59,6 +63,7 @@ public class SettingsController(
         }
 
         await dbContext.SaveChangesAsync(cancellationToken);
+        maskingService.InvalidateCache();
         return NoContent();
     }
 
@@ -141,6 +146,7 @@ public class SettingsController(
         }
 
         await dbContext.SaveChangesAsync(cancellationToken);
+        maskingService.InvalidateCache();
         return NoContent();
     }
 
@@ -175,6 +181,7 @@ public class SettingsController(
 
         dbContext.MaskKeywords.Add(keyword);
         await dbContext.SaveChangesAsync(cancellationToken);
+        maskingService.InvalidateCache();
 
         return Ok(ToDto(keyword));
     }
@@ -205,6 +212,7 @@ public class SettingsController(
         ApplyGroupSelection(keyword, dto);
 
         await dbContext.SaveChangesAsync(cancellationToken);
+        maskingService.InvalidateCache();
         return NoContent();
     }
 
@@ -219,6 +227,7 @@ public class SettingsController(
 
         dbContext.MaskKeywords.Remove(keyword);
         await dbContext.SaveChangesAsync(cancellationToken);
+        maskingService.InvalidateCache();
         return NoContent();
     }
 
@@ -253,6 +262,7 @@ public class SettingsController(
         }
 
         await dbContext.SaveChangesAsync(cancellationToken);
+        maskingService.InvalidateCache();
         return NoContent();
     }
 
@@ -267,6 +277,7 @@ public class SettingsController(
 
         dbContext.UserAliases.Remove(existing);
         await dbContext.SaveChangesAsync(cancellationToken);
+        maskingService.InvalidateCache();
         return NoContent();
     }
 

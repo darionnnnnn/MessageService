@@ -4,4 +4,7 @@ namespace MessageService.Web.Services;
 public interface IMaskingService
 {
     Task<IMaskingRuleSet> LoadRulesAsync(CancellationToken cancellationToken);
+
+    /// <summary>設定或規則被修改後呼叫，讓下一次 LoadRulesAsync 重新讀資料庫。</summary>
+    void InvalidateCache();
 }

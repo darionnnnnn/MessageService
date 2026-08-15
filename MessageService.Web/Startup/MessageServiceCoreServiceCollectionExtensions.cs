@@ -149,6 +149,7 @@ public static class MessageServiceCoreServiceCollectionExtensions
         // 若仍註冊這些會直接啟動失敗
         if (capabilities.ViewerEnabled)
         {
+            builder.Services.AddMemoryCache();
             builder.Services.AddScoped<ContentStreamService>();
             builder.Services.AddScoped<IMaskingService, MaskingService>();
             builder.Services.AddScoped<IAnonymousIdentityService, AnonymousIdentityService>();
