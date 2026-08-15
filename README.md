@@ -69,7 +69,7 @@ RetentionCleanupService（每日固定時間讀取檢視端設定頁存的保留
 | 型別 | Text 欄位 | 內容下載 |
 |---|---|---|
 | 文字 | 訊息內文 | — |
-| 貼圖 | `(貼圖)`（fallback 顯示用） | 原檔，跟圖片走同一條管線存進 `MessageContents`（`StickerId` 保留供下載時組網址，檢視端不再直連 CDN） |
+| 貼圖 | `(貼圖)`（fallback 顯示用） | 原檔，跟圖片走同一條管線存進 `MessageContents`（`StickerId` 保留供下載時組網址，檢視端不直連 CDN） |
 | 圖片 | null | 原圖（非縮圖），背景下載 |
 | 影片 | null | 原檔，先輪詢 LINE transcoding 完成才下載 |
 | 語音 | null | 原檔，同影片先等 transcoding 完成才下載 |
@@ -133,11 +133,11 @@ dotnet user-secrets set "Line:ChannelAccessToken" "<你的 access token>"
 
 **對話頁（`/`）**：原生 JS 模擬 LINE 的雙欄版面（Bootstrap 只保留 modal/toast/表單控件），所有資料透過 API 取得（不走 MVC Model 傳遞）。
 
-- **左側欄**：群組列表（48px 圓角方形頭貼、名稱、最後訊息預覽、時間、未讀數 badge，依最後活動倒序），前端即時搜尋過濾，底部為設定入口（開啟設定 modal）。取代早期的下拉選單；側欄與聊天面板的所有區塊共用同一份 `--gutter`/`--radius-*` token（chat.css），群組項目與設定入口是內縮圓角卡而非通版直角色塊
+- **左側欄**：群組列表（48px 圓角方形頭貼、名稱、最後訊息預覽、時間、未讀數 badge，依最後活動倒序），前端即時搜尋過濾，底部為設定入口（開啟設定 modal）。側欄與聊天面板的所有區塊共用同一份 `--gutter`/`--radius-*` token（chat.css），群組項目與設定入口是內縮圓角卡而非通版直角色塊
 - **側欄寬度與收合（桌面版）**：分隔線可拖曳調整寬度（200–480px，Pointer Events + `setPointerCapture`；拖到 <140px 吸附成窄欄、窄欄拖出 >180px 回展開，兩門檻錯開防臨界抖動；雙擊重設 320px；分隔線可 Tab 聚焦，←→/Home/End 鍵盤調整）；標題列「‹」鈕兩段式收合：全寬 → 72px 窄欄（只剩頭貼，原生 title 提示群組名、未讀 badge 疊頭貼右上、點頭貼即切換群組）→ 完全隱藏（聊天標頭出現「☰」展開鈕）。寬度與收合狀態各自記在 localStorage（`chat-sidebar-width`/`chat-sidebar-state`）；手機版（≤768px）一律停用（單欄全螢幕切換，桌面存的狀態不生效）
 - **側欄未讀數**：每群組的「最後已讀訊息 Id」記在 localStorage（`chat-read-state`，每台裝置各自算，不進 DB），輪詢 `/api/groups?read=` 帶上基準由後端計數（上限 99+）。開著的群組視為已讀（切入群組、新訊息接進畫面時都會推進基準）；本裝置第一次看到的群組直接以最後一則為基準（不會初次開啟整排 99+）；已消失的群組基準自動清掉
 - **聊天面板**：標頭白底＋細分隔線（`--line-header-bg`/`--line-header-border`，仿 LINE 桌面版，與藍色訊息區明確分界；群組頭貼＋名稱＋成員數＋🔍搜尋＋「Aa」字級下拉）；訊息泡泡首顆帶指向頭貼的小尾巴（左上角、跟著字級用 em 縮放，避免大字級時圓角比尾巴大造成脫節）、時間戳貼泡泡外側；同一人連續訊息間距收緊、換人／換日的首則才拉開（LINE 的節奏）；對話寬度桌面版預設佔版面 2/3、手機版 75%，設定可勾選「全版面」改成滿版（影片／語音另有 30rem 絕對上限，加寬只給文字）；底部仿 LINE 輸入列但唯讀化（圖示灰化不可點、中央膠囊顯示同步狀態）
-- **頭貼**：`Original` 模式顯示後端快取的頭貼，走自家 API（`api/groups/.../avatar`），前端不再直連 LINE CDN（載入失敗仍 fallback 代號圖示）；其他模式一律顯示伺服器指派的動植物代號圖示（emoji 渲染，前端 `ICON_EMOJI` 對照表需與後端 `AvatarIconCatalog` 的 IconKey 同步維護）
+- **頭貼**：`Original` 模式顯示後端快取的頭貼，走自家 API（`api/groups/.../avatar`），前端不直連 LINE CDN（載入失敗仍 fallback 代號圖示）；其他模式一律顯示伺服器指派的動植物代號圖示（emoji 渲染，前端 `ICON_EMOJI` 對照表需與後端 `AvatarIconCatalog` 的 IconKey 同步維護）
 - **字級**：設定「字體大小」數值輸入（px）＝聊天頁「中」檔泡泡文字的實際大小，小／大依比例（.87×／1.13×）跟著調整；聊天頁全部文字（不含頭貼/圖示）與設定 modal 本身的文字都吃同一份 `--font-base-px`（localStorage key `chat-font-base-px`，設在 `document.documentElement` 上、透過 inline style 覆寫、不寫死在樣式表裡，才不會被 CSS cascade 蓋掉）。設定 modal 跟聊天頁是同一個頁面，調字級時背後的聊天畫面會即時跟著變
 - 預設載入 3 天內對話，「載入更早 7 天」膠囊以最舊訊息 Id 當游標往前翻頁，沒有更早歷史時自動 disable。兩個「按了會沒反應」的空窗情況都有處理：畫面上一則訊息都沒有（沒有游標可用）時改成放大天數視窗重繪；群組沉寂比一個視窗還久時由 API 把視窗錨定到下一則更早訊息，保證每次點擊都會前進。膠囊本身（可按的「載入更早」）常駐顯示；沒有更早歷史時的「沒有更早的訊息」是單純的狀態告知，只在捲到最頂部附近才顯示，捲到畫面中間看到會很突兀
 - 「回到最新」浮動按鈕：使用者往上捲動時自動退出跟隨模式並顯示未讀數，點擊或捲回底部即恢復跟隨並自動捲到新訊息
@@ -272,7 +272,7 @@ dotnet user-secrets set "Line:ChannelAccessToken" "<你的 access token>"
 
 **Groups** / **GroupMembers**：收錄端背景快取的群組名稱、成員顯示名稱與頭貼（7 天 TTL，來源是 LINE 的 group summary / member profile API），檢視端用來把 GroupId/UserId 轉成人看得懂的名稱。快取失敗時 fallback 顯示原始 ID；`ProfileCache:FailureRetryAfter`（預設 10 分鐘）冷卻期內失敗不會重複呼叫 LINE API。加密開啟時群組名稱/顯示名稱/頭貼 URL 同樣走 `ENC2:` 整值加密。檢視端也會寫這張表：`Groups.LastMessageId` 指向的訊息若被保留期清除刪掉，`GroupsController.RecoverDriftedLastMessageAsync` 會即時查回目前真正的最後一則並修正這一列（見 `docs/DEPLOYMENT-GUIDE.md` 的 Viewer 帳號權限說明）。
 
-兩張表的頭貼快取欄位相同（頭貼不再只存 URL，圖檔本體也一併快取，理由見「設計決策備忘」）：
+兩張表的頭貼快取欄位相同（來源 URL 與圖檔本體都存，理由見「設計決策備忘」）：
 
 | 欄位 | 型別 | 說明 |
 |---|---|---|
@@ -323,7 +323,7 @@ mutex，避免兩邊同時建 `__EFMigrationsHistory` 互相打架。
 
 ## 設計決策備忘
 
-- **外部圖檔一律由連得到外網的主機下載後存 DB，前端只走自家 API**：拆機拓撲下檢視端可能完全沒有對外網路；這也順帶讓去識別化模式能真正生效，因為圖檔不再由瀏覽器直接向 LINE 索取。
+- **外部圖檔一律由連得到外網的主機下載後存 DB，前端只走自家 API**：拆機拓撲下檢視端可能完全沒有對外網路；這也讓去識別化模式能真正生效，因為圖檔不由瀏覽器直接向 LINE 索取。
 - **圖片/影片/語音/檔案存 DB（varbinary）而非磁碟**：檢視端只要連 DB 就能讀到；保留期清除靠 CASCADE 一次帶走，不會產生孤兒檔案。代價是 DB 容量成長快，若量大屆時再評估 FILESTREAM 或磁碟存放（內容獨立一表已為搬遷留好最小改動面）
 - **webhook 除了「outbox 寫不進去」以外一律回 200**（簽章合法後）：回非 2xx 會讓 LINE 重送並可能判定 webhook 失效，所以 JSON 解析失敗、個別事件處理失敗都只記 log 並回 200（畸形 payload 重送也不會變好）。唯一的例外是寫本機 outbox 本身失敗（磁碟滿、檔案鎖住、DB 損毀）——那是唯一會真的把訊息弄丟的情況，改回 500 讓 LINE 的 redelivery 接手，重送造成的重複由 `WebhookEventId` 唯一索引擋掉。**前提是 LINE Developers Console 要開啟 webhook redelivery**（預設關閉，見 [docs/LINE-BOT-SETUP.md](docs/LINE-BOT-SETUP.md)）；沒開的話回 500 等於直接放棄那則事件
 - **webhook 收進來後只寫本機 outbox，不直接碰資料庫**：落地（含防重送）延後到背景排空時才做，webhook 回應時間因此跟資料庫是否可用完全脫鉤，短暫斷線不會掉訊息；這也是收錄端支援網段分離部署（`Deployment:Mode`）的基礎，詳見 [docs/DEPLOYMENT-MODES.md](docs/DEPLOYMENT-MODES.md)
