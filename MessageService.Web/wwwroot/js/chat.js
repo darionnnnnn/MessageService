@@ -41,9 +41,13 @@
         groupId: null,
         oldestId: null,
         newestId: null,
+        // 歷史檢視時「目前視窗內最新一則」的 id。不能重用 newestId——那個在歷史檢視下的語意是
+        // 「即時輪詢的基準」，兩者在追上最新之前是不同的值
+        windowNewestId: null,
         daysWindow: INITIAL_DAYS,
         hasMoreOlder: false,
         loadingOlder: false,
+        loadingNewer: false,
         polling: false,
         groupsPolling: false,
         // 每次切換群組就 +1；非同步請求回來時若對不上，代表是前一個群組的過期回應，必須丟棄
@@ -838,9 +842,11 @@
         }
 
         state.oldestId = null;
+        state.windowNewestId = null;
         state.hasMoreOlder = false;
         state.historicalView = true;
         updateHistoricalBanner();
+        updateLoadNewerButton();
         setFollowing(true);
         clearMessageList();
         updateLoadMoreButton();
@@ -858,9 +864,11 @@
             }
             if (page.messages.length > 0) {
                 state.oldestId = page.messages[0].id;
+                state.windowNewestId = page.messages[page.messages.length - 1].id;
             }
             state.hasMoreOlder = page.hasMore;
             updateLoadMoreButton();
+            updateLoadNewerButton();
             highlightQueryInMessageList(query);
 
             const targetRow = els.messageList.querySelector(`[data-message-id="${result.messageId}"]`);
@@ -935,10 +943,12 @@
         state.groupId = groupId;
         state.oldestId = null;
         state.newestId = null;
+        state.windowNewestId = null;
         state.daysWindow = INITIAL_DAYS;
         state.hasMoreOlder = false;
         state.historicalView = false;
         updateHistoricalBanner();
+        updateLoadNewerButton();
         setFollowing(true);
         clearMessageList();
 
@@ -951,6 +961,7 @@
         updateActiveGroupItem();
         updateChatHeader(selected);
         updateLoadMoreButton();
+        updateLoadNewerButton();
 
         try {
             const page = await fetchJson(
@@ -1002,6 +1013,11 @@
         els.loadMoreBtn.classList.toggle('d-none', !state.hasMoreOlder && !isNearTop());
     }
 
+    function updateLoadNewerButton() {
+        els.loadNewerBtn.classList.toggle('d-none', !state.historicalView);
+        els.loadNewerBtn.disabled = state.loadingNewer;
+    }
+
     async function loadOlder() {
         if (state.loadingOlder || !state.hasMoreOlder) {
             return;
@@ -1043,6 +1059,53 @@
         } finally {
             state.loadingOlder = false;
             updateLoadMoreButton();
+        }
+    }
+
+    async function loadNewer() {
+        if (state.loadingNewer || !state.historicalView || state.windowNewestId == null) {
+            return;
+        }
+        const token = state.requestToken;
+        state.loadingNewer = true;
+        updateLoadNewerButton();
+        try {
+            const page = await fetchJson(
+                `api/groups/${encodeURIComponent(state.groupId)}/messages?afterId=${state.windowNewestId}`);
+            if (token !== state.requestToken) {
+                return;
+            }
+            if (page.messages.length > 0) {
+                appendMessages(page.messages, false);
+                state.windowNewestId = page.messages[page.messages.length - 1].id;
+            }
+            maybeExitHistoricalView();
+            setConnectionOk(true);
+        } catch {
+            if (token === state.requestToken) {
+                setConnectionOk(false);
+            }
+        } finally {
+            state.loadingNewer = false;
+            updateLoadNewerButton();
+        }
+    }
+
+    // afterId 的回應不帶 latestId，判斷「是否追上最新」只能靠側欄資料（每 10 秒更新一次）。
+    // 追上之後要把即時輪詢的基準交棒給 windowNewestId，否則 pollNewer 會從舊的 newestId
+    // 重新抓一次，畫面會出現重複訊息
+    function maybeExitHistoricalView() {
+        const group = state.groups.find(g => g.groupId === state.groupId);
+        if (group == null || group.lastMessageId == null || state.windowNewestId == null) {
+            return;
+        }
+        if (state.windowNewestId >= group.lastMessageId) {
+            state.historicalView = false;
+            state.newestId = state.windowNewestId;
+            markGroupRead(state.groupId, state.newestId);
+            updateHistoricalBanner();
+            updateLoadNewerButton();
+            updateFollowUi();
         }
     }
 
@@ -1453,6 +1516,7 @@
         els.composerStatusDot = $('composer-status-dot');
         els.composerStatusText = $('composer-status-text');
         els.loadMoreBtn = $('load-more-btn');
+        els.loadNewerBtn = $('load-newer-btn');
         els.messageList = $('message-list');
         els.scrollBottomBtn = $('scroll-bottom-btn');
         els.unreadBadge = $('unread-badge');
@@ -1482,6 +1546,7 @@
             }
         });
         els.loadMoreBtn.addEventListener('click', loadOlder);
+        els.loadNewerBtn.addEventListener('click', loadNewer);
         els.groupSearch.addEventListener('input', () => renderGroupList(els.groupSearch.value));
         els.mobileBackBtn.addEventListener('click', () => els.chatApp.classList.remove('mobile-chat-open'));
         els.scrollBottomBtn.addEventListener('click', () => {
@@ -1494,6 +1559,9 @@
                 setFollowing(near);
             }
             updateLoadMoreButton();
+            if (state.historicalView && isNearBottom()) {
+                loadNewer();
+            }
         });
 
         els.searchToggleBtn.addEventListener('click', () => {
