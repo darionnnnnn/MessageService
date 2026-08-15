@@ -250,6 +250,11 @@ public class MessagesController(
     public const int SearchResultLimit = 100;
     private const int SearchCandidateLimit = 300;
 
+    /// <summary>單次狀態查詢的內容 id 數量上限，與前端 chat.js 的 STATUS_POLL_BATCH_SIZE 一致。
+    /// 沒有上限的話這裡就是一個外部可控長度的 IN 清單，而且查詢字串本身也會撞上 IIS 的
+    /// maxQueryString。</summary>
+    public const int MaxStatusIds = 100;
+
     /// <summary>內容命中／姓名命中各自的保留配額，見 Search 方法內的說明。</summary>
     private const int SearchQuotaPerCategory = 50;
 
@@ -486,6 +491,11 @@ public class MessagesController(
         if (contentIds.Count == 0)
         {
             return Ok(Array.Empty<MessageStatusDto>());
+        }
+
+        if (contentIds.Count > MaxStatusIds)
+        {
+            return BadRequest($"一次最多查詢 {MaxStatusIds} 筆內容狀態。");
         }
 
         var statuses = await dbContext.MessageContents

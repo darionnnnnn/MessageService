@@ -11,6 +11,9 @@
     const LOAD_MORE_DAYS = 7;
     // 與 MessagesController.MaxDays 對齊；超過就別再放大視窗，免得按鈕變成按了沒反應
     const MAX_DAYS_WINDOW = 3650;
+    // 與後端 MessagesController.MaxStatusIds 一致；超過的話整串 ?ids= 會撞上 IIS 預設的
+    // maxQueryString（2048），而且失敗後那些內容會永遠卡在載入中，因為狀態輪詢再也回不來
+    const STATUS_POLL_BATCH_SIZE = 100;
     const AVATAR_COLORS = ['#f28b82', '#fbbc04', '#34a853', '#4285f4', '#a142f4', '#ff6d01', '#00acc1', '#c2185b'];
     const GROUP_AVATAR_COLOR = '#9AACC2';
     const FONT_SIZE_STORAGE_KEY = 'chat-font-size';
@@ -1060,18 +1063,22 @@
         if (state.pendingContentIds.size === 0) {
             return;
         }
-        const ids = Array.from(state.pendingContentIds).join(',');
-        const statuses = await fetchJson(`api/messages/statuses?ids=${ids}`);
-        if (token !== state.requestToken) {
-            return;
-        }
-        for (const status of statuses) {
-            // Downloading 還沒到終態，繼續留在 pendingContentIds 裡讓下一輪輪詢再檢查——
-            // 提早移除的話，這則訊息之後不管是變 Completed 還是 Failed 都不會再被撿回來
-            // 更新畫面，會永遠卡在轉圈圈的 spinner 節點
-            if (!isDownloadInProgress(status.downloadStatus)) {
-                state.pendingContentIds.delete(status.contentId);
-                updateContentNode(status);
+        const pendingArray = Array.from(state.pendingContentIds);
+        for (let i = 0; i < pendingArray.length; i += STATUS_POLL_BATCH_SIZE) {
+            const batch = pendingArray.slice(i, i + STATUS_POLL_BATCH_SIZE);
+            const ids = batch.join(',');
+            const statuses = await fetchJson(`api/messages/statuses?ids=${ids}`);
+            if (token !== state.requestToken) {
+                return;
+            }
+            for (const status of statuses) {
+                // Downloading 還沒到終態，繼續留在 pendingContentIds 裡讓下一輪輪詢再檢查——
+                // 提早移除的話，這則訊息之後不管是變 Completed 還是 Failed 都不會再被撿回來
+                // 更新畫面，會永遠卡在轉圈圈的 spinner 節點
+                if (!isDownloadInProgress(status.downloadStatus)) {
+                    state.pendingContentIds.delete(status.contentId);
+                    updateContentNode(status);
+                }
             }
         }
     }
@@ -1193,9 +1200,16 @@
         }
     }
 
-    // /api/groups 帶上目前所有已讀基準；整串一次 encode，冒號與逗號在伺服器端會被還原後解析
+    // /api/groups 帶上目前畫面上有出現群組的已讀基準；整串一次 encode，冒號與逗號在伺服器端會被還原後解析。
+    // state.groups 要等第一次 loadGroups 回來才有值，而 loadGroups 自己就得先呼叫這裡——這時不能過濾，
+    // 否則一個基準都送不出去，而後端把「沒帶基準的群組」視為全部已讀（見 GroupsController），
+    // 症狀是重新整理後整排未讀數歸零、要等下一輪輪詢才回來。readState 本身已由
+    // seedReadStateForNewGroups 清成只含現存群組，長度受群組數限制，這條退路不會讓查詢字串失控。
     function readQuerySuffix() {
-        const pairs = Object.entries(state.readState).map(([groupId, id]) => `${groupId}:${id}`);
+        const knownGroupIds = new Set(state.groups.map(g => g.groupId));
+        const pairs = Object.entries(state.readState)
+            .filter(([groupId]) => knownGroupIds.size === 0 || knownGroupIds.has(groupId))
+            .map(([groupId, id]) => `${groupId}:${id}`);
         return pairs.length === 0 ? '' : `?read=${encodeURIComponent(pairs.join(','))}`;
     }
 

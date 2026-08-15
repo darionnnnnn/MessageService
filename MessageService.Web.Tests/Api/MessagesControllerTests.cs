@@ -330,6 +330,26 @@ public class MessagesControllerTests : IDisposable
     }
 
     [Fact]
+    public async Task GetStatuses_UpToMaxStatusIds_ReturnsSuccess()
+    {
+        var ids = string.Join(",", Enumerable.Range(1, MessagesController.MaxStatusIds));
+        var response = await _fixture.Client.GetAsync($"/api/messages/statuses?ids={ids}");
+
+        Assert.True(response.IsSuccessStatusCode);
+        var statuses = await response.Content.ReadFromJsonAsync<List<MessageStatusDto>>();
+        Assert.NotNull(statuses);
+    }
+
+    [Fact]
+    public async Task GetStatuses_ExceedsMaxStatusIds_ReturnsBadRequest()
+    {
+        var ids = string.Join(",", Enumerable.Range(1, MessagesController.MaxStatusIds + 1));
+        var response = await _fixture.Client.GetAsync($"/api/messages/statuses?ids={ids}");
+
+        Assert.Equal(System.Net.HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
     public async Task GetMessages_OriginalMode_RevealsRealPictureUrlAndFallbackIcon()
     {
         var now = DateTimeOffset.UtcNow;
