@@ -19,4 +19,7 @@ public class ContentDownloadOptions
 
     /// <summary>單一內容累計失敗次數達這個門檻後，即使還在保留視窗內也不再重試。</summary>
     public int MaxFailedRetries { get; set; } = 10;
+
+    /// <summary>週期性重掃的間隔分鐘數；設為 0 表示停用週期重掃，只保留啟動時那一次。</summary>
+    public int RequeueIntervalMinutes { get; set; } = 15;
 }

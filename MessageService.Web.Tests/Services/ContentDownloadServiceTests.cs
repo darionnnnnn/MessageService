@@ -285,4 +285,133 @@ public class ContentDownloadServiceTests : IDisposable
         Assert.Equal(contentId, Assert.Single(queue.Enqueued));
         Assert.Equal(DownloadStatus.Pending, (await ReloadContentAsync(contentId)).DownloadStatus);
     }
+
+    private (ContentDownloadService Service, FakeContentWorkSource WorkSource, FakeContentDownloadQueue Queue) CreateServiceWithFakeWorkSource(
+        ContentDownloadOptions? options = null)
+    {
+        var workSource = new FakeContentWorkSource();
+        var services = new ServiceCollection();
+        services.AddSingleton<IContentWorkSource>(workSource);
+        services.AddSingleton<ILineContentClient>(_contentClient);
+        var provider = services.BuildServiceProvider();
+
+        var queue = new FakeContentDownloadQueue();
+        var service = new ContentDownloadService(
+            queue,
+            provider.GetRequiredService<IServiceScopeFactory>(),
+            OptionsFactory.Create(options ?? new ContentDownloadOptions
+            {
+                MaxRetries = 3,
+                RetryDelayMilliseconds = 0,
+                TranscodingPollSeconds = 0,
+                TranscodingMaxPolls = 5
+            }),
+            NullLogger<ContentDownloadService>.Instance);
+
+        return (service, workSource, queue);
+    }
+
+    [Fact]
+    public async Task RunPeriodicRequeueAsync_WhenIntervalElapses_QueriesWorkSourceAgain()
+    {
+        var (service, workSource, queue) = CreateServiceWithFakeWorkSource();
+        workSource.PendingIds = [10, 20];
+
+        using var cts = new CancellationTokenSource();
+        var loopTask = service.RunPeriodicRequeueAsync(TimeSpan.FromMilliseconds(20), cts.Token);
+
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        while (workSource.GetPendingIdsCallCount < 2 && DateTime.UtcNow < deadline)
+        {
+            await Task.Delay(10);
+        }
+
+        cts.Cancel();
+        await loopTask;
+
+        Assert.True(workSource.GetPendingIdsCallCount >= 2);
+        Assert.Contains(10, queue.Enqueued);
+        Assert.Contains(20, queue.Enqueued);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_WhenRequeueIntervalMinutesIsZero_QueriesWorkSourceOnlyOnceAtStartup()
+    {
+        var workSource = new FakeContentWorkSource { PendingIds = [1] };
+        var services = new ServiceCollection();
+        services.AddSingleton<IContentWorkSource>(workSource);
+        services.AddSingleton<ILineContentClient>(_contentClient);
+        var provider = services.BuildServiceProvider();
+
+        var queue = new ContentDownloadQueue(NullLogger<ContentDownloadQueue>.Instance);
+        var service = new ContentDownloadService(
+            queue,
+            provider.GetRequiredService<IServiceScopeFactory>(),
+            OptionsFactory.Create(new ContentDownloadOptions
+            {
+                RequeueIntervalMinutes = 0,
+                MaxConcurrency = 1
+            }),
+            NullLogger<ContentDownloadService>.Instance);
+
+        await service.StartAsync(CancellationToken.None);
+        try
+        {
+            var deadline = DateTime.UtcNow.AddSeconds(5);
+            while (workSource.GetPendingIdsCallCount < 1 && DateTime.UtcNow < deadline)
+            {
+                await Task.Delay(10);
+            }
+
+            Assert.Equal(1, workSource.GetPendingIdsCallCount);
+
+            await Task.Delay(100);
+
+            Assert.Equal(1, workSource.GetPendingIdsCallCount);
+        }
+        finally
+        {
+            await service.StopAsync(CancellationToken.None);
+        }
+    }
+
+    [Fact]
+    public async Task RunPeriodicRequeueAsync_WhenScanThrowsException_ContinuesToNextIteration()
+    {
+        var (service, workSource, queue) = CreateServiceWithFakeWorkSource();
+        var callIndex = 0;
+        workSource.OnGetPendingIds = _ =>
+        {
+            callIndex++;
+            if (callIndex == 1)
+            {
+                throw new InvalidOperationException("Simulated transient error during scan");
+            }
+            return Task.FromResult<IReadOnlyList<long>>([42]);
+        };
+
+        using var cts = new CancellationTokenSource();
+        var loopTask = service.RunPeriodicRequeueAsync(TimeSpan.FromMilliseconds(20), cts.Token);
+
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        while (workSource.GetPendingIdsCallCount < 2 && DateTime.UtcNow < deadline)
+        {
+            await Task.Delay(10);
+        }
+
+        cts.Cancel();
+        await loopTask;
+
+        Assert.True(workSource.GetPendingIdsCallCount >= 2);
+        Assert.Contains(42, queue.Enqueued);
+    }
+
+    [Fact]
+    public async Task RunPeriodicRequeueAsync_WhenIntervalIsZeroOrNegative_ReturnsImmediately()
+    {
+        var (service, workSource, _) = CreateServiceWithFakeWorkSource();
+        await service.RunPeriodicRequeueAsync(TimeSpan.Zero, CancellationToken.None);
+        Assert.Equal(0, workSource.GetPendingIdsCallCount);
+    }
 }
+

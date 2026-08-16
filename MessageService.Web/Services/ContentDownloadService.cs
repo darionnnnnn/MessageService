@@ -16,7 +16,7 @@ public class ContentDownloadService(
     private readonly ContentDownloadOptions _options = options.Value;
 
     /// <summary>每個 messageContentId 目前查了幾次轉檔狀態——單例服務的生命週期內有效，行程
-    /// 重啟會歸零，等同重新給滿額度：重啟後由 RequeuePendingAsync 撈回，語意跟現狀一致，
+    /// 重啟會歸零，等同重新給滿額度：重啟後或週期重掃時由 RequeuePendingAsync 撈回，語意跟現狀一致，
     /// 不需要跨重啟持久化。查詢達到 Succeeded／Failed 或門檻上限時務必移除，防止洩漏。</summary>
     private readonly ConcurrentDictionary<long, int> _transcodingPollCounts = new();
 
@@ -24,7 +24,7 @@ public class ContentDownloadService(
     {
         // 啟動接續失敗（例如 DB／ingest API 還沒就緒）不能讓例外冒出 ExecuteAsync，
         // 否則 BackgroundServiceExceptionBehavior.StopHost 會關掉整個服務；
-        // 漏掉的 Pending 會在下次服務重啟時再被撈回
+        // 漏掉的 Pending 會在下次服務重啟或週期重掃時再被撈回
         try
         {
             await RequeuePendingAsync(stoppingToken);
@@ -37,9 +37,19 @@ public class ContentDownloadService(
         // 多個 worker 共讀同一個 Channel（ChannelReader 天生支援多讀者，每筆項目只會被
         // 其中一個 worker 拿到）：一支大檔案要等轉檔的期間，其他 worker 仍能繼續處理
         // 排在後面的圖片/檔案，不會被整條佇列卡住
+        var tasks = new List<Task>();
         var workerCount = Math.Max(1, _options.MaxConcurrency);
-        var workers = Enumerable.Range(0, workerCount).Select(_ => RunWorkerAsync(stoppingToken));
-        await Task.WhenAll(workers);
+        for (var i = 0; i < workerCount; i++)
+        {
+            tasks.Add(RunWorkerAsync(stoppingToken));
+        }
+
+        if (_options.RequeueIntervalMinutes > 0)
+        {
+            tasks.Add(RunPeriodicRequeueAsync(TimeSpan.FromMinutes(_options.RequeueIntervalMinutes), stoppingToken));
+        }
+
+        await Task.WhenAll(tasks);
     }
 
     private async Task RunWorkerAsync(CancellationToken stoppingToken)
@@ -95,6 +105,44 @@ public class ContentDownloadService(
         if (pendingIds.Count > 0)
         {
             logger.LogInformation("Requeued {Count} content downloads from previous run", pendingIds.Count);
+        }
+    }
+
+    /// <summary>週期性重掃資料來源中的待處理項目並重新入列。
+    /// 重複入列是安全的：DbContentWorkSource.CompleteAsync 等下游有認領檢查（認領到 0 筆就跳過），
+    /// 重複丟同一筆不會重複下載。
+    /// 這條迴圈是「本機不下載、由另一台主機下載」的拆機部署下（例如 Core 補出資料但由 Edge 下載，
+    /// 或貼圖回填服務補出的項目），對方補出來的資料唯一的回收路徑。</summary>
+    public async Task RunPeriodicRequeueAsync(TimeSpan interval, CancellationToken cancellationToken)
+    {
+        if (interval <= TimeSpan.Zero)
+        {
+            return;
+        }
+
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            try
+            {
+                await Task.Delay(interval, cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                break;
+            }
+
+            try
+            {
+                await RequeuePendingAsync(cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "Unexpected error during periodic requeue of pending downloads");
+            }
         }
     }
 

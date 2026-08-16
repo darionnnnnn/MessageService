@@ -9,8 +9,18 @@ public class FakeContentWorkSource : IContentWorkSource
     public List<(long ContentId, byte[] Content, string? ContentType)> Completed { get; } = [];
     public List<long> Failed { get; } = [];
 
-    public Task<IReadOnlyList<long>> GetPendingIdsAsync(CancellationToken cancellationToken) =>
-        Task.FromResult<IReadOnlyList<long>>(PendingIds);
+    public int GetPendingIdsCallCount { get; set; }
+    public Func<CancellationToken, Task<IReadOnlyList<long>>>? OnGetPendingIds { get; set; }
+
+    public Task<IReadOnlyList<long>> GetPendingIdsAsync(CancellationToken cancellationToken)
+    {
+        GetPendingIdsCallCount++;
+        if (OnGetPendingIds is not null)
+        {
+            return OnGetPendingIds(cancellationToken);
+        }
+        return Task.FromResult<IReadOnlyList<long>>(PendingIds);
+    }
 
     public Task<ContentWorkItem?> GetAsync(long contentId, CancellationToken cancellationToken) =>
         Task.FromResult(Items.GetValueOrDefault(contentId));
