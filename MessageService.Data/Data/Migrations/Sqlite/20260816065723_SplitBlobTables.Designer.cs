@@ -3,16 +3,19 @@ using System;
 using MessageService.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
 
-namespace MessageService.Data.Migrations.Sqlite
+namespace MessageService.Data.Data.Migrations.Sqlite
 {
     [DbContext(typeof(SqliteMessageDbContext))]
-    partial class SqliteMessageDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260816065723_SplitBlobTables")]
+    partial class SplitBlobTables
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder.HasAnnotation("ProductVersion", "10.0.10");
