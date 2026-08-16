@@ -23,6 +23,7 @@ public class ContentDownloadServiceTests : IDisposable
         _connection = SqliteTestDatabase.CreateOpenConnection();
 
         var services = new ServiceCollection();
+        services.AddLogging();
         services.AddDbContext<MessageDbContext>(o => o.UseSqlite(_connection));
         services.AddScoped<IContentWorkSource, DbContentWorkSource>();
         services.AddSingleton<ILineContentClient>(_contentClient);

@@ -7,6 +7,7 @@ using MessageService.Options;
 using Microsoft.Data.Sqlite;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
 namespace MessageService.Services;
@@ -17,7 +18,11 @@ namespace MessageService.Services;
 /// 改用兩種 provider 各自的串流寫入方式，見該方法說明。cipher.Enabled 時再包一層
 /// ChunkedEncryptingStream（見 FieldCipher.CreateEncryptingStream）——blob 不像文字欄位能用
 /// EF ValueConverter 整值加密，Range 拖進度需要分塊，格式與讀取端見 ChunkedBlobCipher。</summary>
-public class DbContentWorkSource(MessageDbContext dbContext, IOptions<ContentDownloadOptions> options, FieldCipher cipher) : IContentWorkSource
+public class DbContentWorkSource(
+    MessageDbContext dbContext,
+    IOptions<ContentDownloadOptions> options,
+    FieldCipher cipher,
+    ILogger<DbContentWorkSource> logger) : IContentWorkSource
 {
     private const int BufferSize = 81920;
     private readonly ContentDownloadOptions _options = options.Value;
@@ -80,19 +85,15 @@ public class DbContentWorkSource(MessageDbContext dbContext, IOptions<ContentDow
         return pendingIds.Concat(retryableIds).ToList();
     }
 
-    public async Task<ContentWorkItem?> GetAsync(long contentId, CancellationToken cancellationToken)
-    {
-        var content = await dbContext.MessageContents
-            .Include(c => c.GroupMessage)
-            .FirstOrDefaultAsync(c => c.Id == contentId, cancellationToken);
-
-        if (content?.GroupMessage is null || content.DownloadStatus != DownloadStatus.Pending)
-        {
-            return null;
-        }
-
-        return new ContentWorkItem(content.Id, content.GroupMessage.LineMessageId, content.GroupMessage.MessageType, content.GroupMessage.StickerId);
-    }
+    public Task<ContentWorkItem?> GetAsync(long contentId, CancellationToken cancellationToken) =>
+        dbContext.MessageContents
+            .Where(c => c.Id == contentId && c.DownloadStatus == DownloadStatus.Pending && c.GroupMessage != null)
+            .Select(c => new ContentWorkItem(
+                c.Id,
+                c.GroupMessage!.LineMessageId,
+                c.GroupMessage.MessageType,
+                c.GroupMessage.StickerId))
+            .FirstOrDefaultAsync(cancellationToken);
 
     /// <summary>blob 寫入先於中繼資料更新：中斷時（例如服務被殺）狀態最壞停在 Downloading，
     /// 下次啟動的 RequeuePendingAsync 會整個重跑（見 GetPendingIdsAsync 對 Downloading 的回收
@@ -192,19 +193,27 @@ public class DbContentWorkSource(MessageDbContext dbContext, IOptions<ContentDow
             }
         }
 
-        var entity = await dbContext.MessageContents.FirstOrDefaultAsync(c => c.Id == contentId, cancellationToken);
-        if (entity is null)
+        try
         {
-            return;
+            var now = DateTimeOffset.UtcNow;
+            await dbContext.MessageContents
+                .Where(c => c.Id == contentId)
+                .ExecuteUpdateAsync(s => s
+                    .SetProperty(c => c.ContentType, contentType)
+                    .SetProperty(c => c.DownloadStatus, DownloadStatus.Completed)
+                    .SetProperty(c => c.CompletedAt, now)
+                    // 歸零，不然「失敗 9 次後終於成功」的內容會永遠帶著 FailedAttempts=9，
+                    // 日後若加上「重新下載」之類的功能會從 9 起跳、一次就撞到 MaxFailedRetries
+                    .SetProperty(c => c.FailedAttempts, 0),
+                    cancellationToken);
         }
-
-        entity.ContentType = contentType;
-        entity.DownloadStatus = DownloadStatus.Completed;
-        entity.CompletedAt = DateTimeOffset.UtcNow;
-        // 歸零，不然「失敗 9 次後終於成功」的內容會永遠帶著 FailedAttempts=9，
-        // 日後若加上「重新下載」之類的功能會從 9 起跳、一次就撞到 MaxFailedRetries
-        entity.FailedAttempts = 0;
-        await dbContext.SaveChangesAsync(cancellationToken);
+        catch (Exception ex)
+        {
+            // blob 已經寫進去了，中繼資料卻沒更新——這一筆會卡在 Downloading，
+            // 要靠下次啟動的回收整個重跑，所以特別記下來
+            logger.LogError(ex, "內容 {ContentId} 的 blob 已寫入，但中繼資料更新失敗", contentId);
+            throw;
+        }
     }
 
     /// <summary>把認領失敗的列改回 Pending，讓 ProcessAsync 的重試迴圈下一次呼叫 CompleteAsync
@@ -253,16 +262,14 @@ public class DbContentWorkSource(MessageDbContext dbContext, IOptions<ContentDow
 
     public async Task FailAsync(long contentId, CancellationToken cancellationToken)
     {
-        var entity = await dbContext.MessageContents.FirstOrDefaultAsync(c => c.Id == contentId, cancellationToken);
-        if (entity is null)
-        {
-            return;
-        }
-
-        entity.DownloadStatus = DownloadStatus.Failed;
-        entity.FailedAttempts++;
-        entity.LastAttemptAt = DateTimeOffset.UtcNow;
-        await dbContext.SaveChangesAsync(cancellationToken);
+        var now = DateTimeOffset.UtcNow;
+        await dbContext.MessageContents
+            .Where(c => c.Id == contentId)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(c => c.DownloadStatus, DownloadStatus.Failed)
+                .SetProperty(c => c.FailedAttempts, c => c.FailedAttempts + 1)
+                .SetProperty(c => c.LastAttemptAt, now),
+                cancellationToken);
     }
 }
 
