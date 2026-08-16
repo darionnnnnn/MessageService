@@ -8,10 +8,8 @@ public interface IContentWorkSource
 {
     /// <summary>撈出待處理的內容 Id：Pending，加上仍可重試的 Failed（一併重設為 Pending——
     /// 常見成因是設定錯誤而非內容本身有問題，修好設定重啟後應該自動補跑）。
-    /// <paramref name="reclaimDownloading"/> 為 true 時連 Downloading 也一併改回 Pending 撿回——
-    /// 這代表呼叫端保證「此刻沒有自己的 worker 在跑」，只有啟動接續成立；週期重掃時 worker
-    /// 可能正在下載大檔，必須傳 false，否則會把正在下載的列打回 Pending，讓另一個 worker
-    /// 再度認領、兩邊同時寫同一顆 blob（CompleteAsync 的認領互斥就是為了擋這個）。</summary>
+    /// <paramref name="reclaimDownloading"/> 為 true 時，會一併回收逾期（或 ClaimedAt 為 null）
+    /// 的 Downloading 內容並改回 Pending 重新撿回；租約未逾期的 Downloading 則不予變動。</summary>
     Task<IReadOnlyList<long>> GetPendingIdsAsync(bool reclaimDownloading, CancellationToken cancellationToken);
 
     /// <summary>取單筆詳情。回傳 null 代表這筆已經不是 Pending 了（已被處理過或不存在）——

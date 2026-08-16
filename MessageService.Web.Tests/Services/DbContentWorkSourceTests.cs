@@ -78,6 +78,30 @@ public class DbContentWorkSourceTests : IDisposable
         return (dbContext, groupMessage.Content!.Id);
     }
 
+    private async Task<long> SeedDownloadingContentAsync(DateTimeOffset? claimedAt)
+    {
+        using var scope = _provider.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+
+        var groupMessage = new GroupMessage
+        {
+            WebhookEventId = Guid.NewGuid().ToString(),
+            LineMessageId = $"line-{Guid.NewGuid():N}",
+            GroupId = "G1",
+            MessageType = "image",
+            EventTimestamp = DateTimeOffset.UtcNow,
+            ReceivedAt = DateTimeOffset.UtcNow,
+            Content = new MessageContent
+            {
+                DownloadStatus = DownloadStatus.Downloading,
+                ClaimedAt = claimedAt
+            }
+        };
+        dbContext.GroupMessages.Add(groupMessage);
+        await dbContext.SaveChangesAsync();
+        return groupMessage.Content!.Id;
+    }
+
     [Fact]
     public async Task GetPendingIdsAsync_FailedWithinWindowAndBelowMaxRetries_IsRequeued()
     {
@@ -803,6 +827,156 @@ public class DbContentWorkSourceTests : IDisposable
         var verifyDb = verifyScope.ServiceProvider.GetRequiredService<MessageDbContext>();
         var remainingBlobCount = await verifyDb.MessageContentBlobs.CountAsync(b => b.MessageContentId == contentId);
         Assert.Equal(0, remainingBlobCount);
+    }
+
+    // ==== 任務 C2 新增測試：認領租約逾期回收與 ClaimedAt 生命週期驗證 ====
+
+    [Fact]
+    public async Task GetPendingIdsAsync_DownloadingWithUnexpiredLease_IsNotRequeued()
+    {
+        // 租約未逾期的 Downloading：表示仍有其他主機或 worker 在下載中，不改狀態、也不出現在待處理清單
+        var claimedAt = DateTimeOffset.UtcNow.AddMinutes(-10);
+        var contentId = await SeedDownloadingContentAsync(claimedAt);
+        using var scope = _provider.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+        var source = CreateSource(dbContext, new ContentDownloadOptions { ClaimLeaseMinutes = 60 });
+
+        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, CancellationToken.None);
+
+        Assert.DoesNotContain(contentId, ids);
+        var reloaded = await ReloadContentAsync(contentId);
+        Assert.Equal(DownloadStatus.Downloading, reloaded.DownloadStatus);
+        Assert.NotNull(reloaded.ClaimedAt);
+        Assert.True(Math.Abs((reloaded.ClaimedAt.Value - claimedAt).TotalSeconds) < 1);
+    }
+
+    [Fact]
+    public async Task GetPendingIdsAsync_DownloadingWithExpiredLease_IsRequeuedAndClaimedAtResetToNull()
+    {
+        // 租約已逾期的 Downloading（例如 70 分鐘前認領，租約 60 分鐘）：應改回 Pending 且 ClaimedAt 變為 null，並出現在回傳清單
+        var claimedAt = DateTimeOffset.UtcNow.AddMinutes(-70);
+        var contentId = await SeedDownloadingContentAsync(claimedAt);
+        using var scope = _provider.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+        var source = CreateSource(dbContext, new ContentDownloadOptions { ClaimLeaseMinutes = 60 });
+
+        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, CancellationToken.None);
+
+        Assert.Contains(contentId, ids);
+        var reloaded = await ReloadContentAsync(contentId);
+        Assert.Equal(DownloadStatus.Pending, reloaded.DownloadStatus);
+        Assert.Null(reloaded.ClaimedAt);
+    }
+
+    [Fact]
+    public async Task GetPendingIdsAsync_DownloadingWithNullClaimedAt_IsRequeuedAndClaimedAtResetToNull()
+    {
+        // ClaimedAt 為 null 的 Downloading（舊版資料或未設租約的殘留）：視為逾期回收，改回 Pending 且出現在清單中
+        var contentId = await SeedDownloadingContentAsync(claimedAt: null);
+        using var scope = _provider.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+        var source = CreateSource(dbContext, new ContentDownloadOptions { ClaimLeaseMinutes = 60 });
+
+        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, CancellationToken.None);
+
+        Assert.Contains(contentId, ids);
+        var reloaded = await ReloadContentAsync(contentId);
+        Assert.Equal(DownloadStatus.Pending, reloaded.DownloadStatus);
+        Assert.Null(reloaded.ClaimedAt);
+    }
+
+    [Fact]
+    public async Task CompleteAsync_Success_WritesClaimedAtDuringClaim_AndClearsClaimedAtUponCompletion()
+    {
+        // 1. 驗證認領成功時 ClaimedAt 被寫入：取消 token 中斷中繼資料更新，讓狀態留在認領後階段
+        using var scope1 = _provider.CreateScope();
+        var dbContext1 = scope1.ServiceProvider.GetRequiredService<MessageDbContext>();
+        var groupMessage1 = new GroupMessage
+        {
+            WebhookEventId = "e-claim-test-1", LineMessageId = "m-claim-test-1", GroupId = "G1", MessageType = "image",
+            EventTimestamp = DateTimeOffset.UtcNow, ReceivedAt = DateTimeOffset.UtcNow,
+            Content = new MessageContent { DownloadStatus = DownloadStatus.Pending }
+        };
+        dbContext1.GroupMessages.Add(groupMessage1);
+        await dbContext1.SaveChangesAsync();
+        var contentId1 = groupMessage1.Content!.Id;
+
+        using var cts = new CancellationTokenSource();
+        var payload = new byte[] { 1, 2, 3 };
+        var triggerStream = new ActionOnReadStream(new MemoryStream(payload), () => cts.Cancel());
+        var beforeClaim = DateTimeOffset.UtcNow.AddSeconds(-2);
+        var source1 = CreateSource(dbContext1);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            source1.CompleteAsync(contentId1, triggerStream, payload.Length, "image/png", cts.Token));
+
+        var claimedContent = await ReloadContentAsync(contentId1);
+        Assert.Equal(DownloadStatus.Downloading, claimedContent.DownloadStatus);
+        Assert.NotNull(claimedContent.ClaimedAt);
+        Assert.True(claimedContent.ClaimedAt >= beforeClaim);
+
+        // 2. 驗證完整完成後 ClaimedAt 被清空為 null
+        using var scope2 = _provider.CreateScope();
+        var dbContext2 = scope2.ServiceProvider.GetRequiredService<MessageDbContext>();
+        var groupMessage2 = new GroupMessage
+        {
+            WebhookEventId = "e-claim-test-2", LineMessageId = "m-claim-test-2", GroupId = "G1", MessageType = "image",
+            EventTimestamp = DateTimeOffset.UtcNow, ReceivedAt = DateTimeOffset.UtcNow,
+            Content = new MessageContent { DownloadStatus = DownloadStatus.Pending }
+        };
+        dbContext2.GroupMessages.Add(groupMessage2);
+        await dbContext2.SaveChangesAsync();
+        var contentId2 = groupMessage2.Content!.Id;
+
+        var source2 = CreateSource(dbContext2);
+        await source2.CompleteAsync(contentId2, new MemoryStream(payload), payload.Length, "image/png", CancellationToken.None);
+
+        var completedContent = await ReloadContentAsync(contentId2);
+        Assert.Equal(DownloadStatus.Completed, completedContent.DownloadStatus);
+        Assert.Null(completedContent.ClaimedAt);
+    }
+
+    [Fact]
+    public async Task CompleteAsync_StreamThrows_RevertsClaimAndResetsClaimedAtToNull()
+    {
+        // 寫入失敗時回退認領：狀態改回 Pending 且 ClaimedAt 設回 null
+        using var scope = _provider.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+        var groupMessage = new GroupMessage
+        {
+            WebhookEventId = "e-revert-test", LineMessageId = "m-revert-test", GroupId = "G1", MessageType = "image",
+            EventTimestamp = DateTimeOffset.UtcNow, ReceivedAt = DateTimeOffset.UtcNow,
+            Content = new MessageContent { DownloadStatus = DownloadStatus.Pending }
+        };
+        dbContext.GroupMessages.Add(groupMessage);
+        await dbContext.SaveChangesAsync();
+        var contentId = groupMessage.Content!.Id;
+
+        var source = CreateSource(dbContext);
+        // 宣告長度 50 但串流只有 3 bytes -> 觸發 InvalidOperationException
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            source.CompleteAsync(contentId, new MemoryStream([1, 2, 3]), 50, "image/png", CancellationToken.None));
+
+        var reloaded = await ReloadContentAsync(contentId);
+        Assert.Equal(DownloadStatus.Pending, reloaded.DownloadStatus);
+        Assert.Null(reloaded.ClaimedAt);
+    }
+
+    [Fact]
+    public async Task FailAsync_FromDownloadingWithClaimedAt_ClearsClaimedAtAndSetsFailed()
+    {
+        // 失敗標記時（無論原本是 Downloading 還是 Pending）：ClaimedAt 被清空為 null
+        var claimedAt = DateTimeOffset.UtcNow;
+        var contentId = await SeedDownloadingContentAsync(claimedAt);
+        using var scope = _provider.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+        var source = CreateSource(dbContext);
+
+        await source.FailAsync(contentId, CancellationToken.None);
+
+        var reloaded = await ReloadContentAsync(contentId);
+        Assert.Equal(DownloadStatus.Failed, reloaded.DownloadStatus);
+        Assert.Null(reloaded.ClaimedAt);
     }
 
     private sealed class CapturingLogger : ILogger<DbContentWorkSource>

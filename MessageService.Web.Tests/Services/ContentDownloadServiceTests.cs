@@ -333,8 +333,8 @@ public class ContentDownloadServiceTests : IDisposable
         Assert.True(workSource.GetPendingIdsCallCount >= 2);
         Assert.Contains(10, queue.Enqueued);
         Assert.Contains(20, queue.Enqueued);
-        // 週期重掃一律不撿 Downloading（worker 正在跑）
-        Assert.All(workSource.ReclaimDownloadingCalls, reclaim => Assert.False(reclaim));
+        // 週期重掃同樣傳入 reclaimDownloading: true 以回收逾期的認領
+        Assert.All(workSource.ReclaimDownloadingCalls, reclaim => Assert.True(reclaim));
     }
 
     [Fact]

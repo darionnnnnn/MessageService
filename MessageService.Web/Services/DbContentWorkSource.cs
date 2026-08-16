@@ -32,16 +32,15 @@ public class DbContentWorkSource(
 
     public async Task<IReadOnlyList<long>> GetPendingIdsAsync(bool reclaimDownloading, CancellationToken cancellationToken)
     {
-        // Downloading：上次行程被殺／當機時卡在「已認領但沒做完」的列，見 GetAsync 的認領邏輯
-        // 與 DownloadStatus.Downloading 的說明。啟動接續沒辦法分辨「真的還在下載中」跟「已經
-        // 沒有 worker 在處理」，一律當成中斷、整批撿回改回 Pending 重跑——但這個「一律」只在
-        // 啟動時成立（reclaimDownloading=true）。ContentDownloadService 每隔
-        // ContentDownload:RequeueIntervalMinutes 的週期重掃走的是 reclaimDownloading=false：
-        // 那時 worker 活著、可能正在下載大檔，Downloading 是真的在下載，不能碰。行程活著時
-        // 下載中途失敗會由 CompleteAsync 的 RevertClaimAsync 自己改回 Pending，不會留孤兒。
+        // Downloading：卡在「已認領但沒做完」的列。當 reclaimDownloading=true 時，只回收
+        // 逾期（ClaimedAt < UtcNow - ClaimLeaseMinutes）或 ClaimedAt 為 null（舊資料／異常遺留）的列，
+        // 並將狀態改回 Pending、清空 ClaimedAt 重新撿回。租約未逾期的 Downloading 表示其他主機或本機
+        // worker 仍在正常下載中，一律不碰也不列入待處理清單。
+        var leaseCutoff = DateTimeOffset.UtcNow.AddMinutes(-_options.ClaimLeaseMinutes);
         var pendingIds = await dbContext.MessageContents
             .Where(c => c.DownloadStatus == DownloadStatus.Pending
-                || (reclaimDownloading && c.DownloadStatus == DownloadStatus.Downloading))
+                || (reclaimDownloading && c.DownloadStatus == DownloadStatus.Downloading
+                    && (c.ClaimedAt == null || c.ClaimedAt < leaseCutoff)))
             .Select(c => c.Id)
             .ToListAsync(cancellationToken);
 
@@ -49,7 +48,9 @@ public class DbContentWorkSource(
         {
             await dbContext.MessageContents
                 .Where(c => pendingIds.Contains(c.Id) && c.DownloadStatus == DownloadStatus.Downloading)
-                .ExecuteUpdateAsync(s => s.SetProperty(c => c.DownloadStatus, DownloadStatus.Pending), cancellationToken);
+                .ExecuteUpdateAsync(s => s
+                    .SetProperty(c => c.DownloadStatus, DownloadStatus.Pending)
+                    .SetProperty(c => c.ClaimedAt, (DateTimeOffset?)null), cancellationToken);
         }
 
         // Failed 只在訊息到達後的保留視窗內、且累計失敗次數未達上限才重新撿回——LINE 的內容
@@ -79,7 +80,9 @@ public class DbContentWorkSource(
         {
             await dbContext.MessageContents
                 .Where(c => retryableIds.Contains(c.Id))
-                .ExecuteUpdateAsync(s => s.SetProperty(c => c.DownloadStatus, DownloadStatus.Pending), cancellationToken);
+                .ExecuteUpdateAsync(s => s
+                    .SetProperty(c => c.DownloadStatus, DownloadStatus.Pending)
+                    .SetProperty(c => c.ClaimedAt, (DateTimeOffset?)null), cancellationToken);
         }
 
         return pendingIds.Concat(retryableIds).ToList();
@@ -96,7 +99,7 @@ public class DbContentWorkSource(
             .FirstOrDefaultAsync(cancellationToken);
 
     /// <summary>blob 寫入先於中繼資料更新：中斷時（例如服務被殺）狀態最壞停在 Downloading，
-    /// 下次啟動的 RequeuePendingAsync 會整個重跑（見 GetPendingIdsAsync 對 Downloading 的回收
+    /// 租約逾期後由 RequeuePendingAsync 回收重跑（見 GetPendingIdsAsync 對 Downloading 的回收
     /// 邏輯），不會留下「狀態是 Completed 但內容是半截」的資料。
     ///
     /// 認領（Pending → Downloading）刻意放在這裡而不是 GetAsync：影片／語音要先靠 GetAsync
@@ -114,9 +117,12 @@ public class DbContentWorkSource(
     /// SqliteBlob（Stream 子類別）增量寫入。</summary>
     public async Task CompleteAsync(long contentId, Stream content, long contentLength, string? contentType, CancellationToken cancellationToken)
     {
+        var claimTime = DateTimeOffset.UtcNow;
         var claimed = await dbContext.MessageContents
             .Where(c => c.Id == contentId && c.DownloadStatus == DownloadStatus.Pending)
-            .ExecuteUpdateAsync(s => s.SetProperty(c => c.DownloadStatus, DownloadStatus.Downloading), cancellationToken);
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(c => c.DownloadStatus, DownloadStatus.Downloading)
+                .SetProperty(c => c.ClaimedAt, claimTime), cancellationToken);
 
         if (claimed == 0)
         {
@@ -171,10 +177,10 @@ public class DbContentWorkSource(
             // CompleteAsync 會因為 WHERE DownloadStatus==Pending 認領不到（claimed==0）而
             // 直接靜默 return，既不寫入也不拋例外，重試迴圈會把這次失敗誤判成功，
             // 這顆內容永遠卡在 Downloading（見 DownloadStatus.Downloading 的回收說明，
-            // 只有整個行程重啟才會被 GetPendingIdsAsync 撿回）。
+            // 逾期後由 RequeuePendingAsync 撿回）。
             // 回退本身失敗（多半跟原始失敗同因，例如資料庫斷線）就放手讓原始例外照常往外拋，
             // 不讓回退的例外把真正的失敗原因蓋掉——這種情況下狀態留在 Downloading，
-            // 由啟動接續的掃描當最後防線
+            // 由租約逾期後的掃描當最後防線
             try
             {
                 await RevertClaimAsync(contentId, cancellationToken);
@@ -202,6 +208,7 @@ public class DbContentWorkSource(
                     .SetProperty(c => c.ContentType, contentType)
                     .SetProperty(c => c.DownloadStatus, DownloadStatus.Completed)
                     .SetProperty(c => c.CompletedAt, now)
+                    .SetProperty(c => c.ClaimedAt, (DateTimeOffset?)null)
                     // 歸零，不然「失敗 9 次後終於成功」的內容會永遠帶著 FailedAttempts=9，
                     // 日後若加上「重新下載」之類的功能會從 9 起跳、一次就撞到 MaxFailedRetries
                     .SetProperty(c => c.FailedAttempts, 0),
@@ -210,19 +217,21 @@ public class DbContentWorkSource(
         catch (Exception ex)
         {
             // blob 已經寫進去了，中繼資料卻沒更新——這一筆會卡在 Downloading，
-            // 要靠下次啟動的回收整個重跑，所以特別記下來
+            // 租約逾期後由 RequeuePendingAsync 回收整個重跑，所以特別記下來
             logger.LogError(ex, "內容 {ContentId} 的 blob 已寫入，但中繼資料更新失敗", contentId);
             throw;
         }
     }
 
-    /// <summary>把認領失敗的列改回 Pending，讓 ProcessAsync 的重試迴圈下一次呼叫 CompleteAsync
+    /// <summary>把認領失敗的列改回 Pending 並清空 ClaimedAt，讓 ProcessAsync 的重試迴圈下一次呼叫 CompleteAsync
     /// 時能重新認領到（見上面 catch 區塊的說明）。用 ExecuteUpdateAsync 直接下 SQL，不透過
     /// change tracker——這裡不需要、也不該去查詢或建立 change tracker 對這個實體的追蹤。</summary>
     private Task RevertClaimAsync(long contentId, CancellationToken cancellationToken) =>
         dbContext.MessageContents
             .Where(c => c.Id == contentId && c.DownloadStatus == DownloadStatus.Downloading)
-            .ExecuteUpdateAsync(s => s.SetProperty(c => c.DownloadStatus, DownloadStatus.Pending), cancellationToken);
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(c => c.DownloadStatus, DownloadStatus.Pending)
+                .SetProperty(c => c.ClaimedAt, (DateTimeOffset?)null), cancellationToken);
 
     private static async Task WriteContentSqlServerAsync(
         DbConnection connection, long contentId, Stream content, CancellationToken cancellationToken)
@@ -275,6 +284,7 @@ public class DbContentWorkSource(
             .Where(c => c.Id == contentId)
             .ExecuteUpdateAsync(s => s
                 .SetProperty(c => c.DownloadStatus, DownloadStatus.Failed)
+                .SetProperty(c => c.ClaimedAt, (DateTimeOffset?)null)
                 .SetProperty(c => c.FailedAttempts, c => c.FailedAttempts + 1)
                 .SetProperty(c => c.LastAttemptAt, now),
                 cancellationToken);

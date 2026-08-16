@@ -22,4 +22,7 @@ public class ContentDownloadOptions
 
     /// <summary>週期性重掃的間隔分鐘數；設為 0 表示停用週期重掃，只保留啟動時那一次。</summary>
     public int RequeueIntervalMinutes { get; set; } = 15;
+
+    /// <summary>認領租約的分鐘數；超過這個時間還停在 Downloading 就視為那台主機已經死了，可被回收重跑。</summary>
+    public int ClaimLeaseMinutes { get; set; } = 60;
 }
