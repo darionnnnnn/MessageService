@@ -27,7 +27,10 @@ public static class GroupLastMessageTracker
     public static async Task TrackAsync(
         MessageDbContext dbContext, string groupId, long messageId, DateTimeOffset eventTimestamp, CancellationToken cancellationToken)
     {
-        var trackedEntry = dbContext.ChangeTracker.Entries<Group>().FirstOrDefault(e => e.Entity.GroupId == groupId);
+        // 同一個 DbContext 內重複遇到同群組（批次落地／測試 seeding）時直接用已追蹤的那顆——
+        // 走 identity map 的鍵查找（O(1)），不用 ChangeTracker.Entries<Group>()：那會先觸發
+        // DetectChanges 掃過所有已追蹤實體（含同批累積的大量 GroupMessage），批次下退化成 O(n²)
+        var trackedEntry = dbContext.Groups.Local.FindEntry(groupId);
         if (trackedEntry is not null)
         {
             if (trackedEntry.Entity.LastMessageId is null || messageId > trackedEntry.Entity.LastMessageId)

@@ -60,7 +60,8 @@ public class DbContentWorkSource(
         // 就是小量（下載失敗的內容），先用 FailedAttempts 門檻縮小範圍後在記憶體篩 cutoff
         // 划算得多，不值得為此冒風險改儲存格式。
         // 只投影 Id 與 ReceivedAt。附檔 blob 已拆到獨立的 MessageContentBlobs 表，父表這邊
-        // 撈整列不再有 blob 的代價；FailAsync 也會順手刪掉失敗留下的 blob 列，不會有殘骸。
+        // 撈整列不再有 blob 的代價；FailAsync 也會順手刪掉失敗留下的 blob 列（行程被殺在串流
+        // 中途留下的殘留則由下次 CompleteAsync 先刪後插覆蓋掉）。
         var cutoff = DateTimeOffset.UtcNow.AddDays(-_options.FailedRetryWindowDays);
         var failedCandidates = await dbContext.MessageContents
             .Where(c => c.DownloadStatus == DownloadStatus.Failed

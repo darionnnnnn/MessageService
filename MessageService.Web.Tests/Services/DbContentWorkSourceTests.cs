@@ -623,7 +623,7 @@ public class DbContentWorkSourceTests : IDisposable
         try
         {
             await dbContext.Database.ExecuteSqlRawAsync(
-                "INSERT INTO MessageContents (GroupMessageId, DownloadStatus, FailedAttempts) VALUES (999999, 0, 0);");
+                "INSERT INTO MessageContents (GroupMessageId, DownloadStatus, FailedAttempts) VALUES (999999, 'Pending', 0);");
             var orphanId = await dbContext.MessageContents
                 .Where(c => c.GroupMessageId == 999999)
                 .Select(c => c.Id)

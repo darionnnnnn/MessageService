@@ -346,7 +346,7 @@ mutex，避免兩邊同時建 `__EFMigrationsHistory` 互相打架。
 
 - **外部圖檔一律由連得到外網的主機下載後存 DB，前端只走自家 API**：拆機拓撲下檢視端可能完全沒有對外網路；這也讓去識別化模式能真正生效，因為圖檔不由瀏覽器直接向 LINE 索取。
 - **圖片/影片/語音/檔案存 DB（varbinary）而非磁碟**：檢視端只要連 DB 就能讀到；保留期清除靠 CASCADE 一次帶走，不會產生孤兒檔案。代價是 DB 容量成長快，若量大屆時再評估 FILESTREAM 或磁碟存放（內容獨立一表已為搬遷留好最小改動面）
-- **三個 blob 欄位各自獨立一表（`MessageContentBlobs`／`GroupPictures`／`GroupMemberPictures`），不掛在父實體上**：blob 掛在 `MessageContent`／`Group`／`GroupMember` 上時，任何查詢只要少寫一個 `.Select(...)` 投影，EF 就會把幾百 MB 的影片一起撈進記憶體。這個 bug 在連續五輪程式碼審查裡出現在**五個不同的檔案**，共通根因就是欄位的位置——修個別查詢治不了，拆表才能讓「預設就是輕的」，忘記投影不再有代價。代價是拿 blob 要多一次 join 或另一次查詢，但那些路徑本來就是「明確要拿檔案」的路徑。**父表的查詢不該再 `Include` 這三個子實體**（只需要判斷有沒有時用 `子實體 != null`，EF 會翻成 SQL 的存在性判斷，不傳 blob）
+- **blob 各自獨立一表（`MessageContentBlobs`／`GroupPictures`／`GroupMemberPictures`），不掛在父實體上**：父表預設就是輕的，任何查詢忘記投影都不會把幾百 MB 的檔案拖進記憶體；要 blob 的路徑必須明確查子表。查詢與寫入規則見 [CLAUDE.md](CLAUDE.md) 的「資料層規則」，取捨過程見 [docs/history/2026-08-16_REVIEW-FEEDBACK-6-PLAN.md](docs/history/2026-08-16_REVIEW-FEEDBACK-6-PLAN.md)
 - **webhook 除了「outbox 寫不進去」以外一律回 200**（簽章合法後）：回非 2xx 會讓 LINE 重送並可能判定 webhook 失效，所以 JSON 解析失敗、個別事件處理失敗都只記 log 並回 200（畸形 payload 重送也不會變好）。唯一的例外是寫本機 outbox 本身失敗（磁碟滿、檔案鎖住、DB 損毀）——那是唯一會真的把訊息弄丟的情況，改回 500 讓 LINE 的 redelivery 接手，重送造成的重複由 `WebhookEventId` 唯一索引擋掉。**前提是 LINE Developers Console 要開啟 webhook redelivery**（預設關閉，見 [docs/LINE-BOT-SETUP.md](docs/LINE-BOT-SETUP.md)）；沒開的話回 500 等於直接放棄那則事件
 - **webhook 收進來後只寫本機 outbox，不直接碰資料庫**：落地（含防重送）延後到背景排空時才做，webhook 回應時間因此跟資料庫是否可用完全脫鉤，短暫斷線不會掉訊息；這也是收錄端支援網段分離部署（`Deployment:Mode`）的基礎，詳見 [docs/DEPLOYMENT-MODES.md](docs/DEPLOYMENT-MODES.md)
 - **下載走背景佇列**：影片/語音要等 LINE 轉檔、檔案可達數百 MB，不能在 webhook 請求內同步處理；服務重啟會自動撈回殘留的 Pending 接續下載

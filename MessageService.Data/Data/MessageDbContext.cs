@@ -191,7 +191,7 @@ public class MessageDbContext(DbContextOptions options, FieldCipher? cipher = nu
 
         // GroupId／UserId 保持明文——它們是隨機識別碼、不含個資，索引與 GroupBy 需要它們留在
         // 明文才能運作（見上面的索引與批次 A 的收斂）。這裡加密的都是實際承載個資的欄位；
-        // blob（MessageContents.Content）不走這裡，需要保留 Range 拖進度能力，改在
+        // blob（MessageContentBlobs.Content）不走這裡，需要保留 Range 拖進度能力，改在
         // DbContentWorkSource／ContentStreamService 用分塊加解密，見 ChunkedBlobCipher。
         if (cipher is { Enabled: true })
         {

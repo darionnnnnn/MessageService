@@ -13,7 +13,7 @@ namespace MessageService.Data.Crypto;
 /// （見 docs/POST-CONSOLIDATION-REVIEW-PLAN.md 批次E）唯一能分辨舊資料是哪把金鑰加的依據。
 /// 讀取端同時認舊格式 "ENC1:"（沒有 key id，直接嘗試用目前金鑰解，解不開就原樣傳回）——
 /// 讓「加密啟用前寫入的舊資料」與「ENC1 時期寫入的資料」都跟新資料混存，不需要一次性轉換
-/// 作業。blob（MessageContents.Content）不走這裡，Range 拖進度需要分塊加解密，格式見
+/// 作業。blob（MessageContentBlobs.Content）不走這裡，Range 拖進度需要分塊加解密，格式見
 /// ChunkedBlobCipher，本類別透過 CreateEncryptingStream／DecryptChunk 提供金鑰。</summary>
 public class FieldCipher
 {

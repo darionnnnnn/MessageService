@@ -159,6 +159,22 @@
 | `AvatarsController` 解密時 2× 記憶體峰值 | 不處理。頭貼上限 2MB，且常態路徑已被 304 短路 |
 | 死程式碼 | 無殘留（`EncryptPictureContent`、`PictureBytes` 都仍在用） |
 
+### 終檢輪（併 dev 前的兩份獨立審查）
+
+| 項目 | 處置 |
+|---|---|
+| 孤兒 `MessageContent` 測試把 `DownloadStatus` 塞成整數 0，實際驗到的是「狀態不是 Pending」而非「GroupMessage 不存在」 | 已修為 `'Pending'`，測試才真的覆蓋到 `GroupMessage != null` 分支 |
+| `TrackAsync` 用 `ChangeTracker.Entries<Group>()` 找已追蹤實體：會先觸發 `DetectChanges` 掃全部追蹤實體，批次落地／測試 seed 下退化 O(n²) | 改 `Groups.Local.FindEntry(key)`（identity map，O(1)） |
+| `DbProfileStore` 的 `FindAsync` 被無理由換成 `FirstOrDefaultAsync`，失去「Added 尚未落地也命中」的安全網 | 改回 `FindAsync`（它一樣不會載入子表 blob） |
+| `GetPendingIdsAsync` 註解宣稱「不會有殘骸」過強：行程被殺在串流中途時 `FailAsync` 不會執行 | 註解改成「由下次 `CompleteAsync` 先刪後插覆蓋」 |
+| migration 測試沒有直接驗 rowid 別名 | 補「在 migration 產生的表上開 `SqliteBlob`」斷言 |
+| `UpsertPictureRow` 用魔術字串 `"Content"` | 改 `nameof` |
+| 三處註解仍寫 `MessageContents.Content` | 已改 |
+| README 決策備忘與 CLAUDE.md 資料層規則重複、且含過程敘述 | README 只留結論＋連結，規則只在 CLAUDE.md 一份 |
+| DEPLOYMENT-GUIDE 仍把 blob 描述成 `MessageContents` 欄位、`SUM(DATALENGTH)` 未指明表名 | 已改；升級前後查的表不同已分別寫明 |
+| `UpsertMemberAsync` 沒有 `UpsertGroupAsync` 那層撞鍵重試 | **不處理**：既有行為，非本輪引入；成員頭貼撞鍵機率遠低於群組 stub |
+| `FailAsync` 兩個述句無交易、`RefreshStaleGroupPointers` N 個獨立述句 | **不處理**：中途失敗的後果都可被下一輪覆蓋，加交易不划算 |
+
 ## 9. 待人工驗收
 
 - SQL Server 的 `SplitBlobTables` migration **沒有在真實 SQL Server 上跑過**（本機無實例）。

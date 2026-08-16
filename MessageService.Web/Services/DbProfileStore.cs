@@ -67,7 +67,7 @@ public class DbProfileStore(MessageDbContext dbContext, FieldCipher cipher, ILog
 
     private async Task ApplyGroupUpsertAsync(string groupId, GroupSummary summary, CancellationToken cancellationToken)
     {
-        var existing = await dbContext.Groups.FirstOrDefaultAsync(g => g.GroupId == groupId, cancellationToken);
+        var existing = await dbContext.Groups.FindAsync([groupId], cancellationToken);
         if (existing is null)
         {
             var entity = new Group
@@ -104,7 +104,7 @@ public class DbProfileStore(MessageDbContext dbContext, FieldCipher cipher, ILog
 
     public async Task UpsertMemberAsync(string groupId, string userId, MemberProfile profile, CancellationToken cancellationToken)
     {
-        var existing = await dbContext.GroupMembers.FirstOrDefaultAsync(m => m.GroupId == groupId && m.UserId == userId, cancellationToken);
+        var existing = await dbContext.GroupMembers.FindAsync([groupId, userId], cancellationToken);
         if (existing is null)
         {
             var entity = new GroupMember
@@ -148,7 +148,7 @@ public class DbProfileStore(MessageDbContext dbContext, FieldCipher cipher, ILog
         if (alreadyExists)
         {
             dbContext.Attach(picture);
-            dbContext.Entry(picture).Property("Content").IsModified = true;
+            dbContext.Entry(picture).Property(nameof(GroupPicture.Content)).IsModified = true;
         }
         else
         {

@@ -159,13 +159,14 @@ dotnet ef database update --project MessageService.Data --context SqlServerMessa
 某幾次改版（例如 `SchemaHardeningRound1` 那次）的 migration 對既有欄位做了
 `ALTER COLUMN`（把幾個 `nvarchar(max)` 欄位收斂成有限長度，好建索引）。SQL Server 執行
 `ALTER COLUMN` 時會**整張表重寫**並持 **Sch-M（結構性）鎖**，鎖持有期間這張表完全無法讀寫；
-`MessageContents` 這張表又裝著所有訊息附檔的 blob，是全庫體積最大的一張。既有環境的
-`GroupMessages`／`MessageContents` 若已經累積相當資料量，升級前務必：
+裝著所有訊息附檔 blob 的 `MessageContentBlobs` 是全庫體積最大的一張表。既有環境的
+`GroupMessages`／`MessageContents`／`MessageContentBlobs` 若已經累積相當資料量，升級前務必：
 
 1. **先估列數**：`SELECT COUNT(*) FROM GroupMessages; SELECT COUNT(*) FROM MessageContents;`——
    幾萬列通常幾秒內完成，數百萬列以上就要認真排時段
 2. **安排維護時段**：升級期間服務會整個停擺（webhook 收不到、檢視端打不開），不是背景
-   悄悄進行；時段長度抓「表重寫」的量，用 blob 的 `SUM(DATALENGTH(Content))` 概估比列數
+   悄悄進行；時段長度抓「表重寫」的量，用 blob 的
+   `SELECT SUM(DATALENGTH(Content)) FROM MessageContentBlobs` 概估比列數
    準——大量媒體檔案會讓重寫時間遠超單純列數估出來的直覺
 3. **確認交易紀錄檔（transaction log）空間**：`ALTER COLUMN` 整張表重寫是單一大交易，
    交易紀錄檔空間不夠會直接失敗並回滾（回滾同樣要花跟正向操作差不多的時間），升級前
@@ -184,7 +185,8 @@ SQLite 環境不受影響——既有檔案由 `LegacySqliteBaseliner` 一次性
 所以除了上面五個步驟以外還要留意：
 
 - **資料庫在升級當下需要約兩倍的 blob 空間**（舊欄位刪除前，同一份內容在新舊兩處各存一份），
-  交易紀錄檔的用量也對應放大。空間估算一樣用 `SUM(DATALENGTH(Content))`。
+  交易紀錄檔的用量也對應放大。空間估算在升級**前**要查舊欄位：
+  `SELECT SUM(DATALENGTH(Content)) FROM MessageContents`（頭貼兩張表通常小到可以忽略）。
 - **升級完成後空間不會自己回收**：刪掉的舊欄位留下的是可重用的空頁。要真的把檔案縮小，
   SQL Server 端在確認服務正常後另外安排 `DBCC SHRINKFILE`（會造成索引碎片，記得之後重建），
   SQLite 端跑一次 `VACUUM`。兩者都建議排在維護時段而不是升級當下。

@@ -120,6 +120,18 @@ public class SplitBlobTablesMigrationTests : IDisposable
             Assert.Equal(messageContentBytes, messageBlobs[0].Content);
         }
 
+        // 4b. migration 建出來的 MessageContentBlobs 主鍵必須是 rowid 別名（INTEGER PRIMARY KEY）——
+        // ContentStreamService／DbContentWorkSource 是用 SqliteBlob 以 MessageContentId 當 rowid
+        // 開啟 blob 的。直接在 migration 產生的表上開一次，型別不對會在這裡炸而不是等到正式環境
+        using (var connection = new SqliteConnection(ConnectionString))
+        {
+            connection.Open();
+            using var blob = new SqliteBlob(connection, "MessageContentBlobs", "Content", 101, readOnly: true);
+            var buffer = new byte[messageContentBytes.Length];
+            Assert.Equal(buffer.Length, blob.Read(buffer, 0, buffer.Length));
+            Assert.Equal(messageContentBytes, buffer);
+        }
+
         // 5. 斷言父表上的舊欄位已經不存在
         using (var connection = new SqliteConnection(ConnectionString))
         {
