@@ -979,9 +979,208 @@ public class DbContentWorkSourceTests : IDisposable
         Assert.Null(reloaded.ClaimedAt);
     }
 
+    private async Task<List<long>> SeedPendingContentsAsync(int count)
+    {
+        using var scope = _provider.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+        var now = DateTimeOffset.UtcNow;
+        var messages = new List<GroupMessage>(count);
+        for (var i = 0; i < count; i++)
+        {
+            messages.Add(new GroupMessage
+            {
+                WebhookEventId = $"e-multi-p-{i}-{Guid.NewGuid():N}",
+                LineMessageId = $"m-multi-p-{i}",
+                GroupId = "G1",
+                MessageType = "image",
+                EventTimestamp = now,
+                ReceivedAt = now,
+                Content = new MessageContent { DownloadStatus = DownloadStatus.Pending }
+            });
+        }
+        dbContext.GroupMessages.AddRange(messages);
+        await dbContext.SaveChangesAsync();
+        return messages.Select(m => m.Content!.Id).OrderBy(id => id).ToList();
+    }
+
+    private async Task<List<long>> SeedDownloadingContentsAsync(int count, DateTimeOffset? claimedAt)
+    {
+        using var scope = _provider.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+        var now = DateTimeOffset.UtcNow;
+        var messages = new List<GroupMessage>(count);
+        for (var i = 0; i < count; i++)
+        {
+            messages.Add(new GroupMessage
+            {
+                WebhookEventId = $"e-multi-d-{i}-{Guid.NewGuid():N}",
+                LineMessageId = $"m-multi-d-{i}",
+                GroupId = "G1",
+                MessageType = "image",
+                EventTimestamp = now,
+                ReceivedAt = now,
+                Content = new MessageContent { DownloadStatus = DownloadStatus.Downloading, ClaimedAt = claimedAt }
+            });
+        }
+        dbContext.GroupMessages.AddRange(messages);
+        await dbContext.SaveChangesAsync();
+        return messages.Select(m => m.Content!.Id).OrderBy(id => id).ToList();
+    }
+
+    private async Task<List<long>> SeedFailedContentsAsync(int count, DateTimeOffset receivedAt, int failedAttempts = 1)
+    {
+        using var scope = _provider.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+        var messages = new List<GroupMessage>(count);
+        for (var i = 0; i < count; i++)
+        {
+            messages.Add(new GroupMessage
+            {
+                WebhookEventId = $"e-multi-f-{i}-{Guid.NewGuid():N}",
+                LineMessageId = $"m-multi-f-{i}",
+                GroupId = "G1",
+                MessageType = "image",
+                EventTimestamp = receivedAt,
+                ReceivedAt = receivedAt,
+                Content = new MessageContent { DownloadStatus = DownloadStatus.Failed, FailedAttempts = failedAttempts }
+            });
+        }
+        dbContext.GroupMessages.AddRange(messages);
+        await dbContext.SaveChangesAsync();
+        return messages.Select(m => m.Content!.Id).OrderBy(id => id).ToList();
+    }
+
+    // ==== 任務 E1 新增測試：待處理清單上限、分批 UPDATE 與截斷 Log 驗證 ====
+
+    [Fact]
+    public async Task GetPendingIdsAsync_PendingExceedsMaxPendingIdsPerScan_ReturnsOnlyLimitWithSmallestIdsAndLogsInfo()
+    {
+        // 驗證：Pending 筆數超過上限時，單輪只回傳上限筆數，且回傳的是 Id 最小的那些，並記錄 LogInformation
+        var allIds = await SeedPendingContentsAsync(25);
+        var maxLimit = 10;
+        var logger = new CapturingLogger();
+
+        using var scope = _provider.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+        var source = CreateSource(dbContext, new ContentDownloadOptions { MaxPendingIdsPerScan = maxLimit }, logger: logger);
+
+        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, CancellationToken.None);
+
+        Assert.Equal(maxLimit, ids.Count);
+        Assert.Equal(allIds.Take(maxLimit).ToList(), ids);
+        Assert.Single(logger.Informations);
+        Assert.Contains(maxLimit.ToString(), logger.Informations[0]);
+    }
+
+    [Fact]
+    public async Task GetPendingIdsAsync_PendingExceedsLimit_SubsequentScansProcessAllItemsWithoutLoss()
+    {
+        // 驗證：上限外的資料在下一輪呼叫時仍會被撈到（連續呼叫多輪直到全部處理完畢）
+        var allIds = await SeedPendingContentsAsync(25);
+        var maxLimit = 10;
+
+        var collectedIds = new List<long>();
+
+        while (true)
+        {
+            using var scope = _provider.CreateScope();
+            var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+            var source = CreateSource(dbContext, new ContentDownloadOptions { MaxPendingIdsPerScan = maxLimit });
+
+            var batchIds = await source.GetPendingIdsAsync(reclaimDownloading: true, CancellationToken.None);
+            if (batchIds.Count == 0)
+            {
+                break;
+            }
+
+            collectedIds.AddRange(batchIds);
+
+            // 模擬完成處理並標記為 Completed
+            await dbContext.MessageContents
+                .Where(c => batchIds.Contains(c.Id))
+                .ExecuteUpdateAsync(s => s.SetProperty(c => c.DownloadStatus, DownloadStatus.Completed));
+        }
+
+        Assert.Equal(allIds.Count, collectedIds.Count);
+        Assert.Equal(allIds, collectedIds);
+    }
+
+    [Fact]
+    public async Task GetPendingIdsAsync_DownloadingReclaimExceeds500Items_AllItemsBatchUpdatedToPending()
+    {
+        // 驗證：逾期 Downloading 筆數超過 500（例如 1200 筆）時，分批 UPDATE 正確套用到每一筆，無一遺漏
+        var claimedAt = DateTimeOffset.UtcNow.AddMinutes(-70);
+        var allIds = await SeedDownloadingContentsAsync(1200, claimedAt);
+
+        using var scope = _provider.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+        var source = CreateSource(dbContext, new ContentDownloadOptions { MaxPendingIdsPerScan = 2000, ClaimLeaseMinutes = 60 });
+
+        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, CancellationToken.None);
+
+        Assert.Equal(1200, ids.Count);
+        Assert.Equal(allIds, ids);
+
+        using var verifyScope = _provider.CreateScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<MessageDbContext>();
+        var pendingCount = await verifyDb.MessageContents.AsNoTracking().CountAsync(c => c.DownloadStatus == DownloadStatus.Pending && c.ClaimedAt == null);
+        var downloadingCount = await verifyDb.MessageContents.AsNoTracking().CountAsync(c => c.DownloadStatus == DownloadStatus.Downloading);
+
+        Assert.Equal(1200, pendingCount);
+        Assert.Equal(0, downloadingCount);
+    }
+
+    [Fact]
+    public async Task GetPendingIdsAsync_FailedRetryExceeds500Items_AllItemsBatchUpdatedToPending()
+    {
+        // 驗證：重試 Failed 筆數超過 500（例如 1200 筆）時，分批 UPDATE 正確套用到每一筆
+        var receivedAt = DateTimeOffset.UtcNow.AddDays(-1);
+        var allIds = await SeedFailedContentsAsync(1200, receivedAt, failedAttempts: 1);
+
+        using var scope = _provider.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+        var source = CreateSource(dbContext, new ContentDownloadOptions
+        {
+            MaxPendingIdsPerScan = 2000,
+            FailedRetryWindowDays = 7,
+            MaxFailedRetries = 10
+        });
+
+        var ids = await source.GetPendingIdsAsync(reclaimDownloading: false, CancellationToken.None);
+
+        Assert.Equal(1200, ids.Count);
+        Assert.Equal(allIds, ids);
+
+        using var verifyScope = _provider.CreateScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<MessageDbContext>();
+        var pendingCount = await verifyDb.MessageContents.AsNoTracking().CountAsync(c => c.DownloadStatus == DownloadStatus.Pending && c.ClaimedAt == null);
+        var failedCount = await verifyDb.MessageContents.AsNoTracking().CountAsync(c => c.DownloadStatus == DownloadStatus.Failed);
+
+        Assert.Equal(1200, pendingCount);
+        Assert.Equal(0, failedCount);
+    }
+
+    [Fact]
+    public async Task GetPendingIdsAsync_CountBelowLimit_DoesNotLogLimitInfo()
+    {
+        // 驗證：未達上限時不會記錄截斷 LogInformation
+        await SeedPendingContentsAsync(5);
+        var logger = new CapturingLogger();
+
+        using var scope = _provider.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+        var source = CreateSource(dbContext, new ContentDownloadOptions { MaxPendingIdsPerScan = 10 }, logger: logger);
+
+        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, CancellationToken.None);
+
+        Assert.Equal(5, ids.Count);
+        Assert.Empty(logger.Informations);
+    }
+
     private sealed class CapturingLogger : ILogger<DbContentWorkSource>
     {
         public List<string> Errors { get; } = [];
+        public List<string> Informations { get; } = [];
         public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
         public bool IsEnabled(LogLevel logLevel) => true;
         public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
@@ -989,6 +1188,10 @@ public class DbContentWorkSourceTests : IDisposable
             if (logLevel == LogLevel.Error)
             {
                 Errors.Add(formatter(state, exception));
+            }
+            else if (logLevel == LogLevel.Information)
+            {
+                Informations.Add(formatter(state, exception));
             }
         }
     }

@@ -25,4 +25,7 @@ public class ContentDownloadOptions
 
     /// <summary>認領租約的分鐘數；超過這個時間還停在 Downloading 就視為那台主機已經死了，可被回收重跑。</summary>
     public int ClaimLeaseMinutes { get; set; } = 60;
+
+    /// <summary>單次掃描最多撈這麼多筆待處理內容，其餘留給下一輪；避免大量積壓時一次全載入記憶體。</summary>
+    public int MaxPendingIdsPerScan { get; set; } = 5000;
 }

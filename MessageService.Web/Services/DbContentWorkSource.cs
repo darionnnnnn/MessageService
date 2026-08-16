@@ -25,6 +25,7 @@ public class DbContentWorkSource(
     ILogger<DbContentWorkSource> logger) : IContentWorkSource
 {
     private const int BufferSize = 81920;
+    private const int BatchUpdateSize = 500;
     private const string BlobTableName = "MessageContentBlobs";
     private const string BlobColumnName = "Content";
     private const string BlobIdColumnName = "MessageContentId";
@@ -41,16 +42,28 @@ public class DbContentWorkSource(
             .Where(c => c.DownloadStatus == DownloadStatus.Pending
                 || (reclaimDownloading && c.DownloadStatus == DownloadStatus.Downloading
                     && (c.ClaimedAt == null || c.ClaimedAt < leaseCutoff)))
+            .OrderBy(c => c.Id)
+            .Take(_options.MaxPendingIdsPerScan)
             .Select(c => c.Id)
             .ToListAsync(cancellationToken);
 
+        if (pendingIds.Count == _options.MaxPendingIdsPerScan)
+        {
+            logger.LogInformation(
+                "Pending content scan reached limit of {Limit} items; remaining items will be processed in subsequent scans",
+                _options.MaxPendingIdsPerScan);
+        }
+
         if (reclaimDownloading && pendingIds.Count > 0)
         {
-            await dbContext.MessageContents
-                .Where(c => pendingIds.Contains(c.Id) && c.DownloadStatus == DownloadStatus.Downloading)
-                .ExecuteUpdateAsync(s => s
-                    .SetProperty(c => c.DownloadStatus, DownloadStatus.Pending)
-                    .SetProperty(c => c.ClaimedAt, (DateTimeOffset?)null), cancellationToken);
+            foreach (var batch in pendingIds.Chunk(BatchUpdateSize))
+            {
+                await dbContext.MessageContents
+                    .Where(c => batch.Contains(c.Id) && c.DownloadStatus == DownloadStatus.Downloading)
+                    .ExecuteUpdateAsync(s => s
+                        .SetProperty(c => c.DownloadStatus, DownloadStatus.Pending)
+                        .SetProperty(c => c.ClaimedAt, (DateTimeOffset?)null), cancellationToken);
+            }
         }
 
         // Failed 只在訊息到達後的保留視窗內、且累計失敗次數未達上限才重新撿回——LINE 的內容
@@ -68,8 +81,17 @@ public class DbContentWorkSource(
             .Where(c => c.DownloadStatus == DownloadStatus.Failed
                 && c.FailedAttempts < _options.MaxFailedRetries
                 && c.GroupMessage != null)
+            .OrderBy(c => c.Id)
+            .Take(_options.MaxPendingIdsPerScan)
             .Select(c => new { c.Id, c.GroupMessage!.ReceivedAt })
             .ToListAsync(cancellationToken);
+
+        if (failedCandidates.Count == _options.MaxPendingIdsPerScan)
+        {
+            logger.LogInformation(
+                "Failed content retry scan reached limit of {Limit} items; remaining items will be processed in subsequent scans",
+                _options.MaxPendingIdsPerScan);
+        }
 
         var retryableIds = failedCandidates
             .Where(c => c.ReceivedAt >= cutoff)
@@ -78,11 +100,14 @@ public class DbContentWorkSource(
 
         if (retryableIds.Count > 0)
         {
-            await dbContext.MessageContents
-                .Where(c => retryableIds.Contains(c.Id))
-                .ExecuteUpdateAsync(s => s
-                    .SetProperty(c => c.DownloadStatus, DownloadStatus.Pending)
-                    .SetProperty(c => c.ClaimedAt, (DateTimeOffset?)null), cancellationToken);
+            foreach (var batch in retryableIds.Chunk(BatchUpdateSize))
+            {
+                await dbContext.MessageContents
+                    .Where(c => batch.Contains(c.Id))
+                    .ExecuteUpdateAsync(s => s
+                        .SetProperty(c => c.DownloadStatus, DownloadStatus.Pending)
+                        .SetProperty(c => c.ClaimedAt, (DateTimeOffset?)null), cancellationToken);
+            }
         }
 
         return pendingIds.Concat(retryableIds).ToList();
