@@ -9,7 +9,7 @@ public class MessageContent
     public string? FileName { get; set; }
     public string? ContentType { get; set; }
     public DownloadStatus DownloadStatus { get; set; }
-    public byte[]? Content { get; set; }
+    public MessageContentBlob? Blob { get; set; }
     public DateTimeOffset? CompletedAt { get; set; }
 
     /// <summary>累計標記為 Failed 的次數；達上限（見 ContentDownloadOptions.MaxFailedRetries）後

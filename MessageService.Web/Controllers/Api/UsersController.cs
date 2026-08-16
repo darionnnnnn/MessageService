@@ -29,7 +29,15 @@ public class UsersController(MessageDbContext dbContext, IMaskingService masking
             query = query.Where(m => m.GroupId == groupId);
         }
 
-        var members = await query.ToListAsync(cancellationToken);
+        var members = await query
+            .Select(m => new
+            {
+                m.GroupId,
+                m.UserId,
+                m.DisplayName,
+                m.UpdatedAt
+            })
+            .ToListAsync(cancellationToken);
 
         // 跨群組時同一人只留一筆代表列（挑最近更新的那筆），真名／代號都以這筆代表列的
         // GroupId 為準——代號是逐群組指派的，同一人在不同群組可能是不同代號

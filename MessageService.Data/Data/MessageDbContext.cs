@@ -38,8 +38,11 @@ public class MessageDbContext(DbContextOptions options, FieldCipher? cipher = nu
 
     public DbSet<GroupMessage> GroupMessages => Set<GroupMessage>();
     public DbSet<MessageContent> MessageContents => Set<MessageContent>();
+    public DbSet<MessageContentBlob> MessageContentBlobs => Set<MessageContentBlob>();
     public DbSet<Group> Groups => Set<Group>();
+    public DbSet<GroupPicture> GroupPictures => Set<GroupPicture>();
     public DbSet<GroupMember> GroupMembers => Set<GroupMember>();
+    public DbSet<GroupMemberPicture> GroupMemberPictures => Set<GroupMemberPicture>();
     public DbSet<ViewerSettings> ViewerSettings => Set<ViewerSettings>();
     public DbSet<MaskKeyword> MaskKeywords => Set<MaskKeyword>();
     public DbSet<MaskKeywordGroup> MaskKeywordGroups => Set<MaskKeywordGroup>();
@@ -80,10 +83,49 @@ public class MessageDbContext(DbContextOptions options, FieldCipher? cipher = nu
             // （方括號 vs 雙引號），但都是相同的邏輯條件
             entity.HasIndex(c => c.DownloadStatus)
                 .HasFilter(Database.IsSqlite() ? "\"DownloadStatus\" <> 'Completed'" : "[DownloadStatus] <> 'Completed'");
+
+            entity.HasOne(c => c.Blob)
+                .WithOne(b => b.MessageContent)
+                .HasForeignKey<MessageContentBlob>(b => b.MessageContentId)
+                .OnDelete(DeleteBehavior.Cascade);
         });
 
-        modelBuilder.Entity<Group>().HasKey(g => g.GroupId);
-        modelBuilder.Entity<GroupMember>().HasKey(m => new { m.GroupId, m.UserId });
+        modelBuilder.Entity<MessageContentBlob>(entity =>
+        {
+            entity.HasKey(b => b.MessageContentId);
+            entity.Property(b => b.MessageContentId).ValueGeneratedNever();
+        });
+
+        modelBuilder.Entity<Group>(entity =>
+        {
+            entity.HasKey(g => g.GroupId);
+            entity.HasOne(g => g.Picture)
+                .WithOne(p => p.Group)
+                .HasForeignKey<GroupPicture>(p => p.GroupId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<GroupPicture>(entity =>
+        {
+            entity.HasKey(p => p.GroupId);
+            entity.Property(p => p.GroupId).ValueGeneratedNever();
+        });
+
+        modelBuilder.Entity<GroupMember>(entity =>
+        {
+            entity.HasKey(m => new { m.GroupId, m.UserId });
+            entity.HasOne(m => m.Picture)
+                .WithOne(p => p.GroupMember)
+                .HasForeignKey<GroupMemberPicture>(p => new { p.GroupId, p.UserId })
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<GroupMemberPicture>(entity =>
+        {
+            entity.HasKey(p => new { p.GroupId, p.UserId });
+            entity.Property(p => p.GroupId).ValueGeneratedNever();
+            entity.Property(p => p.UserId).ValueGeneratedNever();
+        });
 
         modelBuilder.Entity<ViewerSettings>(entity =>
         {
@@ -149,7 +191,7 @@ public class MessageDbContext(DbContextOptions options, FieldCipher? cipher = nu
 
         // GroupId／UserId 保持明文——它們是隨機識別碼、不含個資，索引與 GroupBy 需要它們留在
         // 明文才能運作（見上面的索引與批次 A 的收斂）。這裡加密的都是實際承載個資的欄位；
-        // blob（MessageContents.Content）不走這裡，需要保留 Range 拖進度能力，改在
+        // blob（MessageContentBlobs.Content）不走這裡，需要保留 Range 拖進度能力，改在
         // DbContentWorkSource／ContentStreamService 用分塊加解密，見 ChunkedBlobCipher。
         if (cipher is { Enabled: true })
         {

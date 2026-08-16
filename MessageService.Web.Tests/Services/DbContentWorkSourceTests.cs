@@ -1,4 +1,4 @@
-﻿using MessageService.Data;
+using MessageService.Data;
 using MessageService.Data.Crypto;
 using MessageService.Models;
 using MessageService.Options;
@@ -7,6 +7,7 @@ using MessageService.Tests.TestSupport;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using OptionsFactory = Microsoft.Extensions.Options.Options;
 
@@ -39,8 +40,12 @@ public class DbContentWorkSourceTests : IDisposable
         _connection.Dispose();
     }
 
-    private DbContentWorkSource CreateSource(MessageDbContext dbContext, ContentDownloadOptions? options = null, FieldCipher? cipher = null) =>
-        new(dbContext, OptionsFactory.Create(options ?? new ContentDownloadOptions()), cipher ?? FieldCipher.Disabled);
+    private DbContentWorkSource CreateSource(
+        MessageDbContext dbContext,
+        ContentDownloadOptions? options = null,
+        FieldCipher? cipher = null,
+        ILogger<DbContentWorkSource>? logger = null) =>
+        new(dbContext, OptionsFactory.Create(options ?? new ContentDownloadOptions()), cipher ?? FieldCipher.Disabled, logger ?? NullLogger<DbContentWorkSource>.Instance);
 
     // 用全新的 scope／DbContext 重新查詢——CompleteAsync 對 blob 欄位是繞過 EF change tracker
     // 直接下 raw ADO 指令寫入的（見類別說明），沿用同一個 DbContext 讀回來會拿到查詢前就已經
@@ -49,7 +54,7 @@ public class DbContentWorkSourceTests : IDisposable
     {
         using var scope = _provider.CreateScope();
         var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
-        return await dbContext.MessageContents.SingleAsync(c => c.Id == id);
+        return await dbContext.MessageContents.Include(c => c.Blob).SingleAsync(c => c.Id == id);
     }
 
     private async Task<(MessageDbContext DbContext, long ContentId)> SeedFailedContentAsync(
@@ -216,7 +221,7 @@ public class DbContentWorkSourceTests : IDisposable
 
         var reloaded = await ReloadContentAsync(contentId);
         Assert.Equal(DownloadStatus.Completed, reloaded.DownloadStatus);
-        Assert.Equal(firstPayload, reloaded.Content); // 第二次呼叫沒有覆寫掉第一次寫入的內容
+        Assert.Equal(firstPayload, reloaded.Blob?.Content); // 第二次呼叫沒有覆寫掉第一次寫入的內容
     }
 
     [Fact]
@@ -241,9 +246,9 @@ public class DbContentWorkSourceTests : IDisposable
             source.CompleteAsync(groupMessage.Content!.Id, new MemoryStream(payload), payload.Length, "image/png", CancellationToken.None));
 
         Assert.Null(ex);
-        var reloaded = await dbContext.MessageContents.AsNoTracking().SingleAsync(c => c.Id == groupMessage.Content.Id);
+        var reloaded = await dbContext.MessageContents.Include(c => c.Blob).AsNoTracking().SingleAsync(c => c.Id == groupMessage.Content.Id);
         Assert.Equal(DownloadStatus.Downloading, reloaded.DownloadStatus); // 沒被改動，也沒被誤標 Completed
-        Assert.Null(reloaded.Content);
+        Assert.Null(reloaded.Blob);
     }
 
     // 體檢輪揪出的真 bug：認領（Pending→Downloading）之後若寫入失敗（長度不符、連線中斷等），
@@ -282,7 +287,7 @@ public class DbContentWorkSourceTests : IDisposable
 
         var completed = await ReloadContentAsync(contentId);
         Assert.Equal(DownloadStatus.Completed, completed.DownloadStatus);
-        Assert.Equal(payload, completed.Content);
+        Assert.Equal(payload, completed.Blob?.Content);
     }
 
     [Fact]
@@ -354,10 +359,10 @@ public class DbContentWorkSourceTests : IDisposable
         await dbContext.SaveChangesAsync();
         var source = CreateSource(dbContext);
 
-        var before = DateTimeOffset.UtcNow;
+        var before = DateTimeOffset.UtcNow.AddMinutes(-1);
         await source.FailAsync(groupMessage.Content!.Id, CancellationToken.None);
 
-        var reloaded = await dbContext.MessageContents.SingleAsync(c => c.Id == groupMessage.Content.Id);
+        var reloaded = await ReloadContentAsync(groupMessage.Content.Id);
         Assert.Equal(DownloadStatus.Failed, reloaded.DownloadStatus);
         Assert.Equal(3, reloaded.FailedAttempts);
         Assert.NotNull(reloaded.LastAttemptAt);
@@ -384,7 +389,7 @@ public class DbContentWorkSourceTests : IDisposable
 
         var reloaded = await ReloadContentAsync(groupMessage.Content.Id);
         Assert.Equal(DownloadStatus.Completed, reloaded.DownloadStatus);
-        Assert.Equal(payload, reloaded.Content);
+        Assert.Equal(payload, reloaded.Blob?.Content);
         Assert.Equal("image/png", reloaded.ContentType);
         Assert.NotNull(reloaded.CompletedAt);
     }
@@ -412,7 +417,7 @@ public class DbContentWorkSourceTests : IDisposable
         await source.CompleteAsync(groupMessage.Content!.Id, new MemoryStream(payload), payload.Length, "video/mp4", CancellationToken.None);
 
         var reloaded = await ReloadContentAsync(groupMessage.Content.Id);
-        Assert.Equal(payload, reloaded.Content);
+        Assert.Equal(payload, reloaded.Blob?.Content);
     }
 
     // === 加密啟用時：CompleteAsync 寫進去的是分塊密文，不是明文（blob 不走 EF ValueConverter，
@@ -468,9 +473,9 @@ public class DbContentWorkSourceTests : IDisposable
         await source.CompleteAsync(groupMessage.Content!.Id, new MemoryStream(payload), payload.Length, "image/png", CancellationToken.None);
 
         var reloaded = await ReloadContentAsync(groupMessage.Content.Id);
-        Assert.NotEqual(payload, reloaded.Content); // 磁碟上不是明文
-        Assert.True(ChunkedBlobCipher.IsEncryptedHeader(reloaded.Content.AsSpan(0, ChunkedBlobCipher.HeaderSize)));
-        Assert.Equal(payload, DecryptStoredBlob(reloaded.Content!));
+        Assert.NotEqual(payload, reloaded.Blob?.Content); // 磁碟上不是明文
+        Assert.True(ChunkedBlobCipher.IsEncryptedHeader(reloaded.Blob!.Content.AsSpan(0, ChunkedBlobCipher.HeaderSize)));
+        Assert.Equal(payload, DecryptStoredBlob(reloaded.Blob.Content!));
     }
 
     [Fact]
@@ -496,7 +501,352 @@ public class DbContentWorkSourceTests : IDisposable
         var reloaded = await ReloadContentAsync(groupMessage.Content.Id);
         Assert.Equal(
             ChunkedBlobCipher.ComputeEncryptedLength(payload.Length),
-            reloaded.Content!.LongLength);
-        Assert.Equal(payload, DecryptStoredBlob(reloaded.Content));
+            reloaded.Blob!.Content.LongLength);
+        Assert.Equal(payload, DecryptStoredBlob(reloaded.Blob.Content));
+    }
+
+    // ==== 任務要求驗收測試：原子累加、ChangeTracker 隔離、邊界與失敗路徑 ====
+
+    [Fact]
+    public async Task FailAsync_ConcurrentCalls_AtomicallyIncrementsFailedAttempts()
+    {
+        var (dbContext, contentId) = await SeedFailedContentAsync(DateTimeOffset.UtcNow, failedAttempts: 0);
+
+        using var scope1 = _provider.CreateScope();
+        var db1 = scope1.ServiceProvider.GetRequiredService<MessageDbContext>();
+        var source1 = CreateSource(db1);
+
+        using var scope2 = _provider.CreateScope();
+        var db2 = scope2.ServiceProvider.GetRequiredService<MessageDbContext>();
+        var source2 = CreateSource(db2);
+
+        await Task.WhenAll(
+            source1.FailAsync(contentId, CancellationToken.None),
+            source2.FailAsync(contentId, CancellationToken.None));
+
+        var reloaded = await ReloadContentAsync(contentId);
+        Assert.Equal(DownloadStatus.Failed, reloaded.DownloadStatus);
+        Assert.Equal(2, reloaded.FailedAttempts);
+    }
+
+    [Fact]
+    public async Task CompleteAsync_Success_DoesNotTrackMessageContentEntity()
+    {
+        using var scope = _provider.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+        var groupMessage = new GroupMessage
+        {
+            WebhookEventId = "e1", LineMessageId = "m1", GroupId = "G1", MessageType = "image",
+            EventTimestamp = DateTimeOffset.UtcNow, ReceivedAt = DateTimeOffset.UtcNow,
+            Content = new MessageContent { DownloadStatus = DownloadStatus.Pending }
+        };
+        dbContext.GroupMessages.Add(groupMessage);
+        await dbContext.SaveChangesAsync();
+        var contentId = groupMessage.Content!.Id;
+
+        // 清除先前 Add/SaveChanges 的追蹤狀態
+        dbContext.ChangeTracker.Clear();
+        Assert.Empty(dbContext.ChangeTracker.Entries<MessageContent>());
+
+        var source = CreateSource(dbContext);
+        var payload = new byte[] { 1, 2, 3 };
+        await source.CompleteAsync(contentId, new MemoryStream(payload), payload.Length, "image/png", CancellationToken.None);
+
+        Assert.Empty(dbContext.ChangeTracker.Entries<MessageContent>());
+        var reloaded = await ReloadContentAsync(contentId);
+        Assert.Equal(DownloadStatus.Completed, reloaded.DownloadStatus);
+        Assert.Equal(payload, reloaded.Blob?.Content);
+    }
+
+    [Fact]
+    public async Task FailAsync_Success_DoesNotTrackMessageContentEntity()
+    {
+        using var scope = _provider.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+        var groupMessage = new GroupMessage
+        {
+            WebhookEventId = "e1", LineMessageId = "m1", GroupId = "G1", MessageType = "image",
+            EventTimestamp = DateTimeOffset.UtcNow, ReceivedAt = DateTimeOffset.UtcNow,
+            Content = new MessageContent { DownloadStatus = DownloadStatus.Pending }
+        };
+        dbContext.GroupMessages.Add(groupMessage);
+        await dbContext.SaveChangesAsync();
+        var contentId = groupMessage.Content!.Id;
+
+        dbContext.ChangeTracker.Clear();
+        Assert.Empty(dbContext.ChangeTracker.Entries<MessageContent>());
+
+        var source = CreateSource(dbContext);
+        await source.FailAsync(contentId, CancellationToken.None);
+
+        Assert.Empty(dbContext.ChangeTracker.Entries<MessageContent>());
+        var reloaded = await ReloadContentAsync(contentId);
+        Assert.Equal(DownloadStatus.Failed, reloaded.DownloadStatus);
+        Assert.Equal(1, reloaded.FailedAttempts);
+    }
+
+    [Theory]
+    [InlineData(DownloadStatus.Failed)]
+    [InlineData(DownloadStatus.Completed)]
+    public async Task GetAsync_NonPendingContent_ReturnsNull(DownloadStatus status)
+    {
+        using var scope = _provider.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+        var groupMessage = new GroupMessage
+        {
+            WebhookEventId = "e1", LineMessageId = "line-m1", GroupId = "G1", MessageType = "image",
+            EventTimestamp = DateTimeOffset.UtcNow, ReceivedAt = DateTimeOffset.UtcNow,
+            Content = new MessageContent { DownloadStatus = status }
+        };
+        dbContext.GroupMessages.Add(groupMessage);
+        await dbContext.SaveChangesAsync();
+        var source = CreateSource(dbContext);
+
+        var item = await source.GetAsync(groupMessage.Content!.Id, CancellationToken.None);
+
+        Assert.Null(item);
+    }
+
+    [Fact]
+    public async Task GetAsync_GroupMessageNotExists_ReturnsNull()
+    {
+        // 情況 1：contentId 完全不存在（當然也沒有關聯的 GroupMessage）
+        using var scope = _provider.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+        var source = CreateSource(dbContext);
+
+        var nonExistent = await source.GetAsync(999999, CancellationToken.None);
+        Assert.Null(nonExistent);
+
+        // 情況 2：暫時關閉 FK 限制插入一筆沒有對應 GroupMessage 的孤兒 MessageContent 列
+        await dbContext.Database.ExecuteSqlRawAsync("PRAGMA foreign_keys = OFF;");
+        try
+        {
+            await dbContext.Database.ExecuteSqlRawAsync(
+                "INSERT INTO MessageContents (GroupMessageId, DownloadStatus, FailedAttempts) VALUES (999999, 'Pending', 0);");
+            var orphanId = await dbContext.MessageContents
+                .Where(c => c.GroupMessageId == 999999)
+                .Select(c => c.Id)
+                .SingleAsync();
+
+            var orphanItem = await source.GetAsync(orphanId, CancellationToken.None);
+            Assert.Null(orphanItem);
+        }
+        finally
+        {
+            await dbContext.Database.ExecuteSqlRawAsync("PRAGMA foreign_keys = ON;");
+        }
+    }
+
+    [Fact]
+    public async Task GetAsync_NonExistentContentId_ReturnsNull()
+    {
+        using var scope = _provider.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+        var source = CreateSource(dbContext);
+
+        var item = await source.GetAsync(999999, CancellationToken.None);
+
+        Assert.Null(item);
+    }
+
+    [Fact]
+    public async Task GetAsync_PendingContent_DoesNotTrackEntities()
+    {
+        using var scope = _provider.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+        var groupMessage = new GroupMessage
+        {
+            WebhookEventId = "e1", LineMessageId = "line-m1", GroupId = "G1", MessageType = "image",
+            EventTimestamp = DateTimeOffset.UtcNow, ReceivedAt = DateTimeOffset.UtcNow,
+            Content = new MessageContent { DownloadStatus = DownloadStatus.Pending }
+        };
+        dbContext.GroupMessages.Add(groupMessage);
+        await dbContext.SaveChangesAsync();
+        var contentId = groupMessage.Content!.Id;
+
+        dbContext.ChangeTracker.Clear();
+        Assert.Empty(dbContext.ChangeTracker.Entries<MessageContent>());
+        Assert.Empty(dbContext.ChangeTracker.Entries<GroupMessage>());
+
+        var source = CreateSource(dbContext);
+        var item = await source.GetAsync(contentId, CancellationToken.None);
+
+        Assert.NotNull(item);
+        Assert.Equal("line-m1", item!.LineMessageId);
+        Assert.Empty(dbContext.ChangeTracker.Entries<MessageContent>());
+        Assert.Empty(dbContext.ChangeTracker.Entries<GroupMessage>());
+    }
+
+    [Fact]
+    public async Task CompleteAsync_MetadataUpdateFails_LogsErrorAndRethrows_WithoutRevertingClaim()
+    {
+        using var scope = _provider.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+        var groupMessage = new GroupMessage
+        {
+            WebhookEventId = "e1", LineMessageId = "m1", GroupId = "G1", MessageType = "image",
+            EventTimestamp = DateTimeOffset.UtcNow, ReceivedAt = DateTimeOffset.UtcNow,
+            Content = new MessageContent { DownloadStatus = DownloadStatus.Pending }
+        };
+        dbContext.GroupMessages.Add(groupMessage);
+        await dbContext.SaveChangesAsync();
+        var contentId = groupMessage.Content!.Id;
+
+        var logger = new CapturingLogger();
+        var source = CreateSource(dbContext, logger: logger);
+
+        using var cts = new CancellationTokenSource();
+        var payload = new byte[] { 1, 2, 3 };
+        // 自訂串流：讀取完畢後取消 token，讓後續的 ExecuteUpdateAsync（中繼資料更新）拋出例外
+        var triggerStream = new ActionOnReadStream(new MemoryStream(payload), () => cts.Cancel());
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            source.CompleteAsync(contentId, triggerStream, payload.Length, "image/png", cts.Token));
+
+        // 驗證有記錄 Error log 且包含 contentId 與錯誤描述
+        Assert.Single(logger.Errors);
+        Assert.Contains(contentId.ToString(), logger.Errors[0]);
+        Assert.Contains("blob 已寫入，但中繼資料更新失敗", logger.Errors[0]);
+
+        // 驗證狀態維持在 Downloading（沒有被 RevertClaim 成 Pending）
+        var reloaded = await ReloadContentAsync(contentId);
+        Assert.Equal(DownloadStatus.Downloading, reloaded.DownloadStatus);
+        Assert.Equal(payload, reloaded.Blob?.Content); // blob 確實已寫入
+    }
+
+    [Fact]
+    public async Task CompleteAsync_ConsecutiveCallsWithDifferentLengths_CleanlyReplacesBlobRow()
+    {
+        using var scope = _provider.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+        var groupMessage = new GroupMessage
+        {
+            WebhookEventId = Guid.NewGuid().ToString(), LineMessageId = "m-retry", GroupId = "G1", MessageType = "image",
+            EventTimestamp = DateTimeOffset.UtcNow, ReceivedAt = DateTimeOffset.UtcNow,
+            Content = new MessageContent { DownloadStatus = DownloadStatus.Pending }
+        };
+        dbContext.GroupMessages.Add(groupMessage);
+        await dbContext.SaveChangesAsync();
+        var contentId = groupMessage.Content!.Id;
+        var source = CreateSource(dbContext);
+
+        // 第一次寫入（較長內容）
+        var payload1 = new byte[] { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 };
+        await source.CompleteAsync(contentId, new MemoryStream(payload1), payload1.Length, "image/png", CancellationToken.None);
+
+        var firstResult = await ReloadContentAsync(contentId);
+        Assert.Equal(DownloadStatus.Completed, firstResult.DownloadStatus);
+        Assert.Equal(payload1, firstResult.Blob?.Content);
+
+        // 模擬重試：將狀態重設為 Pending
+        using (var updateScope = _provider.CreateScope())
+        {
+            var updateDb = updateScope.ServiceProvider.GetRequiredService<MessageDbContext>();
+            await updateDb.MessageContents.Where(c => c.Id == contentId)
+                .ExecuteUpdateAsync(s => s.SetProperty(c => c.DownloadStatus, DownloadStatus.Pending));
+        }
+
+        // 第二次寫入（不同長度，較短內容）
+        var payload2 = new byte[] { 99, 88, 77 };
+        await source.CompleteAsync(contentId, new MemoryStream(payload2), payload2.Length, "image/jpeg", CancellationToken.None);
+
+        // 驗證 MessageContentBlobs 只有 1 列，且內容等於第二次寫入的位元組
+        using (var verifyScope = _provider.CreateScope())
+        {
+            var verifyDb = verifyScope.ServiceProvider.GetRequiredService<MessageDbContext>();
+            var blobCount = await verifyDb.MessageContentBlobs.CountAsync(b => b.MessageContentId == contentId);
+            Assert.Equal(1, blobCount);
+        }
+
+        var secondResult = await ReloadContentAsync(contentId);
+        Assert.Equal(DownloadStatus.Completed, secondResult.DownloadStatus);
+        Assert.Equal(payload2, secondResult.Blob?.Content);
+    }
+
+    [Fact]
+    public async Task FailAsync_DeletesLingeringBlobRowInMessageContentBlobs()
+    {
+        using var scope = _provider.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+        var groupMessage = new GroupMessage
+        {
+            WebhookEventId = Guid.NewGuid().ToString(), LineMessageId = "m-fail", GroupId = "G1", MessageType = "image",
+            EventTimestamp = DateTimeOffset.UtcNow, ReceivedAt = DateTimeOffset.UtcNow,
+            Content = new MessageContent { DownloadStatus = DownloadStatus.Pending }
+        };
+        dbContext.GroupMessages.Add(groupMessage);
+        await dbContext.SaveChangesAsync();
+        var contentId = groupMessage.Content!.Id;
+
+        // 手動插入一筆殘留的 blob（模擬下載中途失敗或先前殘留的 zeroblob 列）
+        dbContext.MessageContentBlobs.Add(new MessageContentBlob
+        {
+            MessageContentId = contentId,
+            Content = [1, 2, 3, 4, 5]
+        });
+        await dbContext.SaveChangesAsync();
+
+        // 確認 blob 列存在
+        var initialBlobCount = await dbContext.MessageContentBlobs.CountAsync(b => b.MessageContentId == contentId);
+        Assert.Equal(1, initialBlobCount);
+
+        var source = CreateSource(dbContext);
+        await source.FailAsync(contentId, CancellationToken.None);
+
+        // 驗證狀態被標為 Failed，且 MessageContentBlobs 裡的列已完全被刪除
+        var reloaded = await ReloadContentAsync(contentId);
+        Assert.Equal(DownloadStatus.Failed, reloaded.DownloadStatus);
+        Assert.Null(reloaded.Blob);
+
+        using var verifyScope = _provider.CreateScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<MessageDbContext>();
+        var remainingBlobCount = await verifyDb.MessageContentBlobs.CountAsync(b => b.MessageContentId == contentId);
+        Assert.Equal(0, remainingBlobCount);
+    }
+
+    private sealed class CapturingLogger : ILogger<DbContentWorkSource>
+    {
+        public List<string> Errors { get; } = [];
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            if (logLevel == LogLevel.Error)
+            {
+                Errors.Add(formatter(state, exception));
+            }
+        }
+    }
+
+    private sealed class ActionOnReadStream(Stream inner, Action onEof) : Stream
+    {
+        public override bool CanRead => inner.CanRead;
+        public override bool CanSeek => inner.CanSeek;
+        public override bool CanWrite => inner.CanWrite;
+        public override long Length => inner.Length;
+        public override long Position { get => inner.Position; set => inner.Position = value; }
+        public override void Flush() => inner.Flush();
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            var read = inner.Read(buffer, offset, count);
+            if (read == 0) onEof();
+            return read;
+        }
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            var read = await inner.ReadAsync(buffer, cancellationToken);
+            if (read == 0) onEof();
+            return read;
+        }
+        public override async Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
+        {
+            var read = await inner.ReadAsync(buffer, offset, count, cancellationToken);
+            if (read == 0) onEof();
+            return read;
+        }
+        public override long Seek(long offset, SeekOrigin origin) => inner.Seek(offset, origin);
+        public override void SetLength(long value) => inner.SetLength(value);
+        public override void Write(byte[] buffer, int offset, int count) => inner.Write(buffer, offset, count);
     }
 }

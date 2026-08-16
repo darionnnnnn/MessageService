@@ -173,7 +173,7 @@ public class IngestSinkEquivalenceTests : IDisposable
         Assert.NotNull(viaHttp.Content);
         Assert.Equal(direct.Content!.FileName, viaHttp.Content!.FileName);
         Assert.Equal(direct.Content.DownloadStatus, viaHttp.Content.DownloadStatus);
-        Assert.Equal(direct.Content.Content, viaHttp.Content.Content); // 兩邊都還沒下載，皆為 null
+        Assert.Equal(direct.Content.Blob?.Content, viaHttp.Content.Blob?.Content); // 兩邊都還沒下載，皆為 null
         Assert.Equal(direct.Content.CompletedAt, viaHttp.Content.CompletedAt);
     }
 

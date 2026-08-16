@@ -30,3 +30,32 @@
 2. 更新 `docs/history/README.md` 索引，補一列一行摘要。
 3. 更新現行文件的「目前狀態」段落，只寫結論。
 4. 同步這輪改動導致過時的現行文件內容，並跟程式碼／設定檔核對一次。
+
+## 資料層規則
+
+### blob 只住在三張子表
+
+`MessageContentBlobs.Content`、`GroupPictures.Content`、`GroupMemberPictures.Content` 是全庫僅有的
+大 blob 欄位（訊息附檔可達數百 MB，頭貼上限 2MB）。父表 `MessageContents`／`Groups`／`GroupMembers`
+上**沒有** blob，可以放心整列撈。規則：
+
+- **父表的查詢不要 `Include` 這三個子實體。** 只需要知道「有沒有」時用 `子實體 != null`
+  投影成布林，EF 會翻成 SQL 的存在性判斷，不會把 blob 傳回來。
+- 真的要 blob 的路徑只有兩條：`ContentStreamService`（訊息附檔，走 raw SQL 串流 + Range）
+  與 `AvatarsController`（頭貼，先比 ETag 走 304，未命中才只投影 `Content`）。
+  新增第三條之前先想清楚有沒有必要。
+- 寫入 blob 一律不經 EF 的 byte[] 屬性（那樣整份會進 change tracker）：SQL Server 用
+  `SqlParameter` 串流參數，SQLite 用 `zeroblob` + `SqliteBlob` 增量寫入。
+- `MessageContentBlobs` 的主鍵在 SQLite 上必須維持 rowid 別名（`INTEGER`），
+  `SqliteBlob` 靠 rowid 開啟 blob。動到這張表的 migration 時要回頭確認產生的建表 SQL。
+
+### 只改幾個純量欄位就不要載入實體
+
+改狀態、計數、指標這種只動純量欄位的操作，用 `ExecuteUpdateAsync` 直接下 SQL，不要
+「查出實體 → 改屬性 → `SaveChangesAsync`」。累加類（例如 `FailedAttempts`）一定要用
+SQL 端的 `x => x + 1`，讀出來加一再寫回在併發下會遺失計數。
+
+例外是需要跟呼叫端共用 change tracker／交易邊界的地方（如 `GroupLastMessageTracker`），
+那裡改用「Attach 一顆只帶主鍵的空殼 + 標記要改的欄位為已修改」，同樣不載入整列——
+但這顆空殼會留在 change tracker 裡，同一個 `DbContext` 之後不可以再讀它的其他欄位
+（EF 的 identity map 不會用查詢結果覆寫已追蹤實體的屬性，會讀到假的 null）。

@@ -238,8 +238,10 @@ INFO|RetentionCleanupService|Next retention cleanup scheduled at 2026-07-30 03:0
 SELECT Id, MessageType, Text, UserId, EventTimestamp FROM GroupMessages ORDER BY Id DESC;
 
 -- 媒體下載狀態（重點看 DownloadStatus 有沒有卡在 Pending）
-SELECT c.Id, m.MessageType, c.FileName, c.ContentType, c.DownloadStatus, LENGTH(c.Content) AS Bytes
-FROM MessageContents c JOIN GroupMessages m ON m.Id = c.GroupMessageId
+SELECT c.Id, m.MessageType, c.FileName, c.ContentType, c.DownloadStatus, LENGTH(b.Content) AS Bytes
+FROM MessageContents c
+JOIN GroupMessages m ON m.Id = c.GroupMessageId
+LEFT JOIN MessageContentBlobs b ON b.MessageContentId = c.Id
 ORDER BY c.Id DESC;
 
 -- 群組與成員名稱快取

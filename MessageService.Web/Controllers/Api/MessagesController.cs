@@ -118,7 +118,7 @@ public class MessagesController(
         var members = await dbContext.GroupMembers
             .AsNoTracking()
             .Where(m => m.GroupId == groupId && userIds.Contains(m.UserId))
-            .Select(m => new { m.UserId, m.DisplayName, HasPicture = m.PictureContent != null })
+            .Select(m => new { m.UserId, m.DisplayName, HasPicture = m.Picture != null })
             .ToDictionaryAsync(m => m.UserId, cancellationToken);
 
         // 一個請求只載入一次遮蔽規則，套用到每則訊息時全是同步運算，不會每則訊息各打一次 DB
@@ -427,7 +427,8 @@ public class MessagesController(
         var groupCache = await dbContext.Groups
             .AsNoTracking()
             .Where(g => resultGroupIds.Contains(g.GroupId))
-            .ToDictionaryAsync(g => g.GroupId, cancellationToken);
+            .Select(g => new { g.GroupId, g.GroupName })
+            .ToDictionaryAsync(g => g.GroupId, g => g.GroupName, cancellationToken);
 
         // EF Core 無法轉譯 tuple 的 Contains，故以群組與使用者的獨立 Contains 條件收斂範圍
         var resultMembers = await dbContext.GroupMembers
@@ -445,8 +446,8 @@ public class MessagesController(
             var text = kv.Value.Text;
             var eventTimestamp = kv.Value.EventTimestamp;
 
-            groupCache.TryGetValue(rowGroupId, out var group);
-            var groupDisplayName = group?.GroupName ?? rowGroupId;
+            groupCache.TryGetValue(rowGroupId, out var groupName);
+            var groupDisplayName = groupName ?? rowGroupId;
 
             string displayName;
             if (userId is null)

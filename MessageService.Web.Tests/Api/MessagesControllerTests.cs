@@ -358,7 +358,7 @@ public class MessagesControllerTests : IDisposable
             (await dbContext.ViewerSettings.SingleAsync()).NameDisplayMode = NameDisplayMode.Original;
             dbContext.GroupMembers.Add(new GroupMember
             {
-                GroupId = GroupId, UserId = "U1", DisplayName = "小明", PictureUrl = "https://example.com/u1.jpg", PictureContent = new byte[] { 0x00 }, UpdatedAt = now
+                GroupId = GroupId, UserId = "U1", DisplayName = "小明", PictureUrl = "https://example.com/u1.jpg", Picture = new GroupMemberPicture { GroupId = GroupId, UserId = "U1", Content = new byte[] { 0x00 } }, UpdatedAt = now
             });
             dbContext.GroupMessages.Add(TextMessage("e1", "U1", now, "hi"));
         });

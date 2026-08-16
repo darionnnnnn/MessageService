@@ -9,7 +9,7 @@ using Microsoft.EntityFrameworkCore;
 namespace MessageService.Web.Services;
 
 /// <summary>
-/// 把 MessageContents.Content（varbinary(max)／BLOB）串流給 HTTP 回應，支援 Range 請求（影片/語音拖拉進度）。
+/// 把 MessageContentBlobs.Content（varbinary(max)／BLOB）串流給 HTTP 回應，支援 Range 請求（影片/語音拖拉進度）。
 /// 不用 EF 把整個 blob 讀進記憶體。
 /// 在 SQLite 下，Range 請求不能使用 SQL 運算式 substr，因為 substr 屬於純量運算式，
 /// SQLite 必須先將整個 blob 欄位物化至記憶體後才能切片；因此 SQLite 改採 Microsoft.Data.Sqlite.SqliteBlob
@@ -34,6 +34,9 @@ namespace MessageService.Web.Services;
 public class ContentStreamService(MessageDbContext dbContext, FieldCipher cipher, ILogger<ContentStreamService> logger)
 {
     private const int BufferSize = 81920;
+    private const string BlobTableName = "MessageContentBlobs";
+    private const string BlobColumnName = "Content";
+    private const string BlobIdColumnName = "MessageContentId";
 
     /// <summary>可以 inline 顯示的 MIME type，真正的白名單（不是「前綴符合再扣掉黑名單」）。
     /// 刻意不放 image/svg+xml——SVG 跟 HTML 一樣會被瀏覽器當成可執行文件解析、能跑 &lt;script&gt;，
@@ -216,7 +219,7 @@ public class ContentStreamService(MessageDbContext dbContext, FieldCipher cipher
                 // 改用 Microsoft.Data.Sqlite.SqliteBlob 進行原生增量讀取，以 Seek() 搭配 CopyRangeAsync()，
                 // 只讀取實際請求的區間，不會物化整個 blob。
                 // 註：SQL Server 的 SUBSTRING 原生支援局部讀取，無此物化問題，因此維持既有的 ADO.NET 串流查詢。
-                await using var blob = new SqliteBlob((SqliteConnection)connection, "MessageContents", "Content", messageContentId, readOnly: true);
+                await using var blob = new SqliteBlob((SqliteConnection)connection, BlobTableName, BlobColumnName, messageContentId, readOnly: true);
                 blob.Seek(start.Value, SeekOrigin.Begin);
                 await CopyRangeAsync(blob, response.Body, length, cancellationToken);
                 return ContentStreamResult.Handled;
@@ -225,7 +228,7 @@ public class ContentStreamService(MessageDbContext dbContext, FieldCipher cipher
             await using var command = connection.CreateCommand();
             if (isPartial)
             {
-                command.CommandText = "SELECT SUBSTRING(Content, @start, @length) FROM MessageContents WHERE Id = @id";
+                command.CommandText = $"SELECT SUBSTRING({BlobColumnName}, @start, @length) FROM {BlobTableName} WHERE {BlobIdColumnName} = @id";
                 AddParameter(command, "@start", start.Value + 1); // SUBSTRING 是 1-indexed
                 AddParameter(command, "@length", length);
             }
@@ -234,7 +237,7 @@ public class ContentStreamService(MessageDbContext dbContext, FieldCipher cipher
                 // 沒有 Range 就是要整份——直接 SELECT 原始欄位，不必再繞去 SUBSTRING 切出
                 // 「從頭到尾」這個等於整份的區間，省掉 SQL Server 端多一次的整份複製。
                 // SQLite 非 Range 路徑透過 reader.GetStream(0) 本身即為增量串流，亦無物化問題。
-                command.CommandText = "SELECT Content FROM MessageContents WHERE Id = @id";
+                command.CommandText = $"SELECT {BlobColumnName} FROM {BlobTableName} WHERE {BlobIdColumnName} = @id";
             }
             AddParameter(command, "@id", messageContentId);
 
@@ -282,7 +285,7 @@ public class ContentStreamService(MessageDbContext dbContext, FieldCipher cipher
 
         Stream onDiskStream;
         await using var sqliteBlob = isSqlite
-            ? new SqliteBlob((SqliteConnection)connection, "MessageContents", "Content", messageContentId, readOnly: true)
+            ? new SqliteBlob((SqliteConnection)connection, BlobTableName, BlobColumnName, messageContentId, readOnly: true)
             : null;
         await using var command = isSqlite ? null : connection.CreateCommand();
         DbDataReader? reader = null;
@@ -294,7 +297,7 @@ public class ContentStreamService(MessageDbContext dbContext, FieldCipher cipher
         }
         else
         {
-            command!.CommandText = "SELECT SUBSTRING(Content, @start, @length) FROM MessageContents WHERE Id = @id";
+            command!.CommandText = $"SELECT SUBSTRING({BlobColumnName}, @start, @length) FROM {BlobTableName} WHERE {BlobIdColumnName} = @id";
             AddParameter(command, "@id", messageContentId);
             AddParameter(command, "@start", spanStart + 1); // SUBSTRING 是 1-indexed
             AddParameter(command, "@length", spanLength);
@@ -424,8 +427,8 @@ public class ContentStreamService(MessageDbContext dbContext, FieldCipher cipher
     {
         await using var command = connection.CreateCommand();
         command.CommandText = isSqlite
-            ? "SELECT LENGTH(Content) FROM MessageContents WHERE Id = @id"
-            : "SELECT DATALENGTH(Content) FROM MessageContents WHERE Id = @id";
+            ? $"SELECT LENGTH({BlobColumnName}) FROM {BlobTableName} WHERE {BlobIdColumnName} = @id"
+            : $"SELECT DATALENGTH({BlobColumnName}) FROM {BlobTableName} WHERE {BlobIdColumnName} = @id";
         AddParameter(command, "@id", messageContentId);
         var result = await command.ExecuteScalarAsync(cancellationToken);
         return result is null or DBNull ? 0 : Convert.ToInt64(result);
@@ -444,7 +447,7 @@ public class ContentStreamService(MessageDbContext dbContext, FieldCipher cipher
         {
             try
             {
-                await using var blob = new SqliteBlob((SqliteConnection)connection, "MessageContents", "Content", messageContentId, readOnly: true);
+                await using var blob = new SqliteBlob((SqliteConnection)connection, BlobTableName, BlobColumnName, messageContentId, readOnly: true);
                 var length = (int)Math.Min(ChunkedBlobCipher.HeaderSize, blob.Length);
                 if (length <= 0)
                 {
@@ -462,7 +465,7 @@ public class ContentStreamService(MessageDbContext dbContext, FieldCipher cipher
         }
 
         await using var command = connection.CreateCommand();
-        command.CommandText = "SELECT SUBSTRING(Content, 1, @length) FROM MessageContents WHERE Id = @id";
+        command.CommandText = $"SELECT SUBSTRING({BlobColumnName}, 1, @length) FROM {BlobTableName} WHERE {BlobIdColumnName} = @id";
         AddParameter(command, "@id", messageContentId);
         AddParameter(command, "@length", ChunkedBlobCipher.HeaderSize);
         var result = await command.ExecuteScalarAsync(cancellationToken);

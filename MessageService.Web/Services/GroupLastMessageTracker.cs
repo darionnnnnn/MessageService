@@ -16,12 +16,42 @@ public static class GroupLastMessageTracker
     /// UpdatedAt 給 DateTimeOffset 最小值，讓頭貼快取的過期判斷立刻視為需要刷新。
     ///
     /// 呼叫端自行負責 SaveChangesAsync／DbUpdateException 重試（見 DirectIngestSink）——這裡
-    /// 只改 change tracker 上的狀態，不落地，才能跟訊息本身的寫入共用交易邊界判斷。</summary>
+    /// 只改 change tracker 上的狀態，不落地，才能跟訊息本身的寫入共用交易邊界判斷。
+    ///
+    /// 更新既有群組時刻意不載入整個 Group（收訊息的必經路徑，每則訊息都會走一次），改成
+    /// Attach 一顆只帶主鍵的空殼、只把那兩個欄位標成已修改，EF 產生的 UPDATE 只含那兩欄。
+    /// 代價是這顆空殼會留在 change tracker 裡，其餘欄位是 null／預設值——**同一個 DbContext
+    /// 在這之後不可以直接讀 Group 的其他欄位**（EF 的 identity map 不會用查詢結果覆寫已追蹤
+    /// 實體的屬性，會讀到假的 null）。目前的呼叫端都是「呼叫完就 SaveChanges 收工」或撞鍵時
+    /// ChangeTracker.Clear() 重來，符合這個前提；日後要在同一個 scope 裡加讀取，先看這裡。</summary>
     public static async Task TrackAsync(
         MessageDbContext dbContext, string groupId, long messageId, DateTimeOffset eventTimestamp, CancellationToken cancellationToken)
     {
-        var group = await dbContext.Groups.FindAsync([groupId], cancellationToken);
-        if (group is null)
+        // 同一個 DbContext 內重複遇到同群組（批次落地／測試 seeding）時直接用已追蹤的那顆——
+        // 走 identity map 的鍵查找（O(1)），不用 ChangeTracker.Entries<Group>()：那會先觸發
+        // DetectChanges 掃過所有已追蹤實體（含同批累積的大量 GroupMessage），批次下退化成 O(n²)
+        var trackedEntry = dbContext.Groups.Local.FindEntry(groupId);
+        if (trackedEntry is not null)
+        {
+            if (trackedEntry.Entity.LastMessageId is null || messageId > trackedEntry.Entity.LastMessageId)
+            {
+                trackedEntry.Entity.LastMessageId = messageId;
+                trackedEntry.Entity.LastMessageAt = eventTimestamp;
+                if (trackedEntry.State != EntityState.Added)
+                {
+                    trackedEntry.Property(g => g.LastMessageId).IsModified = true;
+                    trackedEntry.Property(g => g.LastMessageAt).IsModified = true;
+                }
+            }
+            return;
+        }
+
+        var groupInfo = await dbContext.Groups
+            .Where(g => g.GroupId == groupId)
+            .Select(g => new { g.LastMessageId })
+            .FirstOrDefaultAsync(cancellationToken);
+
+        if (groupInfo is null)
         {
             dbContext.Groups.Add(new Group
             {
@@ -33,10 +63,14 @@ public static class GroupLastMessageTracker
             return;
         }
 
-        if (group.LastMessageId is null || messageId > group.LastMessageId)
+        if (groupInfo.LastMessageId is null || messageId > groupInfo.LastMessageId)
         {
-            group.LastMessageId = messageId;
-            group.LastMessageAt = eventTimestamp;
+            var stub = new Group { GroupId = groupId };
+            var entry = dbContext.Groups.Attach(stub);
+            stub.LastMessageId = messageId;
+            stub.LastMessageAt = eventTimestamp;
+            entry.Property(g => g.LastMessageId).IsModified = true;
+            entry.Property(g => g.LastMessageAt).IsModified = true;
         }
     }
 }

@@ -30,7 +30,7 @@ public class AvatarsController(
         var meta = await dbContext.Groups
             .AsNoTracking()
             .Where(g => g.GroupId == groupId)
-            .Select(g => new { HasPicture = g.PictureContent != null, g.PictureContentType, g.PictureUpdatedAt })
+            .Select(g => new { HasPicture = g.Picture != null, g.PictureContentType, g.PictureUpdatedAt })
             .FirstOrDefaultAsync(cancellationToken);
 
         if (meta is null || !meta.HasPicture)
@@ -47,7 +47,7 @@ public class AvatarsController(
         var content = await dbContext.Groups
             .AsNoTracking()
             .Where(g => g.GroupId == groupId)
-            .Select(g => g.PictureContent)
+            .Select(g => g.Picture == null ? null : g.Picture.Content)
             .FirstOrDefaultAsync(cancellationToken);
 
         if (content is null)
@@ -72,7 +72,7 @@ public class AvatarsController(
         var meta = await dbContext.GroupMembers
             .AsNoTracking()
             .Where(m => m.GroupId == groupId && m.UserId == userId)
-            .Select(m => new { HasPicture = m.PictureContent != null, m.PictureContentType, m.PictureUpdatedAt })
+            .Select(m => new { HasPicture = m.Picture != null, m.PictureContentType, m.PictureUpdatedAt })
             .FirstOrDefaultAsync(cancellationToken);
 
         if (meta is null || !meta.HasPicture)
@@ -89,7 +89,7 @@ public class AvatarsController(
         var content = await dbContext.GroupMembers
             .AsNoTracking()
             .Where(m => m.GroupId == groupId && m.UserId == userId)
-            .Select(m => m.PictureContent)
+            .Select(m => m.Picture == null ? null : m.Picture.Content)
             .FirstOrDefaultAsync(cancellationToken);
 
         if (content is null)

@@ -29,7 +29,7 @@ public class ContentStreamTests : IDisposable
                 Content = new MessageContent
                 {
                     DownloadStatus = DownloadStatus.Completed,
-                    Content = bytes,
+                    Blob = new MessageContentBlob { Content = bytes },
                     ContentType = contentType,
                     FileName = fileName,
                     CompletedAt = DateTimeOffset.UtcNow
@@ -309,8 +309,15 @@ public class ContentStreamTests : IDisposable
         // 模擬「整張表被保留期清除清空後，同一個 Id 被重新發號給不同的內容」
         await _fixture.SeedAsync(async dbContext =>
         {
-            var content = await dbContext.MessageContents.SingleAsync(c => c.Id == contentId);
-            content.Content = [9, 9, 9];
+            var content = await dbContext.MessageContents.Include(c => c.Blob).SingleAsync(c => c.Id == contentId);
+            if (content.Blob != null)
+            {
+                content.Blob.Content = [9, 9, 9];
+            }
+            else
+            {
+                content.Blob = new MessageContentBlob { MessageContentId = contentId, Content = [9, 9, 9] };
+            }
             content.CompletedAt = DateTimeOffset.UtcNow.AddMinutes(1);
             await dbContext.SaveChangesAsync();
         });
@@ -549,7 +556,6 @@ public class ContentStreamTests : IDisposable
                 Content = new MessageContent
                 {
                     DownloadStatus = DownloadStatus.Completed,
-                    Content = null,
                     ContentType = "application/octet-stream",
                     FileName = "null-content.bin",
                     CompletedAt = DateTimeOffset.UtcNow

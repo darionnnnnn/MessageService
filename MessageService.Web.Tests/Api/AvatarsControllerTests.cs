@@ -25,7 +25,7 @@ public class AvatarsControllerTests : IDisposable
             {
                 GroupId = "G1",
                 GroupName = "Group 1",
-                PictureContent = pictureBytes,
+                Picture = new GroupPicture { GroupId = "G1", Content = pictureBytes },
                 PictureContentType = "image/jpeg",
                 PictureUpdatedAt = now
             });
@@ -71,7 +71,7 @@ public class AvatarsControllerTests : IDisposable
             {
                 GroupId = "G1",
                 GroupName = "Group 1",
-                PictureContent = encryptedBytes,
+                Picture = new GroupPicture { GroupId = "G1", Content = encryptedBytes },
                 PictureContentType = "image/jpeg",
                 PictureUpdatedAt = now
             });
@@ -98,7 +98,6 @@ public class AvatarsControllerTests : IDisposable
             {
                 GroupId = "G1",
                 GroupName = "Group 1",
-                PictureContent = null,
                 PictureUpdatedAt = now
             });
             await Task.CompletedTask;
@@ -124,7 +123,7 @@ public class AvatarsControllerTests : IDisposable
             {
                 GroupId = "G1",
                 GroupName = "Group 1",
-                PictureContent = pictureBytes,
+                Picture = new GroupPicture { GroupId = "G1", Content = pictureBytes },
                 PictureContentType = "image/jpeg",
                 PictureUpdatedAt = now
             });
@@ -146,7 +145,7 @@ public class AvatarsControllerTests : IDisposable
             {
                 GroupId = "G1",
                 GroupName = "Group 1",
-                PictureContent = pictureBytes,
+                Picture = new GroupPicture { GroupId = "G1", Content = pictureBytes },
                 PictureContentType = "image/jpeg",
                 PictureUpdatedAt = now
             });
@@ -177,7 +176,7 @@ public class AvatarsControllerTests : IDisposable
             {
                 GroupId = "G1",
                 GroupName = "Group 1",
-                PictureContent = pictureBytes,
+                Picture = new GroupPicture { GroupId = "G1", Content = pictureBytes },
                 PictureContentType = "image/jpeg",
                 PictureUpdatedAt = now
             });
@@ -206,7 +205,7 @@ public class AvatarsControllerTests : IDisposable
             {
                 GroupId = "G1",
                 GroupName = "Group 1",
-                PictureContent = pictureBytes,
+                Picture = new GroupPicture { GroupId = "G1", Content = pictureBytes },
                 PictureContentType = "image/jpeg",
                 PictureUpdatedAt = t1
             });
@@ -244,7 +243,7 @@ public class AvatarsControllerTests : IDisposable
                 GroupId = "G1",
                 UserId = "U1",
                 DisplayName = "User 1",
-                PictureContent = pictureBytes,
+                Picture = new GroupMemberPicture { GroupId = "G1", UserId = "U1", Content = pictureBytes },
                 PictureContentType = "image/png",
                 PictureUpdatedAt = now
             });
@@ -272,7 +271,7 @@ public class AvatarsControllerTests : IDisposable
                 GroupId = "G1",
                 UserId = "U1",
                 DisplayName = "User 1",
-                PictureContent = pictureBytes,
+                Picture = new GroupMemberPicture { GroupId = "G1", UserId = "U1", Content = pictureBytes },
                 PictureContentType = "image/png",
                 PictureUpdatedAt = now
             });
@@ -298,7 +297,6 @@ public class AvatarsControllerTests : IDisposable
                 GroupId = "G1",
                 UserId = "U1",
                 DisplayName = "User 1",
-                PictureContent = null,
                 PictureUpdatedAt = now
             });
             await Task.CompletedTask;
@@ -321,7 +319,7 @@ public class AvatarsControllerTests : IDisposable
                 GroupId = "G1",
                 UserId = "U1",
                 DisplayName = "User 1",
-                PictureContent = pictureBytes,
+                Picture = new GroupMemberPicture { GroupId = "G1", UserId = "U1", Content = pictureBytes },
                 PictureContentType = "image/png",
                 PictureUpdatedAt = now
             });
@@ -353,7 +351,7 @@ public class AvatarsControllerTests : IDisposable
                 GroupId = "G1",
                 UserId = "U1",
                 DisplayName = "User 1",
-                PictureContent = pictureBytes,
+                Picture = new GroupMemberPicture { GroupId = "G1", UserId = "U1", Content = pictureBytes },
                 PictureContentType = "image/png",
                 PictureUpdatedAt = now
             });
@@ -383,7 +381,7 @@ public class AvatarsControllerTests : IDisposable
                 GroupId = "G1",
                 UserId = "U1",
                 DisplayName = "User 1",
-                PictureContent = pictureBytes,
+                Picture = new GroupMemberPicture { GroupId = "G1", UserId = "U1", Content = pictureBytes },
                 PictureContentType = "image/png",
                 PictureUpdatedAt = t1
             });

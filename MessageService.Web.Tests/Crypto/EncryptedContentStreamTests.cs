@@ -60,7 +60,7 @@ public class EncryptedContentStreamTests : IDisposable
                 Content = new MessageContent
                 {
                     DownloadStatus = DownloadStatus.Completed,
-                    Content = BuildEncryptedBlob(plaintext),
+                    Blob = new MessageContentBlob { Content = BuildEncryptedBlob(plaintext) },
                     ContentType = contentType,
                     FileName = fileName,
                     CompletedAt = DateTimeOffset.UtcNow
@@ -197,7 +197,7 @@ public class EncryptedContentStreamTests : IDisposable
                 Content = new MessageContent
                 {
                     DownloadStatus = DownloadStatus.Completed,
-                    Content = plaintext, // 沒有表頭，直接是舊格式的明文 blob
+                    Blob = new MessageContentBlob { Content = plaintext }, // 沒有表頭，直接是舊格式的明文 blob
                     ContentType = "video/mp4",
                     CompletedAt = DateTimeOffset.UtcNow
                 }
@@ -235,7 +235,7 @@ public class EncryptedContentStreamTests : IDisposable
                 Content = new MessageContent
                 {
                     DownloadStatus = DownloadStatus.Completed,
-                    Content = BuildEncryptedBlob(plaintext, CorrectKeyId),
+                    Blob = new MessageContentBlob { Content = BuildEncryptedBlob(plaintext, CorrectKeyId) },
                     ContentType = "video/mp4",
                     CompletedAt = DateTimeOffset.UtcNow
                 }
@@ -270,7 +270,7 @@ public class EncryptedContentStreamTests : IDisposable
                 Content = new MessageContent
                 {
                     DownloadStatus = DownloadStatus.Completed,
-                    Content = BuildEncryptedBlob(plaintext, wrongKeyId),
+                    Blob = new MessageContentBlob { Content = BuildEncryptedBlob(plaintext, wrongKeyId) },
                     ContentType = "video/mp4",
                     CompletedAt = DateTimeOffset.UtcNow
                 }

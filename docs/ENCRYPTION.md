@@ -54,12 +54,12 @@ $bytes = New-Object byte[] 32
 | 欄位 | 加密 |
 |---|---|
 | `GroupMessages.Text`（訊息內文） | ✓ |
-| `MessageContents.Content`（圖片/影片/語音/檔案本體） | ✓（分塊加密，見下） |
+| `MessageContentBlobs.Content`（圖片/影片/語音/檔案本體） | ✓（分塊加密，見下） |
 | `MessageContents.FileName` | ✓ |
 | `Groups.GroupName` / `PictureUrl` | ✓ |
-| `Groups.PictureContent` | ✓（ChunkedBlobCipher 分塊加密） |
+| `GroupPictures.Content` | ✓（ChunkedBlobCipher 分塊加密） |
 | `GroupMembers.DisplayName` / `PictureUrl` | ✓ |
-| `GroupMembers.PictureContent` | ✓（ChunkedBlobCipher 分塊加密） |
+| `GroupMemberPictures.Content` | ✓（ChunkedBlobCipher 分塊加密） |
 | `UserAliases.Alias` | ✓ |
 | `GroupMessages.GroupId` / `UserId` | ✗（刻意不加密，見下） |
 | `MessageContents.ContentType`（如 `image/jpeg`） | ✗ |
@@ -103,7 +103,7 @@ $bytes = New-Object byte[] 32
 
 ## 內容 blob：分塊加密，保留 Range 拖進度能力
 
-`MessageContents.Content` 不能像文字欄位那樣整值加密——影片／語音要支援瀏覽器的 Range
+`MessageContentBlobs.Content` 不能像文字欄位那樣整值加密——影片／語音要支援瀏覽器的 Range
 請求（拖進度），解密必須能只處理使用者實際要的那一小段位元組，不能每次都把整個檔案
 解密一遍。格式（`MSE2`，帶 key id）：
 

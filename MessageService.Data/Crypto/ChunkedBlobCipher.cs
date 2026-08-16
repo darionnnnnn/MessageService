@@ -2,7 +2,7 @@ using System.Security.Cryptography;
 
 namespace MessageService.Data.Crypto;
 
-/// <summary>MessageContents.Content（varbinary(max)）的分塊加密格式。blob 不能像文字欄位那樣
+/// <summary>MessageContentBlobs.Content（varbinary(max)）的分塊加密格式。blob 不能像文字欄位那樣
 /// 整值加密——影片/語音要支援 Range 拖進度，解密必須能只處理使用者實際要的那段位元組，不能
 /// 每次都把整份檔案解出來。格式：[表頭 16 bytes][chunk 0][chunk 1]...，每個 chunk 是
 /// [nonce(12)][tag(16)][ciphertext(明文長度)]，固定 1MB 明文塊（最後一塊可能較短）。

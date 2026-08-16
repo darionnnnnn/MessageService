@@ -63,9 +63,6 @@ namespace MessageService.Data.Migrations.SqlServer
                     b.Property<long?>("LastMessageId")
                         .HasColumnType("bigint");
 
-                    b.Property<byte[]>("PictureContent")
-                        .HasColumnType("varbinary(max)");
-
                     b.Property<string>("PictureContentType")
                         .HasColumnType("nvarchar(max)");
 
@@ -97,9 +94,6 @@ namespace MessageService.Data.Migrations.SqlServer
                     b.Property<string>("DisplayName")
                         .HasColumnType("nvarchar(max)");
 
-                    b.Property<byte[]>("PictureContent")
-                        .HasColumnType("varbinary(max)");
-
                     b.Property<string>("PictureContentType")
                         .HasColumnType("nvarchar(max)");
 
@@ -118,6 +112,23 @@ namespace MessageService.Data.Migrations.SqlServer
                     b.HasKey("GroupId", "UserId");
 
                     b.ToTable("GroupMembers");
+                });
+
+            modelBuilder.Entity("MessageService.Models.GroupMemberPicture", b =>
+                {
+                    b.Property<string>("GroupId")
+                        .HasColumnType("nvarchar(450)");
+
+                    b.Property<string>("UserId")
+                        .HasColumnType("nvarchar(450)");
+
+                    b.Property<byte[]>("Content")
+                        .IsRequired()
+                        .HasColumnType("varbinary(max)");
+
+                    b.HasKey("GroupId", "UserId");
+
+                    b.ToTable("GroupMemberPictures");
                 });
 
             modelBuilder.Entity("MessageService.Models.GroupMessage", b =>
@@ -175,6 +186,20 @@ namespace MessageService.Data.Migrations.SqlServer
                     b.HasIndex("GroupId", "Id");
 
                     b.ToTable("GroupMessages");
+                });
+
+            modelBuilder.Entity("MessageService.Models.GroupPicture", b =>
+                {
+                    b.Property<string>("GroupId")
+                        .HasColumnType("nvarchar(450)");
+
+                    b.Property<byte[]>("Content")
+                        .IsRequired()
+                        .HasColumnType("varbinary(max)");
+
+                    b.HasKey("GroupId");
+
+                    b.ToTable("GroupPictures");
                 });
 
             modelBuilder.Entity("MessageService.Models.HostHeartbeat", b =>
@@ -251,9 +276,6 @@ namespace MessageService.Data.Migrations.SqlServer
                     b.Property<DateTimeOffset?>("CompletedAt")
                         .HasColumnType("datetimeoffset");
 
-                    b.Property<byte[]>("Content")
-                        .HasColumnType("varbinary(max)");
-
                     b.Property<string>("ContentType")
                         .HasColumnType("nvarchar(max)");
 
@@ -283,6 +305,20 @@ namespace MessageService.Data.Migrations.SqlServer
                         .IsUnique();
 
                     b.ToTable("MessageContents");
+                });
+
+            modelBuilder.Entity("MessageService.Models.MessageContentBlob", b =>
+                {
+                    b.Property<long>("MessageContentId")
+                        .HasColumnType("bigint");
+
+                    b.Property<byte[]>("Content")
+                        .IsRequired()
+                        .HasColumnType("varbinary(max)");
+
+                    b.HasKey("MessageContentId");
+
+                    b.ToTable("MessageContentBlobs");
                 });
 
             modelBuilder.Entity("MessageService.Models.UserAlias", b =>
@@ -340,6 +376,28 @@ namespace MessageService.Data.Migrations.SqlServer
                         });
                 });
 
+            modelBuilder.Entity("MessageService.Models.GroupMemberPicture", b =>
+                {
+                    b.HasOne("MessageService.Models.GroupMember", "GroupMember")
+                        .WithOne("Picture")
+                        .HasForeignKey("MessageService.Models.GroupMemberPicture", "GroupId", "UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("GroupMember");
+                });
+
+            modelBuilder.Entity("MessageService.Models.GroupPicture", b =>
+                {
+                    b.HasOne("MessageService.Models.Group", "Group")
+                        .WithOne("Picture")
+                        .HasForeignKey("MessageService.Models.GroupPicture", "GroupId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Group");
+                });
+
             modelBuilder.Entity("MessageService.Models.MaskKeywordGroup", b =>
                 {
                     b.HasOne("MessageService.Models.MaskKeyword", "MaskKeyword")
@@ -362,6 +420,27 @@ namespace MessageService.Data.Migrations.SqlServer
                     b.Navigation("GroupMessage");
                 });
 
+            modelBuilder.Entity("MessageService.Models.MessageContentBlob", b =>
+                {
+                    b.HasOne("MessageService.Models.MessageContent", "MessageContent")
+                        .WithOne("Blob")
+                        .HasForeignKey("MessageService.Models.MessageContentBlob", "MessageContentId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("MessageContent");
+                });
+
+            modelBuilder.Entity("MessageService.Models.Group", b =>
+                {
+                    b.Navigation("Picture");
+                });
+
+            modelBuilder.Entity("MessageService.Models.GroupMember", b =>
+                {
+                    b.Navigation("Picture");
+                });
+
             modelBuilder.Entity("MessageService.Models.GroupMessage", b =>
                 {
                     b.Navigation("Content");
@@ -370,6 +449,11 @@ namespace MessageService.Data.Migrations.SqlServer
             modelBuilder.Entity("MessageService.Models.MaskKeyword", b =>
                 {
                     b.Navigation("Groups");
+                });
+
+            modelBuilder.Entity("MessageService.Models.MessageContent", b =>
+                {
+                    b.Navigation("Blob");
                 });
 #pragma warning restore 612, 618
         }

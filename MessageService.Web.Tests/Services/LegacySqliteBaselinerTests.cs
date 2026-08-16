@@ -54,10 +54,14 @@ public class LegacySqliteBaselinerTests : IDisposable
         drop.CommandText = """
             DROP TABLE AnonymousIdentities;
             DROP TABLE HostHeartbeats;
+            DROP TABLE GroupPictures;
+            DROP TABLE GroupMemberPictures;
+            DROP TABLE MessageContentBlobs;
             ALTER TABLE GroupMessages DROP COLUMN StickerId;
             ALTER TABLE GroupMessages DROP COLUMN PackageId;
             ALTER TABLE MessageContents DROP COLUMN FailedAttempts;
             ALTER TABLE MessageContents DROP COLUMN LastAttemptAt;
+            ALTER TABLE MessageContents ADD COLUMN Content BLOB;
             ALTER TABLE ViewerSettings DROP COLUMN RetentionDays;
             ALTER TABLE ViewerSettings DROP COLUMN MaskNationalId;
             ALTER TABLE ViewerSettings DROP COLUMN MaskMobilePhone;
@@ -65,11 +69,9 @@ public class LegacySqliteBaselinerTests : IDisposable
             ALTER TABLE ViewerSettings DROP COLUMN MaskNhiCard;
             ALTER TABLE Groups DROP COLUMN LastMessageId;
             ALTER TABLE Groups DROP COLUMN LastMessageAt;
-            ALTER TABLE Groups DROP COLUMN PictureContent;
             ALTER TABLE Groups DROP COLUMN PictureContentType;
             ALTER TABLE Groups DROP COLUMN PictureFetchedUrl;
             ALTER TABLE Groups DROP COLUMN PictureUpdatedAt;
-            ALTER TABLE GroupMembers DROP COLUMN PictureContent;
             ALTER TABLE GroupMembers DROP COLUMN PictureContentType;
             ALTER TABLE GroupMembers DROP COLUMN PictureFetchedUrl;
             ALTER TABLE GroupMembers DROP COLUMN PictureUpdatedAt;

@@ -274,10 +274,19 @@ dotnet user-secrets set "Line:ChannelAccessToken" "<你的 access token>"
 | FileName | nvarchar(max), null | 檔案訊息的原始檔名（加密開啟時同 Text 走 `ENC2:` 整值加密） |
 | ContentType | nvarchar(max), null | 下載完成後的 MIME type |
 | DownloadStatus | nvarchar(20) | Pending / Completed / Failed |
-| Content | varbinary(max), null | 原始檔案內容，Pending/Failed 時為 null；加密開啟時以 1MB 為單位分塊加密存放（保留 Range 續傳能力，見 [docs/ENCRYPTION.md](docs/ENCRYPTION.md)） |
 | CompletedAt | datetimeoffset, null | 下載完成時間 |
 | FailedAttempts | int | 累計下載失敗次數，`ContentDownload:MaxFailedRetries` 用它判斷是否放棄重試 |
 | LastAttemptAt | datetimeoffset, null | 最後一次嘗試下載的時間 |
+
+**MessageContentBlobs**（1:1 對 MessageContents，ON DELETE CASCADE）
+
+| 欄位 | 型別 | 說明 |
+|---|---|---|
+| MessageContentId | bigint PK/FK | 主鍵同時是外鍵。SQLite 上必須是 rowid 別名（`INTEGER`），`SqliteBlob` 靠 rowid 開啟 blob 做增量串流 |
+| Content | varbinary(max) | 原始檔案內容；加密開啟時以 1MB 為單位分塊加密存放（保留 Range 續傳能力，見 [docs/ENCRYPTION.md](docs/ENCRYPTION.md)） |
+
+尚未下載完成的內容**沒有這一列**（不是 `Content` 為 null）；下載失敗時
+`DbContentWorkSource.FailAsync` 會把列刪掉，不留殘骸。blob 獨立一表的理由見「設計決策備忘」。
 
 **Groups** / **GroupMembers**：收錄端背景快取的群組名稱、成員顯示名稱與頭貼（7 天 TTL，來源是 LINE 的 group summary / member profile API），檢視端用來把 GroupId/UserId 轉成人看得懂的名稱。快取失敗時 fallback 顯示原始 ID；`ProfileCache:FailureRetryAfter`（預設 10 分鐘）冷卻期內失敗不會重複呼叫 LINE API。加密開啟時群組名稱/顯示名稱/頭貼 URL 同樣走 `ENC2:` 整值加密。檢視端也會寫這張表：`Groups.LastMessageId` 指向的訊息若被保留期清除刪掉，`GroupsController.RecoverDriftedLastMessageAsync` 會即時查回目前真正的最後一則並修正這一列（見 `docs/DEPLOYMENT-GUIDE.md` 的 Viewer 帳號權限說明）。
 
@@ -286,10 +295,13 @@ dotnet user-secrets set "Line:ChannelAccessToken" "<你的 access token>"
 | 欄位 | 型別 | 說明 |
 |---|---|---|
 | PictureUrl | nvarchar(max), null | LINE 端的來源位址，不會直接送給前端 |
-| PictureContent | varbinary(max), null | 圖檔本體（加密開啟時同 MessageContents 走 ChunkedBlobCipher 分塊加密） |
 | PictureContentType | nvarchar(max), null | MIME 型別（例如 image/jpeg） |
 | PictureFetchedUrl | nvarchar(max), null | 下載當時的來源 URL（用於判斷 LINE 頭貼是否更新） |
 | PictureUpdatedAt | datetimeoffset, null | 圖檔下載完成時間 |
+
+圖檔本體各自存在 **GroupPictures**（`GroupId` PK/FK）與 **GroupMemberPictures**（`GroupId`+`UserId` PK/FK）
+兩張子表的 `Content` 欄位，皆 ON DELETE CASCADE，加密開啟時走 `ChunkedBlobCipher` 分塊加密。
+沒有頭貼時是**沒有子列**，不是 `Content` 為 null。
 
 **ViewerSettings**（單列，Id 固定為 1）：除既有的名稱顯示模式外，新增 `RetentionDays`（保留天數，預設 1095＝3 年，`RetentionCleanupService` 每次執行讀取）與 `MaskNationalId`/`MaskMobilePhone`/`MaskLandline`（預設全開）/`MaskNhiCard`（台灣個資自動遮蔽四開關；`MaskNhiCard` 預設關閉——12 碼純數字的偵測規則跟宅配貨運單號格式相同，開啟前請先確認群組內容性質）。
 
@@ -334,6 +346,7 @@ mutex，避免兩邊同時建 `__EFMigrationsHistory` 互相打架。
 
 - **外部圖檔一律由連得到外網的主機下載後存 DB，前端只走自家 API**：拆機拓撲下檢視端可能完全沒有對外網路；這也讓去識別化模式能真正生效，因為圖檔不由瀏覽器直接向 LINE 索取。
 - **圖片/影片/語音/檔案存 DB（varbinary）而非磁碟**：檢視端只要連 DB 就能讀到；保留期清除靠 CASCADE 一次帶走，不會產生孤兒檔案。代價是 DB 容量成長快，若量大屆時再評估 FILESTREAM 或磁碟存放（內容獨立一表已為搬遷留好最小改動面）
+- **blob 各自獨立一表（`MessageContentBlobs`／`GroupPictures`／`GroupMemberPictures`），不掛在父實體上**：父表預設就是輕的，任何查詢忘記投影都不會把幾百 MB 的檔案拖進記憶體；要 blob 的路徑必須明確查子表。查詢與寫入規則見 [CLAUDE.md](CLAUDE.md) 的「資料層規則」，取捨過程見 [docs/history/2026-08-16_REVIEW-FEEDBACK-6-PLAN.md](docs/history/2026-08-16_REVIEW-FEEDBACK-6-PLAN.md)
 - **webhook 除了「outbox 寫不進去」以外一律回 200**（簽章合法後）：回非 2xx 會讓 LINE 重送並可能判定 webhook 失效，所以 JSON 解析失敗、個別事件處理失敗都只記 log 並回 200（畸形 payload 重送也不會變好）。唯一的例外是寫本機 outbox 本身失敗（磁碟滿、檔案鎖住、DB 損毀）——那是唯一會真的把訊息弄丟的情況，改回 500 讓 LINE 的 redelivery 接手，重送造成的重複由 `WebhookEventId` 唯一索引擋掉。**前提是 LINE Developers Console 要開啟 webhook redelivery**（預設關閉，見 [docs/LINE-BOT-SETUP.md](docs/LINE-BOT-SETUP.md)）；沒開的話回 500 等於直接放棄那則事件
 - **webhook 收進來後只寫本機 outbox，不直接碰資料庫**：落地（含防重送）延後到背景排空時才做，webhook 回應時間因此跟資料庫是否可用完全脫鉤，短暫斷線不會掉訊息；這也是收錄端支援網段分離部署（`Deployment:Mode`）的基礎，詳見 [docs/DEPLOYMENT-MODES.md](docs/DEPLOYMENT-MODES.md)
 - **下載走背景佇列**：影片/語音要等 LINE 轉檔、檔案可達數百 MB，不能在 webhook 請求內同步處理；服務重啟會自動撈回殘留的 Pending 接續下載

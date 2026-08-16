@@ -7,6 +7,7 @@ using MessageService.Options;
 using Microsoft.Data.Sqlite;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
 namespace MessageService.Services;
@@ -17,9 +18,16 @@ namespace MessageService.Services;
 /// 改用兩種 provider 各自的串流寫入方式，見該方法說明。cipher.Enabled 時再包一層
 /// ChunkedEncryptingStream（見 FieldCipher.CreateEncryptingStream）——blob 不像文字欄位能用
 /// EF ValueConverter 整值加密，Range 拖進度需要分塊，格式與讀取端見 ChunkedBlobCipher。</summary>
-public class DbContentWorkSource(MessageDbContext dbContext, IOptions<ContentDownloadOptions> options, FieldCipher cipher) : IContentWorkSource
+public class DbContentWorkSource(
+    MessageDbContext dbContext,
+    IOptions<ContentDownloadOptions> options,
+    FieldCipher cipher,
+    ILogger<DbContentWorkSource> logger) : IContentWorkSource
 {
     private const int BufferSize = 81920;
+    private const string BlobTableName = "MessageContentBlobs";
+    private const string BlobColumnName = "Content";
+    private const string BlobIdColumnName = "MessageContentId";
     private readonly ContentDownloadOptions _options = options.Value;
 
     public async Task<IReadOnlyList<long>> GetPendingIdsAsync(bool reclaimDownloading, CancellationToken cancellationToken)
@@ -51,12 +59,9 @@ public class DbContentWorkSource(MessageDbContext dbContext, IOptions<ContentDow
         // 格式儲存，現在才加轉換會讓既有 messages.db 的既有資料被讀成亂碼）。Failed 筆數本來
         // 就是小量（下載失敗的內容），先用 FailedAttempts 門檻縮小範圍後在記憶體篩 cutoff
         // 划算得多，不值得為此冒風險改儲存格式。
-        // 只投影 Id 與 ReceivedAt，絕對不要用 Include + ToListAsync 把整個 MessageContent
-        // 實體撈回來——那會連 Content（varbinary(max)）一起載進記憶體。而且「Failed 的列不會
-        // 有內容」這個假設並不成立：SQLite 的 zeroblob(N) 是先 commit 才開始串流填入，中途
-        // 失敗會留下一顆 N bytes 的 blob，重試耗盡後那列就變成「Failed 且帶著一顆大 blob」。
-        // 一支 300MB 的影片失敗幾次，每次重新入列都會把幾百 MB 載進記憶體，正好違反本批次
-        // 串流化要達成的目的。
+        // 只投影 Id 與 ReceivedAt。附檔 blob 已拆到獨立的 MessageContentBlobs 表，父表這邊
+        // 撈整列不再有 blob 的代價；FailAsync 也會順手刪掉失敗留下的 blob 列（行程被殺在串流
+        // 中途留下的殘留則由下次 CompleteAsync 先刪後插覆蓋掉）。
         var cutoff = DateTimeOffset.UtcNow.AddDays(-_options.FailedRetryWindowDays);
         var failedCandidates = await dbContext.MessageContents
             .Where(c => c.DownloadStatus == DownloadStatus.Failed
@@ -80,19 +85,15 @@ public class DbContentWorkSource(MessageDbContext dbContext, IOptions<ContentDow
         return pendingIds.Concat(retryableIds).ToList();
     }
 
-    public async Task<ContentWorkItem?> GetAsync(long contentId, CancellationToken cancellationToken)
-    {
-        var content = await dbContext.MessageContents
-            .Include(c => c.GroupMessage)
-            .FirstOrDefaultAsync(c => c.Id == contentId, cancellationToken);
-
-        if (content?.GroupMessage is null || content.DownloadStatus != DownloadStatus.Pending)
-        {
-            return null;
-        }
-
-        return new ContentWorkItem(content.Id, content.GroupMessage.LineMessageId, content.GroupMessage.MessageType, content.GroupMessage.StickerId);
-    }
+    public Task<ContentWorkItem?> GetAsync(long contentId, CancellationToken cancellationToken) =>
+        dbContext.MessageContents
+            .Where(c => c.Id == contentId && c.DownloadStatus == DownloadStatus.Pending && c.GroupMessage != null)
+            .Select(c => new ContentWorkItem(
+                c.Id,
+                c.GroupMessage!.LineMessageId,
+                c.GroupMessage.MessageType,
+                c.GroupMessage.StickerId))
+            .FirstOrDefaultAsync(cancellationToken);
 
     /// <summary>blob 寫入先於中繼資料更新：中斷時（例如服務被殺）狀態最壞停在 Downloading，
     /// 下次啟動的 RequeuePendingAsync 會整個重跑（見 GetPendingIdsAsync 對 Downloading 的回收
@@ -192,19 +193,27 @@ public class DbContentWorkSource(MessageDbContext dbContext, IOptions<ContentDow
             }
         }
 
-        var entity = await dbContext.MessageContents.FirstOrDefaultAsync(c => c.Id == contentId, cancellationToken);
-        if (entity is null)
+        try
         {
-            return;
+            var now = DateTimeOffset.UtcNow;
+            await dbContext.MessageContents
+                .Where(c => c.Id == contentId)
+                .ExecuteUpdateAsync(s => s
+                    .SetProperty(c => c.ContentType, contentType)
+                    .SetProperty(c => c.DownloadStatus, DownloadStatus.Completed)
+                    .SetProperty(c => c.CompletedAt, now)
+                    // 歸零，不然「失敗 9 次後終於成功」的內容會永遠帶著 FailedAttempts=9，
+                    // 日後若加上「重新下載」之類的功能會從 9 起跳、一次就撞到 MaxFailedRetries
+                    .SetProperty(c => c.FailedAttempts, 0),
+                    cancellationToken);
         }
-
-        entity.ContentType = contentType;
-        entity.DownloadStatus = DownloadStatus.Completed;
-        entity.CompletedAt = DateTimeOffset.UtcNow;
-        // 歸零，不然「失敗 9 次後終於成功」的內容會永遠帶著 FailedAttempts=9，
-        // 日後若加上「重新下載」之類的功能會從 9 起跳、一次就撞到 MaxFailedRetries
-        entity.FailedAttempts = 0;
-        await dbContext.SaveChangesAsync(cancellationToken);
+        catch (Exception ex)
+        {
+            // blob 已經寫進去了，中繼資料卻沒更新——這一筆會卡在 Downloading，
+            // 要靠下次啟動的回收整個重跑，所以特別記下來
+            logger.LogError(ex, "內容 {ContentId} 的 blob 已寫入，但中繼資料更新失敗", contentId);
+            throw;
+        }
     }
 
     /// <summary>把認領失敗的列改回 Pending，讓 ProcessAsync 的重試迴圈下一次呼叫 CompleteAsync
@@ -218,8 +227,15 @@ public class DbContentWorkSource(MessageDbContext dbContext, IOptions<ContentDow
     private static async Task WriteContentSqlServerAsync(
         DbConnection connection, long contentId, Stream content, CancellationToken cancellationToken)
     {
+        await using (var deleteCmd = connection.CreateCommand())
+        {
+            deleteCmd.CommandText = $"DELETE FROM {BlobTableName} WHERE {BlobIdColumnName} = @id";
+            AddParameter(deleteCmd, "@id", contentId);
+            await deleteCmd.ExecuteNonQueryAsync(cancellationToken);
+        }
+
         await using var command = (SqlCommand)connection.CreateCommand();
-        command.CommandText = "UPDATE MessageContents SET Content = @content WHERE Id = @id";
+        command.CommandText = $"INSERT INTO {BlobTableName} ({BlobIdColumnName}, {BlobColumnName}) VALUES (@id, @content)";
 
         var contentParam = new SqlParameter("@content", SqlDbType.VarBinary, -1) { Value = content };
         command.Parameters.Add(contentParam);
@@ -233,13 +249,14 @@ public class DbContentWorkSource(MessageDbContext dbContext, IOptions<ContentDow
     {
         await using (var init = connection.CreateCommand())
         {
-            init.CommandText = "UPDATE MessageContents SET Content = zeroblob(@length) WHERE Id = @id";
-            AddParameter(init, "@length", contentLength);
+            init.CommandText = $"DELETE FROM {BlobTableName} WHERE {BlobIdColumnName} = @id; " +
+                               $"INSERT INTO {BlobTableName} ({BlobIdColumnName}, {BlobColumnName}) VALUES (@id, zeroblob(@length));";
             AddParameter(init, "@id", contentId);
+            AddParameter(init, "@length", contentLength);
             await init.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        await using var blob = new SqliteBlob(connection, "MessageContents", "Content", contentId);
+        await using var blob = new SqliteBlob(connection, BlobTableName, BlobColumnName, contentId);
         await content.CopyToAsync(blob, BufferSize, cancellationToken);
     }
 
@@ -253,16 +270,18 @@ public class DbContentWorkSource(MessageDbContext dbContext, IOptions<ContentDow
 
     public async Task FailAsync(long contentId, CancellationToken cancellationToken)
     {
-        var entity = await dbContext.MessageContents.FirstOrDefaultAsync(c => c.Id == contentId, cancellationToken);
-        if (entity is null)
-        {
-            return;
-        }
+        var now = DateTimeOffset.UtcNow;
+        await dbContext.MessageContents
+            .Where(c => c.Id == contentId)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(c => c.DownloadStatus, DownloadStatus.Failed)
+                .SetProperty(c => c.FailedAttempts, c => c.FailedAttempts + 1)
+                .SetProperty(c => c.LastAttemptAt, now),
+                cancellationToken);
 
-        entity.DownloadStatus = DownloadStatus.Failed;
-        entity.FailedAttempts++;
-        entity.LastAttemptAt = DateTimeOffset.UtcNow;
-        await dbContext.SaveChangesAsync(cancellationToken);
+        await dbContext.MessageContentBlobs
+            .Where(b => b.MessageContentId == contentId)
+            .ExecuteDeleteAsync(cancellationToken);
     }
 }
 
