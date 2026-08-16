@@ -93,4 +93,66 @@ public class DbHeartbeatStoreTests : IDisposable
         var row = await dbContext.HostHeartbeats.AsNoTracking().SingleAsync(h => h.Role == "Edge" && h.MachineName == "edge-1");
         Assert.Null(row.EncryptionKeyFingerprint);
     }
+
+    [Fact]
+    public async Task UpsertAsync_ConcurrentInsert_RetriesAndUpdatesWithoutThrowing()
+    {
+        var interceptor = new SaveFailureInterceptor();
+        var options = new DbContextOptionsBuilder<MessageDbContext>()
+            .UseSqlite(_connection)
+            .AddInterceptors(interceptor)
+            .Options;
+
+        using var testDbContext = new MessageDbContext(options);
+        var store = CreateStore(testDbContext);
+
+        // 模擬在第一次 SaveChanges 前，另一個行程搶先寫入了該 (Role, MachineName)
+        interceptor.BeforeSaveOnce = async () =>
+        {
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = "INSERT INTO HostHeartbeats (Role, MachineName, LastSeenAt, OutboxPending, OutboxOldestAgeSeconds, EncryptionKeyFingerprint) VALUES ('Core', 'host-concurrent', '2026-08-16 00:00:00', 1, 10.0, 'key-old');";
+            await cmd.ExecuteNonQueryAsync();
+        };
+
+        var report = new HeartbeatReport(8, 25.5);
+        await store.UpsertAsync("Core", "host-concurrent", report, "key-new", CancellationToken.None);
+
+        using var scope = _provider.CreateScope();
+        var verifyDbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+
+        var rows = await verifyDbContext.HostHeartbeats.AsNoTracking()
+            .Where(h => h.Role == "Core" && h.MachineName == "host-concurrent")
+            .ToListAsync();
+
+        var row = Assert.Single(rows);
+        Assert.Equal(8, row.OutboxPending);
+        Assert.Equal(25.5, row.OutboxOldestAgeSeconds);
+        Assert.Equal("key-new", row.EncryptionKeyFingerprint);
+    }
+
+    [Fact]
+    public async Task UpsertAsync_ConcurrentParallelUpserts_BothSucceedAndSingleRowRemains()
+    {
+        using var scope1 = _provider.CreateScope();
+        using var scope2 = _provider.CreateScope();
+        var dbContext1 = scope1.ServiceProvider.GetRequiredService<MessageDbContext>();
+        var dbContext2 = scope2.ServiceProvider.GetRequiredService<MessageDbContext>();
+
+        var store1 = CreateStore(dbContext1);
+        var store2 = CreateStore(dbContext2);
+
+        var task1 = store1.UpsertAsync("Core", "host-parallel", new HeartbeatReport(10, 10.0), "key-1", CancellationToken.None);
+        var task2 = store2.UpsertAsync("Core", "host-parallel", new HeartbeatReport(20, 20.0), "key-2", CancellationToken.None);
+
+        await Task.WhenAll(task1, task2);
+
+        using var scope = _provider.CreateScope();
+        var verifyDb = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+
+        var rows = await verifyDb.HostHeartbeats.AsNoTracking()
+            .Where(h => h.Role == "Core" && h.MachineName == "host-parallel")
+            .ToListAsync();
+
+        Assert.Single(rows);
+    }
 }
