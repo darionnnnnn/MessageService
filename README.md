@@ -100,7 +100,10 @@ RetentionCleanupService（每日固定時間讀取檢視端設定頁存的保留
 | `ContentDownload:TranscodingPollSeconds` / `TranscodingMaxPolls` | 影片/語音轉檔輪詢間隔與次數上限（預設 5 秒 × 24 次） |
 | `ContentDownload:MaxConcurrency` | 並行下載 worker 數（預設 3）——一支等轉檔的影片不會卡住排在後面的圖片/檔案 |
 | `ContentDownload:FailedRetryWindowDays` / `MaxFailedRetries` | Failed 內容只在訊息到達後這麼多天內（預設 7）、且累計失敗次數未達上限（預設 10）才會被重新撿回，避免 LINE 內容過期後每次重啟都無限重跑 |
-| `ContentDownload:RequeueIntervalMinutes` | 週期性重掃待下載內容的間隔（預設 15 分鐘，0 表示只在啟動時掃一次，上限 24 天）。撿回其他主機或回填服務補出的 Pending 與仍可重試的 Failed；**不碰 Downloading**（worker 正在跑，那是真的在下載中）——卡在 Downloading 的孤兒只在啟動接續時撿回。重複入列由認領檢查擋掉，不會重複下載 |
+| `ContentDownload:RequeueIntervalMinutes` | 週期性重掃待下載內容的間隔（預設 15 分鐘，0 表示只在啟動時掃一次，上限 24 天）。撿回其他主機或回填服務補出的 Pending、仍可重試的 Failed，以及**租約已逾期**的 Downloading。重複入列由認領檢查擋掉，不會重複下載 |
+| `ContentDownload:ClaimLeaseMinutes` | 下載認領的租約分鐘數（預設 60）。認領時寫入 `MessageContents.ClaimedAt`／`ClaimedBy`，只有租約為空或已逾期的 Downloading 才會被回收改回 Pending——別台主機正在下載中的不會被誤收，卡住的下載也不必等重啟。**啟動掃描**額外回收掛在本機名下的認領（那一定是上次行程留下的孤兒），所以崩潰重啟不必等滿租約。完成／失敗時也會確認「認領仍屬於自己」才寫結果，租約被別台接手後本機的寫入結果會被放棄並記 Warning |
+| `ContentDownload:MaxPendingIdsPerScan` | 單輪掃描最多撈多少待處理內容（預設 5000，Id 小的先處理），其餘留給下一輪。沒有上限時大量積壓會整包進記憶體，SQL Server 端還會撞上 2100 個查詢參數的硬限制 |
+| `Database:SqliteBusyTimeoutMs` | SQLite 寫鎖被別的行程佔用時最多等這麼久（預設 30000 毫秒）。WAL 只讓讀寫不互相阻塞，寫／寫仍是全庫互斥 |
 | `ProfileCache:RefreshAfter` | 群組/成員名稱快取的過期時間（預設 7 天） |
 | `ProfileCache:FailureRetryAfter` | LINE profile API 失敗後的程序內冷卻時間（預設 10 分鐘），避免暫時性故障被每則訊息放大成持續性的無效呼叫 |
 | `Encryption:Enabled` / `Key` / `SearchWindowDays` | 應用層欄位加密開關與金鑰，見 [docs/ENCRYPTION.md](docs/ENCRYPTION.md)。所有直連資料庫的主機 `Key` 必須完全一致 |
@@ -335,7 +338,10 @@ Migrations 放在 `MessageService.Data`，**每個 provider 一套獨立的 migr
   ```
 
 多實例（同機多站台，或未來多 worker）同時啟動時，`Database.Migrate()` 前會取一個具名
-mutex，避免兩邊同時建 `__EFMigrationsHistory` 互相打架。
+mutex，避免兩邊同時建 `__EFMigrationsHistory` 互相打架。**這把鎖只跨行程、不跨機器**：
+多台主機直連同一顆資料庫時（三台拓撲），請只讓 Core 開 `Database:AutoMigrate`、Viewer 設
+`false`。同機兩站台若集區身分不同而拿不到鎖，該站台會跳過 migration 並記 Warning，
+不做無鎖硬跑——詳見 [docs/DEPLOYMENT-GUIDE.md](docs/DEPLOYMENT-GUIDE.md)。
 
 > 改了 `MessageDbContext` 的模型之後，要對**兩個 provider 都**跑
 > `dotnet ef migrations add <Name> --context SqliteMessageDbContext` 與
@@ -366,7 +372,9 @@ mutex，避免兩邊同時建 `__EFMigrationsHistory` 互相打架。
 
 NLog 輸出到 Console 與**執行檔目錄下的 `logs/messageservice-{日期}.log`**（每日一檔，保留 30 天）。`Microsoft.*` 的雜訊只留 Warning 以上。日誌路徑用 NLog 的 `${basedir}` 變數錨定在執行檔目錄，不是行程當下的工作目錄——用 IIS/Windows 服務等非互動方式啟動時，工作目錄未必等於執行檔所在目錄，寫死相對路徑會讓 log 檔案憑空跑到別的地方（甚至因為沒有寫入權限而整個 NLog 靜默失敗）。
 
-- **收錄端**：收到並存檔的每則訊息（型別/群組/是否排入下載）、內容下載完成（大小/MIME）、下載重試與最終失敗、影片/語音轉檔失敗、啟動接續補跑數量、保留期清除筆數與下次排程時間、簽章驗證拒絕
+- **收錄端**：收到並存檔的每則訊息（型別/群組/是否排入下載）、內容下載完成（大小/MIME）、下載重試與最終失敗、影片/語音轉檔失敗、重掃補跑與租約逾期回收的數量、保留期清除筆數與下次排程時間、貼圖內容回填筆數、簽章驗證拒絕
+  - 保留期清除若印出 `Deleted N orphaned MessageContentBlob(s)` 的 Warning，代表有 blob 子列
+    失去父列——正常情況（兩層 FK cascade 有作用）這裡永遠是 0，出現非 0 要查 cascade 是否失效
 - **檢視端**：IP 白名單放行/拒絕的來源
 
 ## 測試

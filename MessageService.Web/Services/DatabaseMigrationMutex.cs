@@ -7,14 +7,18 @@ namespace MessageService.Services;
 ///
 /// Global\ 命名空間的核心物件預設 DACL 只授權建立者——同一台機器上兩個不同應用程式集區身分
 /// （例如 Core／Viewer 各自一個站台）的行程，第二個啟動的那個連 new Mutex(...) 都會被
-/// UnauthorizedAccessException 拒絕。這種情況下拿不到跨行程鎖不該擋住啟動：單站台部署根本
-/// 沒有競爭對手，多站台情境退化成不加鎖執行，Migrate() 本身的冪等性仍能自然收斂，只是失去
-/// 排隊保護（風險由呼叫端透過 onLockUnavailable 決定要不要記警告）。</summary>
+/// UnauthorizedAccessException 拒絕。
+///
+/// 拿不到跨行程鎖時要不要照跑，由呼叫端用 <paramref name="runWithoutLock"/> 決定：
+/// 探測（只要確認連得上）照跑無妨；真正的 schema migration 則寧可跳過也不要無鎖硬跑——
+/// 無鎖硬跑等於兩個站台同時對同一顆資料庫下 DDL，正是這把鎖要防的事。回傳值代表
+/// action 是否真的執行過，讓呼叫端可以據此記錄。</summary>
 public static class DatabaseMigrationMutex
 {
     private const string MutexName = @"Global\MessageService.Migrate";
 
-    public static void RunExclusive(Action action, Action? onLockUnavailable = null)
+    /// <returns>action 是否有被執行（拿不到鎖且 runWithoutLock=false 時為 false）。</returns>
+    public static bool RunExclusive(Action action, Action? onLockUnavailable = null, bool runWithoutLock = true)
     {
         Mutex? mutex = null;
         try
@@ -34,11 +38,17 @@ public static class DatabaseMigrationMutex
         {
             mutex = null;
             onLockUnavailable?.Invoke();
+
+            if (!runWithoutLock)
+            {
+                return false;
+            }
         }
 
         try
         {
             action();
+            return true;
         }
         finally
         {

@@ -8,11 +8,12 @@ public interface IContentWorkSource
 {
     /// <summary>撈出待處理的內容 Id：Pending，加上仍可重試的 Failed（一併重設為 Pending——
     /// 常見成因是設定錯誤而非內容本身有問題，修好設定重啟後應該自動補跑）。
-    /// <paramref name="reclaimDownloading"/> 為 true 時連 Downloading 也一併改回 Pending 撿回——
-    /// 這代表呼叫端保證「此刻沒有自己的 worker 在跑」，只有啟動接續成立；週期重掃時 worker
-    /// 可能正在下載大檔，必須傳 false，否則會把正在下載的列打回 Pending，讓另一個 worker
-    /// 再度認領、兩邊同時寫同一顆 blob（CompleteAsync 的認領互斥就是為了擋這個）。</summary>
-    Task<IReadOnlyList<long>> GetPendingIdsAsync(bool reclaimDownloading, CancellationToken cancellationToken);
+    /// <paramref name="reclaimDownloading"/> 為 true 時，會一併回收逾期（或 ClaimedAt 為 null）
+    /// 的 Downloading 內容；若 <paramref name="isStartup"/> 為 true，則額外包含本機掛名（ClaimedBy 為本機）
+    /// 但未逾期的 Downloading 內容（模擬崩潰重啟回收）；並將回收內容改回 Pending 重新撿回。
+    /// 租約未逾期且非本機（或週期重掃時的本機未逾期）Downloading 則不予變動。</summary>
+    /// 各實作另外提供 isStartup 預設為 false 的兩參數多載給測試呼叫，介面本身只留這一個方法。
+    Task<IReadOnlyList<long>> GetPendingIdsAsync(bool reclaimDownloading, bool isStartup, CancellationToken cancellationToken);
 
     /// <summary>取單筆詳情。回傳 null 代表這筆已經不是 Pending 了（已被處理過或不存在）——
     /// 跟現行 ContentDownloadService.ProcessAsync 的狀態檢查是同一個判斷，只是搬進這裡。</summary>

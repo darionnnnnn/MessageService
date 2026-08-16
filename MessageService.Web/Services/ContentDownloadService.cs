@@ -1,4 +1,4 @@
-﻿using System.Collections.Concurrent;
+using System.Collections.Concurrent;
 using MessageService.Options;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
@@ -30,8 +30,8 @@ public class ContentDownloadService(
         // 漏掉的 Pending 會在下次服務重啟或週期重掃時再被撈回
         try
         {
-            // 啟動時還沒有任何 worker 在跑，Downloading 一律是上次行程留下的孤兒，連它一起撿回
-            await RequeuePendingAsync(reclaimDownloading: true, stoppingToken);
+            // 啟動時回收逾期租約（以及本機留下的孤兒認領）的 Downloading 與待處理項目並重新入列
+            await RequeuePendingAsync(reclaimDownloading: true, isStartup: true, stoppingToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -98,14 +98,14 @@ public class ContentDownloadService(
         }
     }
 
-    /// <summary>把工作來源裡待處理的內容重新入列。<paramref name="reclaimDownloading"/> 的語意見
-    /// IContentWorkSource.GetPendingIdsAsync：只有啟動接續可以傳 true。</summary>
-    public async Task RequeuePendingAsync(bool reclaimDownloading, CancellationToken cancellationToken)
+    /// <summary>把工作來源裡待處理的內容重新入列。<paramref name="reclaimDownloading"/> 與 <paramref name="isStartup"/>
+    /// 的語意見 IContentWorkSource.GetPendingIdsAsync：是否回收逾期（或 ClaimedAt 為 null）的認領、是否回收本機未逾期認領。</summary>
+    public async Task RequeuePendingAsync(bool reclaimDownloading, bool isStartup, CancellationToken cancellationToken)
     {
         using var scope = scopeFactory.CreateScope();
         var workSource = scope.ServiceProvider.GetRequiredService<IContentWorkSource>();
 
-        var pendingIds = await workSource.GetPendingIdsAsync(reclaimDownloading, cancellationToken);
+        var pendingIds = await workSource.GetPendingIdsAsync(reclaimDownloading, isStartup, cancellationToken);
         foreach (var contentId in pendingIds)
         {
             queue.Enqueue(contentId);
@@ -117,12 +117,14 @@ public class ContentDownloadService(
         }
     }
 
-    /// <summary>週期性重掃資料來源中的 Pending／可重試 Failed 並重新入列（不碰 Downloading，
-    /// 見 IContentWorkSource.GetPendingIdsAsync 的說明）。
+    public Task RequeuePendingAsync(bool reclaimDownloading, CancellationToken cancellationToken) =>
+        RequeuePendingAsync(reclaimDownloading, isStartup: false, cancellationToken);
+
+    /// <summary>週期性重掃資料來源中的 Pending／可重試 Failed 以及逾期租約的 Downloading 並重新入列。
     /// 重複入列是安全的：DbContentWorkSource.CompleteAsync 等下游有認領檢查（認領到 0 筆就跳過），
     /// 重複丟同一筆不會重複下載。
     /// 這條迴圈是「本機不下載、由另一台主機下載」的拆機部署下（例如 Core 補出資料但由 Edge 下載，
-    /// 或貼圖回填服務補出的項目），對方補出來的資料唯一的回收路徑。</summary>
+    /// 或貼圖回填服務補出的項目），對方補出來的資料唯一的回收路徑，也能自動回收逾期卡住的下載。</summary>
     public async Task RunPeriodicRequeueAsync(TimeSpan interval, CancellationToken cancellationToken)
     {
         if (interval <= TimeSpan.Zero)
@@ -143,8 +145,8 @@ public class ContentDownloadService(
 
             try
             {
-                // worker 正在跑，Downloading 是真的在下載中，絕不能撿——只撈 Pending 與可重試的 Failed
-                await RequeuePendingAsync(reclaimDownloading: false, cancellationToken);
+                // 週期重掃同樣回收逾期的認領（reclaimDownloading: true, isStartup: false），本機與他機租約未逾期的 Downloading 仍受保護不被碰觸
+                await RequeuePendingAsync(reclaimDownloading: true, isStartup: false, cancellationToken);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {

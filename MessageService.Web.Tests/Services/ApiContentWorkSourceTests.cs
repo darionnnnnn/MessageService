@@ -1,4 +1,4 @@
-﻿using System.Net;
+using System.Net;
 using System.Net.Http.Json;
 using MessageService.Services;
 using MessageService.Tests.TestSupport;
@@ -30,8 +30,21 @@ public class ApiContentWorkSourceTests
         var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, CancellationToken.None);
 
         Assert.Equal([3, 7], ids);
-        Assert.Equal("https://db-host.example/api/ingest/content-work?reclaimDownloading=true", handler.LastRequest!.RequestUri!.ToString());
+        Assert.Equal("https://db-host.example/api/ingest/content-work?reclaimDownloading=true&isStartup=false", handler.LastRequest!.RequestUri!.ToString());
         Assert.Equal("ingest", Assert.Single(factory.RequestedClientNames)); // 小型 JSON 走短 timeout 的 client
+    }
+
+    [Fact]
+    public async Task GetPendingIdsAsync_StartupRequeue_SendsIsStartupTrue()
+    {
+        var (source, handler, _) = Create(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = JsonContent.Create(Array.Empty<long>())
+        });
+
+        await source.GetPendingIdsAsync(reclaimDownloading: true, isStartup: true, CancellationToken.None);
+
+        Assert.Equal("https://db-host.example/api/ingest/content-work?reclaimDownloading=true&isStartup=true", handler.LastRequest!.RequestUri!.ToString());
     }
 
     [Fact]
@@ -45,7 +58,7 @@ public class ApiContentWorkSourceTests
 
         await source.GetPendingIdsAsync(reclaimDownloading: false, CancellationToken.None);
 
-        Assert.EndsWith("content-work?reclaimDownloading=false", handler.LastRequest!.RequestUri!.ToString());
+        Assert.EndsWith("content-work?reclaimDownloading=false&isStartup=false", handler.LastRequest!.RequestUri!.ToString());
     }
 
     [Fact]

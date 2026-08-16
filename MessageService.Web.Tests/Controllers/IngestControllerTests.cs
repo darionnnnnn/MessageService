@@ -1,4 +1,4 @@
-﻿using MessageService.Controllers;
+using MessageService.Controllers;
 using MessageService.Options;
 using MessageService.Services;
 using MessageService.Tests.TestSupport;
@@ -221,9 +221,21 @@ public class IngestControllerTests
         var source = new FakeContentWorkSource();
         var controller = CreateController(contentWorkSource: source);
 
-        await controller.GetContentWork(reclaimDownloading: false, CancellationToken.None);
+        await controller.GetContentWork(reclaimDownloading: false, cancellationToken: CancellationToken.None);
 
         Assert.Equal([false], source.ReclaimDownloadingCalls);
+    }
+
+    [Fact]
+    public async Task GetContentWork_PassesIsStartupFlagThrough()
+    {
+        var source = new FakeContentWorkSource();
+        var controller = CreateController(contentWorkSource: source);
+
+        await controller.GetContentWork(reclaimDownloading: true, isStartup: true, cancellationToken: CancellationToken.None);
+
+        Assert.Equal([true], source.ReclaimDownloadingCalls);
+        Assert.Equal([true], source.IsStartupCalls);
     }
 
     [Fact]

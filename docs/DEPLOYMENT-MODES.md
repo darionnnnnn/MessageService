@@ -19,6 +19,7 @@
 | 直連主資料庫 | ✓ | ✗ | ✓ | ✓ |
 | 本機 outbox＋排空 | ✓ | ✓ | ✗（無 webhook，無事件可寫） | ✗ |
 | 保留期清除 | ✓ | ✗ | ✓ | ✗（即使直連資料庫也不跑，避免三台拓撲下跟 Core 搶著清同一張表） |
+| 貼圖內容回填 | ✓ | ✗ | ✓ | ✗（同上：維護類背景工作只由一台負責。兩台同跑會撞唯一鍵，程式雖已改成跳過該批續跑，但那是白工） |
 | `Line:OutboundHere` 預設 | `true` | `true` | `false` | `false` |
 | 落地方式 | outbox → `DirectIngestSink` | outbox → `HttpIngestSink` → 對方的 `/api/ingest/events(-batch)` | `IngestController` → `DirectIngestSink` | 不適用 |
 
@@ -66,7 +67,10 @@
 | 檢視端的 `AllowedClientIps`（保護檢視端頁面／API） | `Viewer:AllowedClientIps` | 同上，不相容 |
 | （無） | `Viewer:Enabled`（`bool?`） | 新增，三台拓撲用；未設定時依模式推導預設值 |
 | （無） | `Http:UseHttpsRedirection`（`bool`，預設 `false`） | 新增，IIS 直接綁 HTTPS 的部署不需要應用層再轉址一次 |
-| （無） | `Database:AutoMigrate`（`bool`，預設 `true`） | 新增，啟動時自動跑 `Database.Migrate()`；嚴管環境可關閉改手動 `dotnet ef database update` |
+| （無） | `Database:AutoMigrate`（`bool`，預設 `true`） | 新增，啟動時自動跑 `Database.Migrate()`；嚴管環境可關閉改手動 `dotnet ef database update`。**三台拓撲請只在 Core 開、Viewer 設 `false`**，migration 鎖只跨行程不跨機器 |
+| （無） | `Database:SqliteBusyTimeoutMs`（`int`，預設 `30000`） | 新增，SQLite 寫鎖被別的行程佔用時最多等這麼久。WAL 只讓讀寫不互相阻塞，寫／寫仍是全庫互斥 |
+| （無） | `ContentDownload:ClaimLeaseMinutes`（`int`，預設 `60`） | 新增，內容下載的認領租約；逾期才會被別台回收重跑 |
+| （無） | `ContentDownload:MaxPendingIdsPerScan`（`int`，預設 `5000`） | 新增，單輪掃描的待處理內容上限 |
 
 ## 架構：outbox 是唯一的落地路徑
 
@@ -160,9 +164,21 @@ Core 則沒有問題（參數預設值就是舊行為）。
 - **待下載內容的回收最多延遲一個重掃週期**：`ContentDownloadService` 除了啟動時掃一次，
   之後每隔 `ContentDownload:RequeueIntervalMinutes`（預設 15 分鐘）重掃一次 `Pending` 與
   仍可重試的 `Failed`。Core 端補出但由 Edge 端下載的 `Pending` 項目最壞要等一個週期才會被撿回。
-  週期重掃**不碰 `Downloading`**（那時 worker 活著，`Downloading` 是真的在下載中；行程活著時
-  下載失敗會自己改回 `Pending`），所以「行程被殺、狀態停在 `Downloading`」的孤兒仍只在
-  下一次啟動時撿回。把間隔設為 0 會退回「只在啟動時掃一次」。
+  `Downloading` 走**認領租約**：認領時寫入 `ClaimedAt`，只有 `ClaimedAt` 為空或早於
+  `ContentDownload:ClaimLeaseMinutes`（預設 60 分鐘）的才會被回收改回 `Pending`，啟動掃描與
+  週期重掃套用同一條規則。所以「行程被殺、狀態停在 `Downloading`」的孤兒不必等重啟，
+  租約逾期後的下一次重掃就會撿回；而別台主機正在下載中的內容也不會被誤收
+  （這正是舊版「啟動時無條件把所有 `Downloading` 打回 `Pending`」在多主機下的 bug）。
+  把間隔設為 0 會退回「只在啟動時掃一次」。
+- **單輪掃描有上限**：`ContentDownload:MaxPendingIdsPerScan`（預設 5000）限制一輪最多撈多少
+  待處理內容，Id 小的先處理，其餘留給下一輪（被截斷時會記一筆 log）。沒有上限時，
+  積壓幾十萬筆會整包載入記憶體，而且 SQL Server 端會撞到 2100 個查詢參數的硬上限——
+  積壓越嚴重越跑不動。
+- **同一個角色不支援部署兩台**（例如為了 HA 開兩台 Core）：維護類背景工作靠「每個角色恰好
+  一台」這個部署約定互斥，沒有資料庫層的租約。兩台 Core 會在同一個
+  `Retention:CleanupTimeOfDay` 同時跑保留期清除；批次刪除本身冪等，但清完之後刷新
+  `Groups.LastMessageId/At` 是「查 MAX → UPDATE」兩步，兩台交錯會把指標寫成互相覆蓋的舊值。
+  要橫向擴充只該擴 Viewer（純讀）。
 - **outbox 批次排空的吞吐量提升沒有正式量測**：Edge→Core 的 round-trip 從逐筆改成整批，
   理論上吞吐量會明顯提升，但目前只有功能面的等價性測試，沒有實際負載下的量測數據。
 - **遮蔽規則快取在拆機部署下有最長 30 秒的漂移窗口**：`MaskingService` 把遮蔽設定與規則

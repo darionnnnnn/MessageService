@@ -1,4 +1,4 @@
-﻿using MessageService.Services;
+using MessageService.Services;
 
 namespace MessageService.Tests.TestSupport;
 
@@ -13,17 +13,22 @@ public class FakeContentWorkSource : IContentWorkSource
     public Func<CancellationToken, Task<IReadOnlyList<long>>>? OnGetPendingIds { get; set; }
 
     public List<bool> ReclaimDownloadingCalls { get; } = [];
+    public List<bool> IsStartupCalls { get; } = [];
 
-    public Task<IReadOnlyList<long>> GetPendingIdsAsync(bool reclaimDownloading, CancellationToken cancellationToken)
+    public Task<IReadOnlyList<long>> GetPendingIdsAsync(bool reclaimDownloading, bool isStartup, CancellationToken cancellationToken)
     {
         GetPendingIdsCallCount++;
         ReclaimDownloadingCalls.Add(reclaimDownloading);
+        IsStartupCalls.Add(isStartup);
         if (OnGetPendingIds is not null)
         {
             return OnGetPendingIds(cancellationToken);
         }
         return Task.FromResult<IReadOnlyList<long>>(PendingIds);
     }
+
+    public Task<IReadOnlyList<long>> GetPendingIdsAsync(bool reclaimDownloading, CancellationToken cancellationToken) =>
+        GetPendingIdsAsync(reclaimDownloading, isStartup: false, cancellationToken);
 
     public Task<ContentWorkItem?> GetAsync(long contentId, CancellationToken cancellationToken) =>
         Task.FromResult(Items.GetValueOrDefault(contentId));

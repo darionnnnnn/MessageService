@@ -117,6 +117,10 @@ public class RetentionCleanupService(
             await RefreshStaleGroupPointersAsync(dbContext, cutoff, cancellationToken);
         }
 
+        // 孤兒不會因為分批而累積，整輪結束前清一次即可（避免每批都對 MessageContentBlobs
+        // 做全表反連結掃描）；即使本輪一筆訊息都沒刪也會跑，用來收清除期間之外既有的歷史孤兒
+        await DeleteOrphanBlobsAsync(dbContext, cancellationToken);
+
         logger.LogInformation(
             "Retention cleanup removed {Count} group messages older than {Cutoff:yyyy-MM-dd} (retention: {RetentionDays} days)",
             totalDeleted, cutoff, retentionDays);
@@ -137,6 +141,33 @@ public class RetentionCleanupService(
                     "保留期清除已刪除 {Count} 筆訊息，但 SQLite 不會自動回收磁碟空間，若需釋放空間請人工執行 VACUUM。",
                     totalDeleted);
             }
+        }
+    }
+
+    /// <summary>刪除沒有對應 <see cref="MessageContent"/> 列的孤兒 <see cref="MessageContentBlob"/>。
+    /// 正常情況下 GroupMessages → MessageContents → MessageContentBlobs 的兩層 FK cascade
+    /// 應當一起清掉，這裡的刪除數理論上應為 0；若大於 0 表示 cascade 可能未正確作用或行程
+    /// 中途被砍導致寫入不完整，記 LogWarning 讓維運人員察覺。</summary>
+    private async Task DeleteOrphanBlobsAsync(MessageDbContext dbContext, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var deleted = await dbContext.MessageContentBlobs
+                .Where(b => !dbContext.MessageContents.Any(c => c.Id == b.MessageContentId))
+                .ExecuteDeleteAsync(cancellationToken);
+
+            if (deleted > 0)
+            {
+                logger.LogWarning(
+                    "Deleted {Count} orphaned MessageContentBlob(s) with no parent MessageContent row; " +
+                    "cascade should have removed these — investigate whether DB-level cascade is working correctly",
+                    deleted);
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // 孤兒回收是補強措施，失敗不可連累保留期清除主流程
+            logger.LogError(ex, "Orphaned blob cleanup failed; retention cleanup will continue");
         }
     }
 

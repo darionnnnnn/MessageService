@@ -10,10 +10,11 @@ namespace MessageService.Outbox;
 /// 欄位表附註）。必須在 EnsureCreated() 之後呼叫，確保 Entries 資料表本身已經存在。</summary>
 public static class OutboxSchemaUpgrader
 {
-    public static void EnsureDeadLetterColumn(string connectionString)
+    public static void EnsureDeadLetterColumn(string connectionString, int busyTimeoutMs = 30000)
     {
         using var connection = new SqliteConnection(connectionString);
         connection.Open();
+        SetBusyTimeout(connection, busyTimeoutMs);
 
         using (var check = connection.CreateCommand())
         {
@@ -40,12 +41,13 @@ public static class OutboxSchemaUpgrader
     }
 
     /// <summary>outbox.db 是 webhook 執行緒寫、forwarder 執行緒讀刪，預設 rollback journal
-    /// 模式下兩邊會互相 block（busy_timeout 預設 30 秒，遠超 LINE 的 webhook 逾時）。
+    /// 模式下兩邊會互相 block。連線開啟時由 Database:SqliteBusyTimeoutMs 明確設定 busy_timeout（預設 30 秒），
     /// WAL 是資料庫檔案的持久屬性，設一次即可，之後每次開啟連線都會沿用。</summary>
-    public static void EnableWalMode(string connectionString)
+    public static void EnableWalMode(string connectionString, int busyTimeoutMs = 30000)
     {
         using var connection = new SqliteConnection(connectionString);
         connection.Open();
+        SetBusyTimeout(connection, busyTimeoutMs);
 
         using var pragma = connection.CreateCommand();
         pragma.CommandText = "PRAGMA journal_mode=WAL;";
@@ -58,10 +60,11 @@ public static class OutboxSchemaUpgrader
     /// 批次A）。升級路徑必須先清掉重複列才能建索引，否則 CREATE UNIQUE INDEX 在既有重複資料上
     /// 會直接失敗，讓已經卡死的現場升級後更起不來。保留每組重複列裡 Id 最小的一筆，跟
     /// OutboxForwarderService 用 OrderBy(Id) 挑批次的既有語意一致（先寫入的先處理）。</summary>
-    public static void EnsureWebhookEventIdUniqueIndex(string connectionString)
+    public static void EnsureWebhookEventIdUniqueIndex(string connectionString, int busyTimeoutMs = 30000)
     {
         using var connection = new SqliteConnection(connectionString);
         connection.Open();
+        SetBusyTimeout(connection, busyTimeoutMs);
 
         using (var dedupe = connection.CreateCommand())
         {
@@ -74,5 +77,12 @@ public static class OutboxSchemaUpgrader
         createIndex.CommandText =
             "CREATE UNIQUE INDEX IF NOT EXISTS IX_Entries_WebhookEventId ON Entries(WebhookEventId)";
         createIndex.ExecuteNonQuery();
+    }
+
+    private static void SetBusyTimeout(SqliteConnection connection, int busyTimeoutMs)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = $"PRAGMA busy_timeout={busyTimeoutMs};";
+        command.ExecuteNonQuery();
     }
 }

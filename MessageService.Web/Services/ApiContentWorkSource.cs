@@ -1,4 +1,4 @@
-﻿using System.Net;
+using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 
@@ -20,12 +20,15 @@ public class ApiContentWorkSource(IHttpClientFactory httpClientFactory) : IConte
     private HttpClient CreateMetadataClient() => httpClientFactory.CreateClient("ingest");
     private HttpClient CreateContentClient() => httpClientFactory.CreateClient("ingest-content");
 
-    public async Task<IReadOnlyList<long>> GetPendingIdsAsync(bool reclaimDownloading, CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<long>> GetPendingIdsAsync(bool reclaimDownloading, bool isStartup, CancellationToken cancellationToken)
     {
-        var url = $"api/ingest/content-work?reclaimDownloading={(reclaimDownloading ? "true" : "false")}";
+        var url = $"api/ingest/content-work?reclaimDownloading={(reclaimDownloading ? "true" : "false")}&isStartup={(isStartup ? "true" : "false")}";
         var ids = await CreateMetadataClient().GetFromJsonAsync<List<long>>(url, cancellationToken);
         return ids ?? [];
     }
+
+    public Task<IReadOnlyList<long>> GetPendingIdsAsync(bool reclaimDownloading, CancellationToken cancellationToken) =>
+        GetPendingIdsAsync(reclaimDownloading, isStartup: false, cancellationToken);
 
     public async Task<ContentWorkItem?> GetAsync(long contentId, CancellationToken cancellationToken)
     {

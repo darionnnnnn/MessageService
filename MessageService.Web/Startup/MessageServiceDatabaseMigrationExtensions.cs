@@ -34,7 +34,7 @@ public static class MessageServiceDatabaseMigrationExtensions
             // 炸掉。具名 mutex（DatabaseMigrationMutex，跟啟動時的 SQL Server 探測共用同一把鎖）讓它們
             // 排隊而不是打架——Baseliner 必須也包在裡面（它的偵測→補齊不是原子操作，正是最需要排隊
             // 的那段）。單一實例的情況下這裡幾乎瞬間就能拿到鎖，沒有實際延遲。
-            DatabaseMigrationMutex.RunExclusive(
+            var migrated = DatabaseMigrationMutex.RunExclusive(
                 () =>
                 {
                     if (registration.DatabaseStartupDecision.EffectiveProvider == "Sqlite")
@@ -48,7 +48,7 @@ public static class MessageServiceDatabaseMigrationExtensions
 
                         // Core+Viewer 同機兩站台、或 IIS 重疊回收過渡期都可能有兩個行程同時開 messages.db——
                         // 跟 outbox.db 同一個理由（見 EnableWalMode 說明），持久屬性設一次即可
-                        OutboxSchemaUpgrader.EnableWalMode(registration.SqliteConnectionString!);
+                        OutboxSchemaUpgrader.EnableWalMode(registration.SqliteConnectionString!, registration.SqliteBusyTimeoutMs);
                     }
                     else
                     {
@@ -61,8 +61,28 @@ public static class MessageServiceDatabaseMigrationExtensions
                 },
                 onLockUnavailable: () => migrationLogger.LogWarning(
                     "無法取得跨行程 migration 鎖（Global\\MessageService.Migrate，通常是同機另一個應用程式" +
-                    "集區身分已建立過這個具名物件）——改為不加鎖執行 migration。單站台部署不受影響；" +
-                    "同機多站台情境請確認集區身分一致，或錯開兩者的啟動時間降低競爭視窗。"));
+                    "集區身分已建立過這個具名物件）——本次啟動跳過 migration，不做無鎖硬跑。"),
+                // 無鎖硬跑等於兩個站台同時對同一顆資料庫下 DDL（Baseliner 的偵測→補齊、
+                // Migrate() 建 __EFMigrationsHistory、資料搬遷都不是原子的），正是這把鎖要防的事；
+                // 寧可跳過，讓拿得到鎖的那個站台負責升級 schema。
+                runWithoutLock: false);
+
+            if (!migrated)
+            {
+                var pendingMigrations = dbContext.Database.GetPendingMigrations().ToList();
+                if (pendingMigrations.Count > 0)
+                {
+                    throw new InvalidOperationException(
+                        $"本次啟動拿不到 migration 鎖而跳過，但資料庫 schema 落後 {pendingMigrations.Count} 個 migration，" +
+                        "帶著舊 schema 提供服務只會產生一連串缺欄位錯誤；" +
+                        "請確認同機各站台的應用程式集區身分一致，或改由外部 dotnet ef database update 升級 schema。");
+                }
+
+                migrationLogger.LogWarning(
+                    "本次啟動未執行 schema migration。若這是唯一會 migrate 的站台，請確認同機各站台的" +
+                    "應用程式集區身分一致，或改由外部 dotnet ef database update 升級 schema；" +
+                    "三台拓撲建議只讓 Core 開 Database:AutoMigrate，Viewer 設為 false。");
+            }
         }
 
         if (capabilities.ReceivesWebhook)
@@ -75,15 +95,15 @@ public static class MessageServiceDatabaseMigrationExtensions
             // DeadLetteredAt 欄位要在這裡另外處理，見 OutboxSchemaUpgrader 的說明。
             // OutboxConnectionString 在這裡必然已解析好：這個區塊跟 AddMessageServiceCore 賦值時的
             // capabilities.ReceivesWebhook 條件完全一致
-            OutboxSchemaUpgrader.EnsureDeadLetterColumn(registration.OutboxConnectionString!);
+            OutboxSchemaUpgrader.EnsureDeadLetterColumn(registration.OutboxConnectionString!, registration.SqliteBusyTimeoutMs);
 
             // 既有 outbox.db 可能已經因為 LINE redelivery 累積了重複 WebhookEventId（P0）——
             // 必須先去重才能補建唯一索引，見 EnsureWebhookEventIdUniqueIndex 說明
-            OutboxSchemaUpgrader.EnsureWebhookEventIdUniqueIndex(registration.OutboxConnectionString!);
+            OutboxSchemaUpgrader.EnsureWebhookEventIdUniqueIndex(registration.OutboxConnectionString!, registration.SqliteBusyTimeoutMs);
 
             // webhook 執行緒寫、forwarder 執行緒讀刪；rollback journal 模式下兩邊會互相 block
-            // （busy_timeout 預設 30 秒，遠超 LINE 的 webhook 逾時），WAL 讓讀寫不互相阻塞
-            OutboxSchemaUpgrader.EnableWalMode(registration.OutboxConnectionString!);
+            // （由 Database:SqliteBusyTimeoutMs 明確設定 busy_timeout，預設 30 秒），WAL 讓讀寫不互相阻塞
+            OutboxSchemaUpgrader.EnableWalMode(registration.OutboxConnectionString!, registration.SqliteBusyTimeoutMs);
 
             // 死信不會自動消失，只會在 OutboxForwarderService 的 log 被看到（啟動時先報一次、
             // 之後每小時再報一次）——沒有專用的重送介面，量大時要靠那行 log 提醒維運人員去查

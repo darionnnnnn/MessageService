@@ -148,8 +148,14 @@ dotnet ef database update --project MessageService.Data --context SqlServerMessa
 > `SqlServerMessageDbContext`）各自跑一次 `dotnet ef migrations add`——這是給熟悉 EF 的維護者
 > 看的，一般部署不需要碰這個。若不想在正式主機上安裝 SDK 執行 `dotnet ef`，可以把
 > `Database:AutoMigrate` 留預設值 `true`，讓應用程式啟動時自己跑 migrations（SQLite／SQL Server
-> 都適用；多實例同時啟動時有具名 mutex 防止互撞，見 D4 的 IIS 常駐設定——同機多站台的
-> 情況下拿不到跨行程鎖會自動降級為不加鎖執行，單站台部署不受影響）。
+> 都適用；多實例同時啟動時有具名 mutex 防止互撞，見 D4 的 IIS 常駐設定）。
+
+> **多台直連同一顆資料庫時**（三台拓撲的 Core 與 Viewer、或同機兩站台）：兩台都會在啟動時
+> 跑 migration，而那把具名 mutex **只跨行程、不跨機器**。請只讓 **Core 開
+> `Database:AutoMigrate`，Viewer 設成 `false`**，由 Core 單獨負責升級 schema。
+> 同機兩站台若應用程式集區身分不同，第二個站台連建立那把鎖都會被拒絕；這種情況下它會
+> **跳過 migration 並記一筆 Warning**（不做無鎖硬跑），schema 交給拿得到鎖的那一台升級。
+> log 出現「本次啟動未執行 schema migration」就是這個情形。
 
 ### 既有 SQL Server 環境升級注意事項
 
@@ -174,23 +180,50 @@ dotnet ef database update --project MessageService.Data --context SqlServerMessa
 4. **先備份**：完整備份（見下方 Part I）加上升級前的還原點，確認備份確實可還原再開始
 5. 跑 `dotnet ef database update`（見上方指令），確認新版 log 沒有錯誤後才恢復對外服務
 
-SQLite 環境不受影響——既有檔案由 `LegacySqliteBaseliner` 一次性橋接到 baseline，
-之後跟全新 SQLite migrations 走同一條路，沒有 `ALTER COLUMN` 鎖表的問題。
+`ALTER COLUMN` 鎖表這件事 SQLite 環境不受影響——既有檔案由 `LegacySqliteBaseliner` 一次性
+橋接到 baseline，之後跟全新 SQLite migrations 走同一條路。**但下一節的 `SplitBlobTables`
+兩種資料庫都適用，SQLite 環境務必看。**
 
-#### `SplitBlobTables` 這一次的額外注意事項
+### 升級到 `SplitBlobTables`：兩種資料庫都適用
+
+**這一節 SQLite 環境也必須看**——而且 SQLite 反而是風險比較高的那一種，因為它預設是站台一
+啟動就自動跑 migration，沒有人工步驟可以把關。
 
 這個 migration 把三個 blob 欄位（`MessageContents.Content`、`Groups.PictureContent`、
 `GroupMembers.PictureContent`）搬到 `MessageContentBlobs`／`GroupPictures`／`GroupMemberPictures`
-三張新表，做法是「建表 → `INSERT … SELECT` 整批複製 → 刪掉舊欄位」，包在單一交易裡。
-所以除了上面五個步驟以外還要留意：
+三張新表，做法是「建表 → `INSERT … SELECT` 整批複製 → 刪掉舊欄位」。資料量大的環境**這是
+一個很長的操作**。
 
-- **資料庫在升級當下需要約兩倍的 blob 空間**（舊欄位刪除前，同一份內容在新舊兩處各存一份），
-  交易紀錄檔的用量也對應放大。空間估算在升級**前**要查舊欄位：
-  `SELECT SUM(DATALENGTH(Content)) FROM MessageContents`（頭貼兩張表通常小到可以忽略）。
+共通注意事項：
+
+- **升級當下需要約兩倍的 blob 空間**（舊欄位刪除前，同一份內容在新舊兩處各存一份），
+  交易紀錄檔的用量也對應放大。空間估算在升級**前**查舊欄位：
+  `SELECT SUM(DATALENGTH(Content)) FROM MessageContents`（頭貼兩張表通常小到可以忽略；
+  SQLite 用 `SELECT SUM(LENGTH(Content)) FROM MessageContents`）。
 - **升級完成後空間不會自己回收**：刪掉的舊欄位留下的是可重用的空頁。要真的把檔案縮小，
   SQL Server 端在確認服務正常後另外安排 `DBCC SHRINKFILE`（會造成索引碎片，記得之後重建），
   SQLite 端跑一次 `VACUUM`。兩者都建議排在維護時段而不是升級當下。
+- 搬遷 SQL 三段都寫成 `NOT EXISTS`，中斷後重跑不會撞主鍵。
 - 全新部署不受影響：新表從一開始就是空的，migration 的搬遷步驟不搬任何列。
+
+#### SQLite 環境的升級步驟（照做，不要只是換 build 就重啟）
+
+站台啟動時是**同步**跑 `Database.Migrate()` 才開始接請求的。IIS 的 ANCM 預設只給 120 秒，
+超過就判定啟動失敗、回收行程，下一個請求又從頭再跑一次 migration——結果是站台永久 500.3x
+的無限迴圈。本專案的 `web.config` 已經把 `startupTimeLimit` 拉到 3600 秒，但幾十 GB 的資料庫
+仍然應該離線升級：
+
+1. **停掉站台**（IIS 管理員停止站台與應用程式集區）。
+2. **備份 `messages.db`**，並確認磁碟可用空間 ≥ 目前檔案大小（升級中途需要約兩倍）。
+3. **離線跑 migration**（在有 SDK 的機器上，連線字串指到那顆檔案）：
+   ```bash
+   dotnet ef database update --project MessageService.Data --context SqliteMessageDbContext --startup-project MessageService.Web
+   ```
+4. 部署新版 build 並啟動站台——此時自動 migration 只是一次冪等的空操作。
+5. 確認服務正常後，另外安排一次 `VACUUM` 回收空間。
+
+**升級期間建議把 `web.config` 的 `stdoutLogEnabled` 暫時改成 `true`**，讓啟動階段（NLog 還沒
+接手之前）的錯誤有地方落地；確認升級成功後再改回 `false`。
 
 ### 既有 SQLite 環境升級到新的預設資料庫路徑
 
@@ -250,7 +283,7 @@ SQLite 檔案（`messages.db`／`outbox.db`）預設就放在站台目錄下的 
 ### D4. 設定應用程式集區常駐執行（重要，容易漏掉）
 
 IIS 應用程式集區預設**閒置 20 分鐘沒有請求就回收**、**固定跑滿 1740 分鐘就強制回收**——
-這台主機上跑的背景服務（保留期清除、outbox 排空、媒體下載、頭貼刷新）都不是靠 HTTP 請求
+這台主機上跑的背景服務（保留期清除、貼圖內容回填、outbox 排空、媒體下載、頭貼刷新）都不是靠 HTTP 請求
 觸發的 `BackgroundService`，行程被回收就整個停掉，且不會有任何錯誤訊息，只是「該做的事
 安靜地沒有發生」。
 
@@ -273,6 +306,11 @@ IIS 應用程式集區預設**閒置 20 分鐘沒有請求就回收**、**固定
 
 啟動後看 `logs/messageservice-{日期}.log` 確認沒有錯誤——SQLite 環境會在這時自動跑
 migrations（含既有舊檔案的一次性橋接，見 [README.md](../README.md) 的 schema 管理段）。
+
+> log 的等級與保留天數由站台目錄下的 `nlog.config` 決定（預設保留 30 天）。程式啟動時會
+> `ClearProviders()` 再掛上 NLog，所以 `appsettings.json` 的 `Logging:LogLevel` 對檔案 log
+> **不生效**，要調等級請改 `nlog.config` 的 rules。行程在 NLog 初始化之前就炸掉時，唯一的
+> 線索是 `logs/nlog-internal.log` 與（若有開啟）`stdoutLogEnabled` 的輸出。
 
 三台拓撲或兩台拆機時，**建議先啟動 Core，再啟動 Edge**——Edge 的 outbox 排空會打
 Core 的 ingest API，Core 沒起來的話 Edge 只是把事件暫存在本機 outbox 等待重試，不會遺失，
@@ -464,6 +502,12 @@ Edge 端的 outbox 排空預設會打 Core 的批次 ingest 端點（`POST /api/
 
 清除完成且真的刪到資料時，log 會記一則 Warning 說明這件事並附上目前的資料庫檔案大小，
 不會讓人以為「清過了空間就會回來」。
+
+> 另一則要注意的 Warning：`Deleted N orphaned MessageContentBlob(s)`。刪訊息之後 blob 子列
+> 是靠 `GroupMessages → MessageContents → MessageContentBlobs` 兩層 FK cascade 一起消失的，
+> 清除流程每批之後會補一句孤兒回收當安全網。**正常情況這裡永遠刪 0 列、不會有 log**；
+> 出現非 0 表示 cascade 沒有作用（例如資料庫是用不建外鍵的工具還原的），要去查，
+> 否則「刪了訊息但空間沒還回來」會一路靜默到硬碟滿。
 
 要實際回收空間只能人工執行 `VACUUM`：
 

@@ -108,6 +108,22 @@ public class OutboxSchemaUpgraderTests : IDisposable
         Assert.Equal("wal", mode, ignoreCase: true);
     }
 
+    [Fact]
+    public void EnableWalMode_WithCustomBusyTimeout_ExecutesSuccessfully()
+    {
+        CreateLegacySchemaWithOneRow();
+
+        var ex = Record.Exception(() => OutboxSchemaUpgrader.EnableWalMode(ConnectionString, 12345));
+
+        Assert.Null(ex);
+        using var connection = new SqliteConnection(ConnectionString);
+        connection.Open();
+        using var query = connection.CreateCommand();
+        query.CommandText = "PRAGMA journal_mode;";
+        var mode = (string)query.ExecuteScalar()!;
+        Assert.Equal("wal", mode, ignoreCase: true);
+    }
+
     /// <summary>模擬已經因為 LINE redelivery 而累積重複 WebhookEventId 的舊 outbox.db——
     /// P0 的根因：升級路徑必須先去重才能補建唯一索引，見 EnsureWebhookEventIdUniqueIndex 說明。</summary>
     private void CreateLegacySchemaWithDuplicateWebhookEventIds()

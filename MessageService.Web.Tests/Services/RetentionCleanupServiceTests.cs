@@ -1,3 +1,4 @@
+using System.Data.Common;
 using MessageService.Data;
 using MessageService.Models;
 using MessageService.Options;
@@ -5,6 +6,7 @@ using MessageService.Services;
 using MessageService.Tests.TestSupport;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using OptionsFactory = Microsoft.Extensions.Options.Options;
@@ -256,5 +258,253 @@ public class RetentionCleanupServiceTests : IDisposable
         var verifyContext = verifyScope.ServiceProvider.GetRequiredService<MessageDbContext>();
         var remaining = Assert.Single(await verifyContext.GroupMessages.ToListAsync());
         Assert.Equal("kept", remaining.WebhookEventId);
+    }
+
+    [Fact]
+    public async Task RunCleanupAsync_OrphanBlobWithNoParentMessageContent_IsRemovedByCleanup()
+    {
+        // 模擬「行程寫 blob 寫到一半被砍掉」或 cascade 失效的情境：
+        // MessageContentBlobs 中存在一列，但沒有對應的 MessageContents 父列
+        using (var scope = _provider.CreateScope())
+        {
+            var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+
+            // 先插入一筆完整的訊息（帶 Content 與 Blob），儲存後再直接刪掉 MessageContent 父列，
+            // 讓 MessageContentBlob 成為孤兒（模擬 cascade 失效或行程中途中斷的情境）
+            var msg = new GroupMessage
+            {
+                WebhookEventId = "orphan-test",
+                LineMessageId = "m-orphan",
+                GroupId = "G1",
+                MessageType = "image",
+                EventTimestamp = DateTimeOffset.UtcNow,
+                ReceivedAt = DateTimeOffset.UtcNow,
+                Content = new MessageContent
+                {
+                    DownloadStatus = DownloadStatus.Completed,
+                    Blob = new MessageContentBlob { Content = [9, 8, 7] },
+                    ContentType = "image/jpeg"
+                }
+            };
+            dbContext.GroupMessages.Add(msg);
+            await dbContext.SaveChangesAsync();
+
+            // 直接刪除 MessageContent，讓 MessageContentBlob 成為孤兒
+            await dbContext.MessageContents
+                .Where(c => c.GroupMessageId == msg.Id)
+                .ExecuteDeleteAsync();
+        }
+
+        await CreateService().RunCleanupAsync(CancellationToken.None);
+
+        using var verifyScope = _provider.CreateScope();
+        var verifyContext = verifyScope.ServiceProvider.GetRequiredService<MessageDbContext>();
+
+        // 孤兒 blob 應已被清除
+        Assert.Empty(await verifyContext.MessageContentBlobs.ToListAsync());
+    }
+
+    [Fact]
+    public async Task RunCleanupAsync_NoCascadeFailure_OrphanCleanupDeletesZeroAndDoesNotAffectRetainedContent()
+    {
+        // cascade 正常運作時：到期訊息刪後其 blob 由 cascade 一起清，孤兒回收不應刪任何 blob，
+        // 且不影響保留期內訊息的 blob
+        await SetRetentionDaysAsync(1095);
+        using (var scope = _provider.CreateScope())
+        {
+            var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+            dbContext.GroupMessages.AddRange(
+                new GroupMessage
+                {
+                    WebhookEventId = "old-blob",
+                    LineMessageId = "m-old",
+                    GroupId = "G1",
+                    MessageType = "image",
+                    EventTimestamp = DateTimeOffset.UtcNow.AddDays(-1096),
+                    ReceivedAt = DateTimeOffset.UtcNow.AddDays(-1096),
+                    Content = new MessageContent
+                    {
+                        DownloadStatus = DownloadStatus.Completed,
+                        Blob = new MessageContentBlob { Content = [1, 2, 3] },
+                        ContentType = "image/jpeg"
+                    }
+                },
+                new GroupMessage
+                {
+                    WebhookEventId = "recent-blob",
+                    LineMessageId = "m-recent",
+                    GroupId = "G1",
+                    MessageType = "image",
+                    EventTimestamp = DateTimeOffset.UtcNow.AddDays(-1),
+                    ReceivedAt = DateTimeOffset.UtcNow.AddDays(-1),
+                    Content = new MessageContent
+                    {
+                        DownloadStatus = DownloadStatus.Completed,
+                        Blob = new MessageContentBlob { Content = [4, 5, 6] },
+                        ContentType = "image/jpeg"
+                    }
+                });
+            await dbContext.SaveChangesAsync();
+        }
+
+        await CreateService().RunCleanupAsync(CancellationToken.None);
+
+        using var verifyScope2 = _provider.CreateScope();
+        var verifyContext2 = verifyScope2.ServiceProvider.GetRequiredService<MessageDbContext>();
+
+        // 舊訊息（含其 blob）應已由 cascade 清除；保留期內訊息的 blob 應仍存在
+        var remainingMessages = await verifyContext2.GroupMessages.ToListAsync();
+        var remainingBlobs = await verifyContext2.MessageContentBlobs.ToListAsync();
+        var remainingContents = await verifyContext2.MessageContents.ToListAsync();
+
+        var remaining = Assert.Single(remainingMessages);
+        Assert.Equal("recent-blob", remaining.WebhookEventId);
+
+        // blob 數量與 content 數量相等——沒有孤兒，也沒有誤刪保留期內的 blob
+        Assert.Equal(remainingContents.Count, remainingBlobs.Count);
+        Assert.Single(remainingBlobs);
+    }
+
+    [Fact]
+    public async Task RunCleanupAsync_AcrossMultipleBatches_ExecutesOrphanBlobCleanupOnlyOnceAtEndOfRun()
+    {
+        using var connection = SqliteTestDatabase.CreateOpenConnection();
+        var interceptor = new OrphanBlobCommandCountingInterceptor();
+
+        var services = new ServiceCollection();
+        services.AddDbContext<MessageDbContext>(o =>
+            o.UseSqlite(connection)
+             .AddInterceptors(interceptor));
+        using var provider = services.BuildServiceProvider();
+
+        using (var scope = provider.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+            db.Database.EnsureCreated();
+
+            var settings = await db.ViewerSettings.SingleAsync(v => v.Id == ViewerSettings.SingletonId);
+            settings.RetentionDays = 1;
+            await db.SaveChangesAsync();
+
+            // 建立 1005 筆過期訊息（BatchSize = 1000，將觸發 2 批刪除）
+            for (var i = 0; i < 1005; i++)
+            {
+                db.GroupMessages.Add(new GroupMessage
+                {
+                    WebhookEventId = $"old-{i}",
+                    LineMessageId = $"m{i}",
+                    GroupId = "G1",
+                    MessageType = "text",
+                    Text = "x",
+                    EventTimestamp = DateTimeOffset.UtcNow.AddDays(-2),
+                    ReceivedAt = DateTimeOffset.UtcNow.AddDays(-2)
+                });
+            }
+
+            // 建立 1 筆保留期內的訊息（附帶 Content 與 Blob）
+            var keptMsg = new GroupMessage
+            {
+                WebhookEventId = "kept",
+                LineMessageId = "m-kept",
+                GroupId = "G1",
+                MessageType = "image",
+                EventTimestamp = DateTimeOffset.UtcNow,
+                ReceivedAt = DateTimeOffset.UtcNow,
+                Content = new MessageContent
+                {
+                    DownloadStatus = DownloadStatus.Completed,
+                    Blob = new MessageContentBlob { Content = [1, 2, 3] },
+                    ContentType = "image/jpeg"
+                }
+            };
+            db.GroupMessages.Add(keptMsg);
+            await db.SaveChangesAsync();
+
+            // 建立 1 筆過期且孤兒 blob 的訊息（模擬 cascade 失效或非預期孤兒）
+            var orphanMsg = new GroupMessage
+            {
+                WebhookEventId = "orphan",
+                LineMessageId = "m-orphan",
+                GroupId = "G1",
+                MessageType = "image",
+                EventTimestamp = DateTimeOffset.UtcNow.AddDays(-2),
+                ReceivedAt = DateTimeOffset.UtcNow.AddDays(-2),
+                Content = new MessageContent
+                {
+                    DownloadStatus = DownloadStatus.Completed,
+                    Blob = new MessageContentBlob { Content = [9, 9, 9] },
+                    ContentType = "image/jpeg"
+                }
+            };
+            db.GroupMessages.Add(orphanMsg);
+            await db.SaveChangesAsync();
+
+            // 刪除 MessageContent 讓其 Blob 成為孤兒
+            await db.MessageContents
+                .Where(c => c.GroupMessageId == orphanMsg.Id)
+                .ExecuteDeleteAsync();
+        }
+
+        interceptor.Reset();
+
+        var service = new RetentionCleanupService(
+            provider.GetRequiredService<IServiceScopeFactory>(),
+            OptionsFactory.Create(new RetentionOptions()),
+            NullLogger<RetentionCleanupService>.Instance);
+
+        await service.RunCleanupAsync(CancellationToken.None);
+
+        using (var verifyScope = provider.CreateScope())
+        {
+            var verifyContext = verifyScope.ServiceProvider.GetRequiredService<MessageDbContext>();
+
+            // 1005 筆過期訊息已全被刪除，只剩 keptMsg
+            var remainingMessages = await verifyContext.GroupMessages.ToListAsync();
+            var singleMsg = Assert.Single(remainingMessages);
+            Assert.Equal("kept", singleMsg.WebhookEventId);
+
+            // 孤兒 blob 已被清掉，只剩 keptMsg 的 blob
+            var remainingBlobs = await verifyContext.MessageContentBlobs.ToListAsync();
+            Assert.Single(remainingBlobs);
+
+            // 驗證孤兒清理指令在跨多批次刪除時，整輪只被執行了 1 次（而非每批次一次 + 結尾一次共 3 次）
+            Assert.Equal(1, interceptor.OrphanCleanupCommandCount);
+        }
+    }
+
+    private sealed class OrphanBlobCommandCountingInterceptor : DbCommandInterceptor
+    {
+        private int _orphanCleanupCommandCount;
+
+        public int OrphanCleanupCommandCount => _orphanCleanupCommandCount;
+
+        public void Reset() => _orphanCleanupCommandCount = 0;
+
+        public override ValueTask<InterceptionResult<int>> NonQueryExecutingAsync(
+            DbCommand command,
+            CommandEventData eventData,
+            InterceptionResult<int> result,
+            CancellationToken cancellationToken = default)
+        {
+            if (command.CommandText.Contains("MessageContentBlobs", StringComparison.OrdinalIgnoreCase))
+            {
+                Interlocked.Increment(ref _orphanCleanupCommandCount);
+            }
+
+            return base.NonQueryExecutingAsync(command, eventData, result, cancellationToken);
+        }
+
+        public override InterceptionResult<int> NonQueryExecuting(
+            DbCommand command,
+            CommandEventData eventData,
+            InterceptionResult<int> result)
+        {
+            if (command.CommandText.Contains("MessageContentBlobs", StringComparison.OrdinalIgnoreCase))
+            {
+                Interlocked.Increment(ref _orphanCleanupCommandCount);
+            }
+
+            return base.NonQueryExecuting(command, eventData, result);
+        }
     }
 }

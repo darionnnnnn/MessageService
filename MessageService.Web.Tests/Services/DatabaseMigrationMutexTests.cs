@@ -25,6 +25,16 @@ public class DatabaseMigrationMutexTests
     }
 
     [Fact]
+    public void RunExclusive_ReturnsTrue_WhenActionExecuted()
+    {
+        // 拿得到鎖時，runWithoutLock 的值不影響行為：action 照跑且回傳 true
+        var executed = false;
+
+        Assert.True(DatabaseMigrationMutex.RunExclusive(() => executed = true, runWithoutLock: false));
+        Assert.True(executed);
+    }
+
+    [Fact]
     public void RunExclusive_PropagatesExceptionFromAction()
     {
         Assert.Throws<InvalidOperationException>(() =>

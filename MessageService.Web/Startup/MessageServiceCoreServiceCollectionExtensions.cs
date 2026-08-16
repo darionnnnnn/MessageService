@@ -16,12 +16,13 @@ namespace MessageService.Web.Startup;
 ///
 /// provider 相關的欄位一律透過 DatabaseStartupDecision 取用，不在這個 record 另存副本——
 /// 兩份必須永遠同步的欄位正是「改共用欄位漏改讀取端」那類 bug 的溫床（終檢輪收斂）。
-/// 這裡只放 decision 沒有的東西：兩條已解析的 Sqlite 連線字串與 AutoMigrate 旗標。</summary>
+/// 這裡只放 decision 沒有的東西：兩條已解析的 Sqlite 連線字串、AutoMigrate 旗標與 SqliteBusyTimeoutMs。</summary>
 public record MessageServiceCoreRegistration(
     DatabaseStartupDecision DatabaseStartupDecision,
     bool AutoMigrate,
     string? SqliteConnectionString,
-    string? OutboxConnectionString);
+    string? OutboxConnectionString,
+    int SqliteBusyTimeoutMs = 30000);
 
 public static class MessageServiceCoreServiceCollectionExtensions
 {
@@ -84,6 +85,7 @@ public static class MessageServiceCoreServiceCollectionExtensions
         var sqliteFallbackEnabled = builder.Configuration.GetValue("Database:SqliteFallback", true);
         var sqliteFallbackTriggered = false;
         string? sqliteFallbackReason = null;
+        var sqliteBusyTimeoutMs = builder.Configuration.GetValue("Database:SqliteBusyTimeoutMs", 30000);
 
         // SQLite 救場：僅 AllInOne。執行中 SQL Server 斷線已由 outbox 緩衝保護（暫時性失敗退避重試、
         // 永不死信，見 OutboxForwarderService），不會掉資料；真正會掉訊息的缺口是「啟動時連不上／
@@ -115,8 +117,8 @@ public static class MessageServiceCoreServiceCollectionExtensions
 
         // 直連資料庫（AllInOne／Core／Viewer）才需要的一切：主資料庫本身、把 outbox 落地用的
         // DirectIngestSink。媒體下載／頭貼快取的背景服務不在這裡——它們跟著 Line:OutboundHere 走
-        // （見下面）；保留期清除也不在這裡，它只在 capabilities.RunsRetention 為真時註冊（比
-        // HasDatabaseAccess 窄——三台拓撲下 Viewer 主機雖然直連資料庫，但不該跟 Core 搶著清同一張表）
+        // （見下面）；保留期清除與貼圖回填等維護背景服務也不在這裡，它們只在 capabilities.RunsRetention 為真時註冊（比
+        // HasDatabaseAccess 窄——貼圖回填與保留清除屬於維護工作，三台拓撲下只由 Core 負責，Viewer 純讀不回填，不該跟 Core 搶著清同一張表或回填貼圖）
         if (capabilities.HasDatabaseAccess)
         {
             // 用衍生類別（實作型別）而非 MessageDbContext 本身註冊，純粹是為了讓 EF migrations
@@ -134,16 +136,19 @@ public static class MessageServiceCoreServiceCollectionExtensions
                     builder.Configuration.GetConnectionString("Sqlite") ?? "Data Source=Db/messages.db",
                     builder.Environment.ContentRootPath);
                 builder.Services.AddDbContext<MessageDbContext, SqliteMessageDbContext>(options =>
-                    options.UseSqlite(sqliteConnectionString));
+                {
+                    options.UseSqlite(sqliteConnectionString);
+                    options.AddInterceptors(new SqliteBusyTimeoutInterceptor(sqliteBusyTimeoutMs));
+                });
             }
 
             builder.Services.AddScoped<IIngestSink, DirectIngestSink>();
-            builder.Services.AddHostedService<StickerContentBackfillService>();
         }
 
         if (capabilities.RunsRetention)
         {
             builder.Services.AddHostedService<RetentionCleanupService>();
+            builder.Services.AddHostedService<StickerContentBackfillService>();
         }
 
         // 檢視端專屬服務：都依賴 MessageDbContext，只在 ViewerEnabled 時註冊——Development 環境下
@@ -276,13 +281,17 @@ public static class MessageServiceCoreServiceCollectionExtensions
             outboxConnectionString = SqliteConnectionStringResolver.Resolve(
                 builder.Configuration.GetConnectionString("Outbox") ?? "Data Source=Db/outbox.db",
                 builder.Environment.ContentRootPath);
-            builder.Services.AddDbContext<OutboxDbContext>(options => options.UseSqlite(outboxConnectionString));
+            builder.Services.AddDbContext<OutboxDbContext>(options =>
+            {
+                options.UseSqlite(outboxConnectionString);
+                options.AddInterceptors(new SqliteBusyTimeoutInterceptor(sqliteBusyTimeoutMs));
+            });
             builder.Services.AddSingleton<IOutboxSignal, OutboxSignal>();
             builder.Services.AddScoped<IOutboxWriter, SqliteOutboxWriter>();
             builder.Services.AddHostedService<OutboxForwarderService>();
         }
 
         return new MessageServiceCoreRegistration(
-            databaseStartupDecision, autoMigrate, sqliteConnectionString, outboxConnectionString);
+            databaseStartupDecision, autoMigrate, sqliteConnectionString, outboxConnectionString, sqliteBusyTimeoutMs);
     }
 }

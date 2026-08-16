@@ -72,11 +72,15 @@ public class MessageDbContext(DbContextOptions options, FieldCipher? cipher = nu
 
             entity.HasIndex(m => new { m.GroupId, m.Id }); // 未讀數／afterId／beforeId／hasMore
             entity.HasIndex(m => new { m.GroupId, m.EventTimestamp }); // 天數視窗／aroundId
+
+            // 貼圖回填服務用 MessageType == "sticker" 過濾，沒有索引是全表掃描
+            entity.HasIndex(m => m.MessageType);
         });
 
         modelBuilder.Entity<MessageContent>(entity =>
         {
             entity.Property(c => c.DownloadStatus).HasConversion<string>().HasMaxLength(20);
+            entity.Property(c => c.ClaimedBy).HasMaxLength(128);
 
             // GetPendingIdsAsync／認領邏輯只關心「還沒下載完」的列，但這張表裝著所有 blob——
             // 沒有索引就是全表掃描。篩選索引只蓋未完成的列，兩個 provider 的篩選子句語法不同
@@ -183,6 +187,9 @@ public class MessageDbContext(DbContextOptions options, FieldCipher? cipher = nu
                 .HasConversion(new DateTimeOffsetToBinaryConverter());
             modelBuilder.Entity<MessageContent>()
                 .Property(c => c.LastAttemptAt)
+                .HasConversion(new DateTimeOffsetToBinaryConverter());
+            modelBuilder.Entity<MessageContent>()
+                .Property(c => c.ClaimedAt)
                 .HasConversion(new DateTimeOffsetToBinaryConverter());
             modelBuilder.Entity<HostHeartbeat>()
                 .Property(h => h.LastSeenAt)

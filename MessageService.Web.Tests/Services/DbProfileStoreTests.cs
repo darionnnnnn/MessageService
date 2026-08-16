@@ -375,6 +375,39 @@ public class DbProfileStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task UpsertMemberAsync_ConcurrentInsert_RetriesAndUpdatesAsExpected()
+    {
+        var interceptor = new SaveFailureInterceptor();
+        var options = new DbContextOptionsBuilder<SqliteMessageDbContext>()
+            .UseSqlite(_connection)
+            .AddInterceptors(interceptor)
+            .Options;
+        var cipher = CreateCipher(false);
+        using var dbContext = new SqliteMessageDbContext(options, cipher);
+        var store = new DbProfileStore(dbContext, cipher, NullLogger<DbProfileStore>.Instance);
+
+        interceptor.BeforeSaveOnce = async () =>
+        {
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = "INSERT INTO GroupMembers (GroupId, UserId, DisplayName, UpdatedAt) VALUES ('g-concurrent', 'u-concurrent', 'Concurrent User', '2026-08-16T00:00:00Z');";
+            await cmd.ExecuteNonQueryAsync();
+        };
+
+        var pictureBytes = new byte[] { 111, 112, 113 };
+        var profile = new MemberProfile("u-concurrent", "Retried User", "https://example.com/pic-member-retried", pictureBytes, "image/png");
+
+        await store.UpsertMemberAsync("g-concurrent", "u-concurrent", profile, CancellationToken.None);
+
+        var member = await _dbContext.GroupMembers.Include(m => m.Picture).FirstOrDefaultAsync(m => m.GroupId == "g-concurrent" && m.UserId == "u-concurrent");
+        Assert.NotNull(member);
+        Assert.Equal("Retried User", member.DisplayName);
+        Assert.Equal("https://example.com/pic-member-retried", member.PictureUrl);
+        Assert.Equal("image/png", member.PictureContentType);
+        Assert.NotNull(member.Picture);
+        Assert.Equal(pictureBytes, member.Picture.Content);
+    }
+
+    [Fact]
     public async Task UpsertGroupAsync_EncryptionEnabled_WritesEncryptedContent()
     {
         var cipher = CreateCipher(true);

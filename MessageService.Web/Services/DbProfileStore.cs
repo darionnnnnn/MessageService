@@ -48,21 +48,14 @@ public class DbProfileStore(MessageDbContext dbContext, FieldCipher cipher, ILog
 
     public async Task UpsertGroupAsync(string groupId, GroupSummary summary, CancellationToken cancellationToken)
     {
-        try
-        {
-            await ApplyGroupUpsertAsync(groupId, summary, cancellationToken);
-        }
-        catch (DbUpdateException ex)
-        {
-            // Groups 主鍵撞鍵：跟 DirectIngestSink 的 GroupLastMessageTracker（訊息落地時建
-            // stub 列）併發時，兩邊都判定「這個群組還沒有列」同時插入——對方贏了，這裡改成
-            // UPDATE。不像 GroupLastMessageTracker 那樣把失敗吞掉：頭貼資料是使用者直接看得到
-            // 的內容，重試失敗要讓呼叫端知道（IngestController／ProfileRefreshService 本來就有
-            // 各自的重試與錯誤處理）。
-            dbContext.ChangeTracker.Clear();
-            logger.LogInformation(ex, "Group {GroupId} row created concurrently, retrying as update", groupId);
-            await ApplyGroupUpsertAsync(groupId, summary, cancellationToken);
-        }
+        // Groups 主鍵撞鍵：跟 DirectIngestSink 的 GroupLastMessageTracker（訊息落地時建
+        // stub 列）併發或多主機同時寫入時，兩邊都判定「這個群組還沒有列」同時插入——對方贏了，這裡改成
+        // UPDATE。不像 GroupLastMessageTracker 那樣把失敗吞掉：頭貼資料是使用者直接看得到
+        // 的內容，重試失敗要讓呼叫端知道（IngestController／ProfileRefreshService 本來就有
+        // 各自的重試與錯誤處理）。
+        await ExecuteWithRetryOnDbUpdateExceptionAsync(
+            () => ApplyGroupUpsertAsync(groupId, summary, cancellationToken),
+            ex => logger.LogInformation(ex, "Group {GroupId} row created concurrently, retrying as update", groupId));
     }
 
     private async Task ApplyGroupUpsertAsync(string groupId, GroupSummary summary, CancellationToken cancellationToken)
@@ -104,6 +97,16 @@ public class DbProfileStore(MessageDbContext dbContext, FieldCipher cipher, ILog
 
     public async Task UpsertMemberAsync(string groupId, string userId, MemberProfile profile, CancellationToken cancellationToken)
     {
+        // GroupMembers 複合主鍵 (GroupId, UserId) 撞鍵：多主機環境下 Core 與 Edge 都可能是 OutboundHere，
+        // 兩台會同時為同一使用者 upsert 頭貼與名稱資料。兩端同時判定實體不存在並插入時，較慢的一方會撞上主鍵衝突。
+        // 透過共用重試機制，在撞鍵時清空 ChangeTracker 並重新查詢以改走 UPDATE 重試一次；第二次若仍失敗則向外拋出。
+        await ExecuteWithRetryOnDbUpdateExceptionAsync(
+            () => ApplyMemberUpsertAsync(groupId, userId, profile, cancellationToken),
+            ex => logger.LogInformation(ex, "Member {GroupId}/{UserId} row created concurrently, retrying as update", groupId, userId));
+    }
+
+    private async Task ApplyMemberUpsertAsync(string groupId, string userId, MemberProfile profile, CancellationToken cancellationToken)
+    {
         var existing = await dbContext.GroupMembers.FindAsync([groupId, userId], cancellationToken);
         if (existing is null)
         {
@@ -138,6 +141,26 @@ public class DbProfileStore(MessageDbContext dbContext, FieldCipher cipher, ILog
         }
 
         await dbContext.SaveChangesAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// 當多主機或多行程同時 upsert 同一筆資料（例如群組或成員）時，兩方可能同時判定列不存在而嘗試 INSERT，
+    /// 導致較慢的一方在 SaveChangesAsync 時拋出 DbUpdateException 主鍵衝突。
+    /// 此輔助方法在捕捉到 DbUpdateException 時先清除 ChangeTracker 追蹤狀態，記錄日誌後重新執行一次（改為 UPDATE）；
+    /// 若重試第二次仍然失敗則向外拋出例外，交由呼叫端錯誤處理機制。其他非 DbUpdateException 例外則原樣往外拋。
+    /// </summary>
+    private async Task ExecuteWithRetryOnDbUpdateExceptionAsync(Func<Task> action, Action<DbUpdateException> onRetry)
+    {
+        try
+        {
+            await action();
+        }
+        catch (DbUpdateException ex)
+        {
+            dbContext.ChangeTracker.Clear();
+            onRetry(ex);
+            await action();
+        }
     }
 
     /// <summary>頭貼子列的 upsert。刻意不用 Include 把既有子列連同 blob 撈回來判斷存不存在
