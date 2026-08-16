@@ -715,6 +715,96 @@ public class DbContentWorkSourceTests : IDisposable
         Assert.Equal(payload, reloaded.Blob?.Content); // blob 確實已寫入
     }
 
+    [Fact]
+    public async Task CompleteAsync_ConsecutiveCallsWithDifferentLengths_CleanlyReplacesBlobRow()
+    {
+        using var scope = _provider.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+        var groupMessage = new GroupMessage
+        {
+            WebhookEventId = Guid.NewGuid().ToString(), LineMessageId = "m-retry", GroupId = "G1", MessageType = "image",
+            EventTimestamp = DateTimeOffset.UtcNow, ReceivedAt = DateTimeOffset.UtcNow,
+            Content = new MessageContent { DownloadStatus = DownloadStatus.Pending }
+        };
+        dbContext.GroupMessages.Add(groupMessage);
+        await dbContext.SaveChangesAsync();
+        var contentId = groupMessage.Content!.Id;
+        var source = CreateSource(dbContext);
+
+        // 第一次寫入（較長內容）
+        var payload1 = new byte[] { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 };
+        await source.CompleteAsync(contentId, new MemoryStream(payload1), payload1.Length, "image/png", CancellationToken.None);
+
+        var firstResult = await ReloadContentAsync(contentId);
+        Assert.Equal(DownloadStatus.Completed, firstResult.DownloadStatus);
+        Assert.Equal(payload1, firstResult.Blob?.Content);
+
+        // 模擬重試：將狀態重設為 Pending
+        using (var updateScope = _provider.CreateScope())
+        {
+            var updateDb = updateScope.ServiceProvider.GetRequiredService<MessageDbContext>();
+            await updateDb.MessageContents.Where(c => c.Id == contentId)
+                .ExecuteUpdateAsync(s => s.SetProperty(c => c.DownloadStatus, DownloadStatus.Pending));
+        }
+
+        // 第二次寫入（不同長度，較短內容）
+        var payload2 = new byte[] { 99, 88, 77 };
+        await source.CompleteAsync(contentId, new MemoryStream(payload2), payload2.Length, "image/jpeg", CancellationToken.None);
+
+        // 驗證 MessageContentBlobs 只有 1 列，且內容等於第二次寫入的位元組
+        using (var verifyScope = _provider.CreateScope())
+        {
+            var verifyDb = verifyScope.ServiceProvider.GetRequiredService<MessageDbContext>();
+            var blobCount = await verifyDb.MessageContentBlobs.CountAsync(b => b.MessageContentId == contentId);
+            Assert.Equal(1, blobCount);
+        }
+
+        var secondResult = await ReloadContentAsync(contentId);
+        Assert.Equal(DownloadStatus.Completed, secondResult.DownloadStatus);
+        Assert.Equal(payload2, secondResult.Blob?.Content);
+    }
+
+    [Fact]
+    public async Task FailAsync_DeletesLingeringBlobRowInMessageContentBlobs()
+    {
+        using var scope = _provider.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+        var groupMessage = new GroupMessage
+        {
+            WebhookEventId = Guid.NewGuid().ToString(), LineMessageId = "m-fail", GroupId = "G1", MessageType = "image",
+            EventTimestamp = DateTimeOffset.UtcNow, ReceivedAt = DateTimeOffset.UtcNow,
+            Content = new MessageContent { DownloadStatus = DownloadStatus.Pending }
+        };
+        dbContext.GroupMessages.Add(groupMessage);
+        await dbContext.SaveChangesAsync();
+        var contentId = groupMessage.Content!.Id;
+
+        // 手動插入一筆殘留的 blob（模擬下載中途失敗或先前殘留的 zeroblob 列）
+        dbContext.MessageContentBlobs.Add(new MessageContentBlob
+        {
+            MessageContentId = contentId,
+            Content = [1, 2, 3, 4, 5]
+        });
+        await dbContext.SaveChangesAsync();
+
+        // 確認 blob 列存在
+        var initialBlobCount = await dbContext.MessageContentBlobs.CountAsync(b => b.MessageContentId == contentId);
+        Assert.Equal(1, initialBlobCount);
+
+        var source = CreateSource(dbContext);
+        await source.FailAsync(contentId, CancellationToken.None);
+
+        // 驗證狀態被標為 Failed，且 MessageContentBlobs 裡的列已完全被刪除
+        var reloaded = await ReloadContentAsync(contentId);
+        Assert.Equal(DownloadStatus.Failed, reloaded.DownloadStatus);
+        Assert.Null(reloaded.Blob);
+
+        using var verifyScope = _provider.CreateScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<MessageDbContext>();
+        var remainingBlobCount = await verifyDb.MessageContentBlobs.CountAsync(b => b.MessageContentId == contentId);
+        Assert.Equal(0, remainingBlobCount);
+    }
+
     private sealed class CapturingLogger : ILogger<DbContentWorkSource>
     {
         public List<string> Errors { get; } = [];

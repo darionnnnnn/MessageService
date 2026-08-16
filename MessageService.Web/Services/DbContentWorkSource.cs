@@ -25,6 +25,9 @@ public class DbContentWorkSource(
     ILogger<DbContentWorkSource> logger) : IContentWorkSource
 {
     private const int BufferSize = 81920;
+    private const string BlobTableName = "MessageContentBlobs";
+    private const string BlobColumnName = "Content";
+    private const string BlobIdColumnName = "MessageContentId";
     private readonly ContentDownloadOptions _options = options.Value;
 
     public async Task<IReadOnlyList<long>> GetPendingIdsAsync(bool reclaimDownloading, CancellationToken cancellationToken)
@@ -56,12 +59,8 @@ public class DbContentWorkSource(
         // 格式儲存，現在才加轉換會讓既有 messages.db 的既有資料被讀成亂碼）。Failed 筆數本來
         // 就是小量（下載失敗的內容），先用 FailedAttempts 門檻縮小範圍後在記憶體篩 cutoff
         // 划算得多，不值得為此冒風險改儲存格式。
-        // 只投影 Id 與 ReceivedAt，絕對不要用 Include + ToListAsync 把整個 MessageContent
-        // 實體撈回來——那會連 Content（varbinary(max)）一起載進記憶體。而且「Failed 的列不會
-        // 有內容」這個假設並不成立：SQLite 的 zeroblob(N) 是先 commit 才開始串流填入，中途
-        // 失敗會留下一顆 N bytes 的 blob，重試耗盡後那列就變成「Failed 且帶著一顆大 blob」。
-        // 一支 300MB 的影片失敗幾次，每次重新入列都會把幾百 MB 載進記憶體，正好違反本批次
-        // 串流化要達成的目的。
+        // 只投影 Id 與 ReceivedAt。附檔 blob 已拆到獨立的 MessageContentBlobs 表，父表這邊
+        // 撈整列不再有 blob 的代價；FailAsync 也會順手刪掉失敗留下的 blob 列，不會有殘骸。
         var cutoff = DateTimeOffset.UtcNow.AddDays(-_options.FailedRetryWindowDays);
         var failedCandidates = await dbContext.MessageContents
             .Where(c => c.DownloadStatus == DownloadStatus.Failed
@@ -227,8 +226,15 @@ public class DbContentWorkSource(
     private static async Task WriteContentSqlServerAsync(
         DbConnection connection, long contentId, Stream content, CancellationToken cancellationToken)
     {
+        await using (var deleteCmd = connection.CreateCommand())
+        {
+            deleteCmd.CommandText = $"DELETE FROM {BlobTableName} WHERE {BlobIdColumnName} = @id";
+            AddParameter(deleteCmd, "@id", contentId);
+            await deleteCmd.ExecuteNonQueryAsync(cancellationToken);
+        }
+
         await using var command = (SqlCommand)connection.CreateCommand();
-        command.CommandText = "UPDATE MessageContents SET Content = @content WHERE Id = @id";
+        command.CommandText = $"INSERT INTO {BlobTableName} ({BlobIdColumnName}, {BlobColumnName}) VALUES (@id, @content)";
 
         var contentParam = new SqlParameter("@content", SqlDbType.VarBinary, -1) { Value = content };
         command.Parameters.Add(contentParam);
@@ -242,13 +248,14 @@ public class DbContentWorkSource(
     {
         await using (var init = connection.CreateCommand())
         {
-            init.CommandText = "UPDATE MessageContents SET Content = zeroblob(@length) WHERE Id = @id";
-            AddParameter(init, "@length", contentLength);
+            init.CommandText = $"DELETE FROM {BlobTableName} WHERE {BlobIdColumnName} = @id; " +
+                               $"INSERT INTO {BlobTableName} ({BlobIdColumnName}, {BlobColumnName}) VALUES (@id, zeroblob(@length));";
             AddParameter(init, "@id", contentId);
+            AddParameter(init, "@length", contentLength);
             await init.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        await using var blob = new SqliteBlob(connection, "MessageContents", "Content", contentId);
+        await using var blob = new SqliteBlob(connection, BlobTableName, BlobColumnName, contentId);
         await content.CopyToAsync(blob, BufferSize, cancellationToken);
     }
 
@@ -270,6 +277,10 @@ public class DbContentWorkSource(
                 .SetProperty(c => c.FailedAttempts, c => c.FailedAttempts + 1)
                 .SetProperty(c => c.LastAttemptAt, now),
                 cancellationToken);
+
+        await dbContext.MessageContentBlobs
+            .Where(b => b.MessageContentId == contentId)
+            .ExecuteDeleteAsync(cancellationToken);
     }
 }
 

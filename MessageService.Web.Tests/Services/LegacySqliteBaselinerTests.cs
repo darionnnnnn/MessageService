@@ -61,6 +61,7 @@ public class LegacySqliteBaselinerTests : IDisposable
             ALTER TABLE GroupMessages DROP COLUMN PackageId;
             ALTER TABLE MessageContents DROP COLUMN FailedAttempts;
             ALTER TABLE MessageContents DROP COLUMN LastAttemptAt;
+            ALTER TABLE MessageContents ADD COLUMN Content BLOB;
             ALTER TABLE ViewerSettings DROP COLUMN RetentionDays;
             ALTER TABLE ViewerSettings DROP COLUMN MaskNationalId;
             ALTER TABLE ViewerSettings DROP COLUMN MaskMobilePhone;
