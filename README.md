@@ -100,6 +100,7 @@ RetentionCleanupService（每日固定時間讀取檢視端設定頁存的保留
 | `ContentDownload:TranscodingPollSeconds` / `TranscodingMaxPolls` | 影片/語音轉檔輪詢間隔與次數上限（預設 5 秒 × 24 次） |
 | `ContentDownload:MaxConcurrency` | 並行下載 worker 數（預設 3）——一支等轉檔的影片不會卡住排在後面的圖片/檔案 |
 | `ContentDownload:FailedRetryWindowDays` / `MaxFailedRetries` | Failed 內容只在訊息到達後這麼多天內（預設 7）、且累計失敗次數未達上限（預設 10）才會被重新撿回，避免 LINE 內容過期後每次重啟都無限重跑 |
+| `ContentDownload:RequeueIntervalMinutes` | 週期性重掃待下載內容的間隔（預設 15 分鐘，0 表示只在啟動時掃一次）。撿回其他主機或回填服務補出的 Pending、以及 worker 崩潰後卡在 Downloading 的項目；重複入列由認領檢查擋掉，不會重複下載 |
 | `ProfileCache:RefreshAfter` | 群組/成員名稱快取的過期時間（預設 7 天） |
 | `ProfileCache:FailureRetryAfter` | LINE profile API 失敗後的程序內冷卻時間（預設 10 分鐘），避免暫時性故障被每則訊息放大成持續性的無效呼叫 |
 | `Encryption:Enabled` / `Key` / `SearchWindowDays` | 應用層欄位加密開關與金鑰，見 [docs/ENCRYPTION.md](docs/ENCRYPTION.md)。所有直連資料庫的主機 `Key` 必須完全一致 |

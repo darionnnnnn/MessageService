@@ -26,8 +26,9 @@ public class DbContentWorkSource(MessageDbContext dbContext, IOptions<ContentDow
     {
         // Downloading：上次行程被殺／當機時卡在「已認領但沒做完」的列，見 GetAsync 的認領邏輯
         // 與 DownloadStatus.Downloading 的說明。啟動接續沒辦法分辨「真的還在下載中」跟「已經
-        // 沒有 worker 在處理」，一律當成中斷、整批撿回改回 Pending 重跑——單一行程模式下這是
-        // 唯一的回收路徑，接受「worker 崩潰但行程沒重啟」這段期間該筆會卡住的已知限制
+        // 沒有 worker 在處理」，一律當成中斷、整批撿回改回 Pending 重跑。這條路徑除了啟動時跑一次，
+        // ContentDownloadService 每隔 ContentDownload:RequeueIntervalMinutes 也會再跑，所以
+        // 「worker 崩潰但行程沒重啟」最多延遲一個重掃週期就會被撿回
         var pendingIds = await dbContext.MessageContents
             .Where(c => c.DownloadStatus == DownloadStatus.Pending || c.DownloadStatus == DownloadStatus.Downloading)
             .Select(c => c.Id)

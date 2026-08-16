@@ -154,6 +154,10 @@ Edge 端排空 outbox 時預設一次 HTTP 請求送整批（`Outbox:BatchSize` 
   LINE 的原始 ID——很容易被誤判成檢視端壞掉。`DeploymentValidator` 會對
   `Core + OutboundHere=false` 記一則說明性 log 指出線索在 Edge 端，但最終仍只能靠
   部署檢查表把關。
+- **待下載內容的回收最多延遲一個重掃週期**：`ContentDownloadService` 除了啟動時掃一次，
+  之後每隔 `ContentDownload:RequeueIntervalMinutes`（預設 15 分鐘）重掃一次。所以
+  worker 崩潰後卡在 `Downloading` 的項目、以及 Core 端補出但由 Edge 端下載的 `Pending`
+  項目，最壞情況要等一個週期才會被撿回。把間隔設為 0 會退回「只在啟動時掃一次」。
 - **outbox 批次排空的吞吐量提升沒有正式量測**：Edge→Core 的 round-trip 從逐筆改成整批，
   理論上吞吐量會明顯提升，但目前只有功能面的等價性測試，沒有實際負載下的量測數據。
 - **遮蔽規則快取在拆機部署下有最長 30 秒的漂移窗口**：`MaskingService` 把遮蔽設定與規則

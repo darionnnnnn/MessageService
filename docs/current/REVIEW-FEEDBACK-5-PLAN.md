@@ -95,6 +95,16 @@
 | C | 既有重複 Label 修補後含 `(2)`；SqlServer migration 未實測 | 部署前跑 `migrations script` | `Down()` drop index，Label 不還原 |
 
 ## 7. 執行紀錄
+
+基準：委派前 679 測試全綠（dev@86b1ed4）。
+
 | 作業-階段 | 執行者 | 結果 | 驗收 | 落差與處置 |
 |---|---|---|---|---|
-| | | | | |
+| A-1 | agy | `RequeueIntervalMinutes`（預設 15，0 停用）＋與 worker 並行的重掃迴圈，先等一個間隔再掃 | build 0 警告；683 綠（+4） | 無。多做一筆「間隔 ≤ 0 立即返回」的防禦測試，保留 |
+| B-1 | agy（第 2 次） | 每批存檔後入列新建內容 Id；掃描前 `AnyAsync` 短路＋耗時 log | build 0 警告；684 綠；突變測試（拿掉入列）確認測試會紅 | 第 1 次零變更：規格要它「開工前先跑基準測試」，時間全耗在等測試後逾時。改成直接給定基準數字重跑成功 |
+| C-1 | agy | `(GroupId, Label)` 唯一索引；Sqlite／SqlServer 各一支 `AnonymousLabelUnique`，`Up()` 先 ROW_NUMBER 修補重複再建索引 | build 0 警告；685 綠；migration 一致性測試綠 | 白名單外連帶修改：SqlServer 端 Label 由 `nvarchar(max)` 改 `nvarchar(450)`（不改無法建索引），屬必要連帶，採納 |
+| C-2 | agy | `DbUpdateException` 三路判斷（同人被搶先／Label 撞名遞增重試上限 50／其餘 rethrow） | build 0 警告；689 綠；`FirstAsync` 已無命中 | 無 |
+| D | Claude | `GET /api/groups` 與 `GroupDto.UnreadCount` 註解改寫（點名 settings.js 是真實呼叫端、側欄用 POST /list） | build 綠 | 未移除端點——審查建議移除，但設定頁實際在用 |
+| E | Claude | README 補 `ContentDownload:RequeueIntervalMinutes`；DEPLOYMENT-MODES 已知限制改為「最多延遲一個重掃週期」；`DbContentWorkSource` 過時註解同步 | 689 綠 | 無 |
+
+待人工驗收：SqlServer 的 migration 只跑過模型一致性測試，實機部署前先 `dotnet ef migrations script -c SqlServerMessageDbContext` 確認修補 SQL 與 `nvarchar(450)` 轉型在真實資料上沒問題。

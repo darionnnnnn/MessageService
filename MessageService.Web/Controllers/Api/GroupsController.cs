@@ -19,8 +19,9 @@ public class GroupsController(MessageDbContext dbContext, IMaskingService maskin
 
     private record LastMessagePreview(long Id, string MessageType, string? Text, DateTimeOffset EventTimestamp);
 
-    // 保留 GET /api/groups 作為一般檢視端 API 使用（仍被健康檢查與 IP 白名單相關測試當成一般檢視端 API 使用），
-    // 不帶已讀基準，所有群組未讀數一律為 0。
+    // 這支不是側欄用的：不帶已讀基準，回傳的 UnreadCount 一律為 0。
+    // 呼叫端是設定頁（wwwroot/js/settings.js，只要群組清單）、健康檢查與 IP 白名單相關測試。
+    // 側欄一律走 POST /api/groups/list；誤用這支的症狀是「未讀數永遠 0」且從回應看不出原因。
     [HttpGet]
     public async Task<ActionResult<IReadOnlyList<GroupDto>>> GetGroups(CancellationToken cancellationToken)
     {
