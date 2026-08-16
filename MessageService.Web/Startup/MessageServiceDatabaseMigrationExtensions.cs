@@ -48,7 +48,7 @@ public static class MessageServiceDatabaseMigrationExtensions
 
                         // Core+Viewer 同機兩站台、或 IIS 重疊回收過渡期都可能有兩個行程同時開 messages.db——
                         // 跟 outbox.db 同一個理由（見 EnableWalMode 說明），持久屬性設一次即可
-                        OutboxSchemaUpgrader.EnableWalMode(registration.SqliteConnectionString!);
+                        OutboxSchemaUpgrader.EnableWalMode(registration.SqliteConnectionString!, registration.SqliteBusyTimeoutMs);
                     }
                     else
                     {
@@ -86,15 +86,15 @@ public static class MessageServiceDatabaseMigrationExtensions
             // DeadLetteredAt 欄位要在這裡另外處理，見 OutboxSchemaUpgrader 的說明。
             // OutboxConnectionString 在這裡必然已解析好：這個區塊跟 AddMessageServiceCore 賦值時的
             // capabilities.ReceivesWebhook 條件完全一致
-            OutboxSchemaUpgrader.EnsureDeadLetterColumn(registration.OutboxConnectionString!);
+            OutboxSchemaUpgrader.EnsureDeadLetterColumn(registration.OutboxConnectionString!, registration.SqliteBusyTimeoutMs);
 
             // 既有 outbox.db 可能已經因為 LINE redelivery 累積了重複 WebhookEventId（P0）——
             // 必須先去重才能補建唯一索引，見 EnsureWebhookEventIdUniqueIndex 說明
-            OutboxSchemaUpgrader.EnsureWebhookEventIdUniqueIndex(registration.OutboxConnectionString!);
+            OutboxSchemaUpgrader.EnsureWebhookEventIdUniqueIndex(registration.OutboxConnectionString!, registration.SqliteBusyTimeoutMs);
 
             // webhook 執行緒寫、forwarder 執行緒讀刪；rollback journal 模式下兩邊會互相 block
-            // （busy_timeout 預設 30 秒，遠超 LINE 的 webhook 逾時），WAL 讓讀寫不互相阻塞
-            OutboxSchemaUpgrader.EnableWalMode(registration.OutboxConnectionString!);
+            // （由 Database:SqliteBusyTimeoutMs 明確設定 busy_timeout，預設 30 秒），WAL 讓讀寫不互相阻塞
+            OutboxSchemaUpgrader.EnableWalMode(registration.OutboxConnectionString!, registration.SqliteBusyTimeoutMs);
 
             // 死信不會自動消失，只會在 OutboxForwarderService 的 log 被看到（啟動時先報一次、
             // 之後每小時再報一次）——沒有專用的重送介面，量大時要靠那行 log 提醒維運人員去查

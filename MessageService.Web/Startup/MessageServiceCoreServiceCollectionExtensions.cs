@@ -16,12 +16,13 @@ namespace MessageService.Web.Startup;
 ///
 /// provider 相關的欄位一律透過 DatabaseStartupDecision 取用，不在這個 record 另存副本——
 /// 兩份必須永遠同步的欄位正是「改共用欄位漏改讀取端」那類 bug 的溫床（終檢輪收斂）。
-/// 這裡只放 decision 沒有的東西：兩條已解析的 Sqlite 連線字串與 AutoMigrate 旗標。</summary>
+/// 這裡只放 decision 沒有的東西：兩條已解析的 Sqlite 連線字串、AutoMigrate 旗標與 SqliteBusyTimeoutMs。</summary>
 public record MessageServiceCoreRegistration(
     DatabaseStartupDecision DatabaseStartupDecision,
     bool AutoMigrate,
     string? SqliteConnectionString,
-    string? OutboxConnectionString);
+    string? OutboxConnectionString,
+    int SqliteBusyTimeoutMs = 30000);
 
 public static class MessageServiceCoreServiceCollectionExtensions
 {
@@ -84,6 +85,7 @@ public static class MessageServiceCoreServiceCollectionExtensions
         var sqliteFallbackEnabled = builder.Configuration.GetValue("Database:SqliteFallback", true);
         var sqliteFallbackTriggered = false;
         string? sqliteFallbackReason = null;
+        var sqliteBusyTimeoutMs = builder.Configuration.GetValue("Database:SqliteBusyTimeoutMs", 30000);
 
         // SQLite 救場：僅 AllInOne。執行中 SQL Server 斷線已由 outbox 緩衝保護（暫時性失敗退避重試、
         // 永不死信，見 OutboxForwarderService），不會掉資料；真正會掉訊息的缺口是「啟動時連不上／
@@ -134,7 +136,10 @@ public static class MessageServiceCoreServiceCollectionExtensions
                     builder.Configuration.GetConnectionString("Sqlite") ?? "Data Source=Db/messages.db",
                     builder.Environment.ContentRootPath);
                 builder.Services.AddDbContext<MessageDbContext, SqliteMessageDbContext>(options =>
-                    options.UseSqlite(sqliteConnectionString));
+                {
+                    options.UseSqlite(sqliteConnectionString);
+                    options.AddInterceptors(new SqliteBusyTimeoutInterceptor(sqliteBusyTimeoutMs));
+                });
             }
 
             builder.Services.AddScoped<IIngestSink, DirectIngestSink>();
@@ -276,13 +281,17 @@ public static class MessageServiceCoreServiceCollectionExtensions
             outboxConnectionString = SqliteConnectionStringResolver.Resolve(
                 builder.Configuration.GetConnectionString("Outbox") ?? "Data Source=Db/outbox.db",
                 builder.Environment.ContentRootPath);
-            builder.Services.AddDbContext<OutboxDbContext>(options => options.UseSqlite(outboxConnectionString));
+            builder.Services.AddDbContext<OutboxDbContext>(options =>
+            {
+                options.UseSqlite(outboxConnectionString);
+                options.AddInterceptors(new SqliteBusyTimeoutInterceptor(sqliteBusyTimeoutMs));
+            });
             builder.Services.AddSingleton<IOutboxSignal, OutboxSignal>();
             builder.Services.AddScoped<IOutboxWriter, SqliteOutboxWriter>();
             builder.Services.AddHostedService<OutboxForwarderService>();
         }
 
         return new MessageServiceCoreRegistration(
-            databaseStartupDecision, autoMigrate, sqliteConnectionString, outboxConnectionString);
+            databaseStartupDecision, autoMigrate, sqliteConnectionString, outboxConnectionString, sqliteBusyTimeoutMs);
     }
 }
