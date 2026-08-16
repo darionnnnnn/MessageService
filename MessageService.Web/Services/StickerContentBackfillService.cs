@@ -91,10 +91,70 @@ public class StickerContentBackfillService(
                 }
                 catch (DbUpdateException ex)
                 {
-                    // 撞鍵時（如另一台主機／行程已先補好同一批）清空追蹤器並略過該批，游標推至該批末尾繼續下一批
+                    if (!IsUniqueConstraintViolation(ex))
+                    {
+                        throw;
+                    }
+
+                    // 批次存檔撞鍵時（如另一台主機／行程已先補好其中部分訊息），不整批放棄：
+                    // 清空追蹤器後，重新查詢該批 Id 範圍內仍為 Content == null 的訊息並逐筆補
                     dbContext.ChangeTracker.Clear();
                     lastProcessedId = batchLastId;
-                    logger.LogInformation(ex, "Sticker content batch up to message ID {LastProcessedId} was already backfilled elsewhere, skipping batch.", lastProcessedId);
+
+                    var batchStartId = messages[0].Id;
+                    var pendingMessageIds = await dbContext.GroupMessages
+                        .Where(m => m.Id >= batchStartId
+                                 && m.Id <= batchLastId
+                                 && m.MessageType == "sticker"
+                                 && m.StickerId != null
+                                 && m.Content == null)
+                        .OrderBy(m => m.Id)
+                        .Select(m => m.Id)
+                        .ToListAsync(stoppingToken);
+
+                    var batchSuccessCount = 0;
+                    var batchCollisionCount = messages.Count - pendingMessageIds.Count;
+
+                    foreach (var messageId in pendingMessageIds)
+                    {
+                        var message = await dbContext.GroupMessages
+                            .FirstOrDefaultAsync(m => m.Id == messageId
+                                                   && m.MessageType == "sticker"
+                                                   && m.StickerId != null
+                                                   && m.Content == null, stoppingToken);
+
+                        if (message == null)
+                        {
+                            batchCollisionCount++;
+                            continue;
+                        }
+
+                        var content = new MessageContent
+                        {
+                            DownloadStatus = DownloadStatus.Pending
+                        };
+                        message.Content = content;
+
+                        try
+                        {
+                            await dbContext.SaveChangesAsync(stoppingToken);
+                            downloadQueue.Enqueue(content.Id);
+                            batchSuccessCount++;
+                            totalCreated++;
+                        }
+                        catch (DbUpdateException itemEx) when (IsUniqueConstraintViolation(itemEx))
+                        {
+                            batchCollisionCount++;
+                        }
+                        finally
+                        {
+                            dbContext.ChangeTracker.Clear();
+                        }
+                    }
+
+                    logger.LogInformation(
+                        "Sticker content batch up to message ID {LastProcessedId} had collisions: {LocalCount} backfilled locally, {ConflictCount} already backfilled elsewhere.",
+                        batchLastId, batchSuccessCount, batchCollisionCount);
                 }
             }
 
@@ -108,5 +168,20 @@ public class StickerContentBackfillService(
         {
             logger.LogError(ex, "Failed to backfill sticker content rows.");
         }
+    }
+
+    private static bool IsUniqueConstraintViolation(DbUpdateException ex)
+    {
+        if (ex.InnerException is Microsoft.Data.Sqlite.SqliteException sqliteEx)
+        {
+            return sqliteEx.SqliteExtendedErrorCode is 1555 or 2067;
+        }
+
+        if (ex.InnerException is Microsoft.Data.SqlClient.SqlException sqlEx)
+        {
+            return sqlEx.Number is 2601 or 2627;
+        }
+
+        return false;
     }
 }

@@ -69,6 +69,15 @@ public static class MessageServiceDatabaseMigrationExtensions
 
             if (!migrated)
             {
+                var pendingMigrations = dbContext.Database.GetPendingMigrations().ToList();
+                if (pendingMigrations.Count > 0)
+                {
+                    throw new InvalidOperationException(
+                        $"本次啟動拿不到 migration 鎖而跳過，但資料庫 schema 落後 {pendingMigrations.Count} 個 migration，" +
+                        "帶著舊 schema 提供服務只會產生一連串缺欄位錯誤；" +
+                        "請確認同機各站台的應用程式集區身分一致，或改由外部 dotnet ef database update 升級 schema。");
+                }
+
                 migrationLogger.LogWarning(
                     "本次啟動未執行 schema migration。若這是唯一會 migrate 的站台，請確認同機各站台的" +
                     "應用程式集區身分一致，或改由外部 dotnet ef database update 升級 schema；" +

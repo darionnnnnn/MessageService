@@ -104,9 +104,6 @@ public class RetentionCleanupService(
                 .ExecuteDeleteAsync(cancellationToken);
             totalDeleted += deletedCount;
 
-            // 每批訊息刪完後立即清一次孤兒 blob，避免孤兒堆積到整輪結束才一次回收
-            await DeleteOrphanBlobsAsync(dbContext, cancellationToken);
-
             if (idsToDelete.Count < BatchSize)
             {
                 break;
@@ -120,7 +117,8 @@ public class RetentionCleanupService(
             await RefreshStaleGroupPointersAsync(dbContext, cutoff, cancellationToken);
         }
 
-        // 整輪結束後再跑一次，收清除期間之外既有的歷史孤兒（即使本輪一筆訊息都沒刪也要跑）
+        // 孤兒不會因為分批而累積，整輪結束前清一次即可（避免每批都對 MessageContentBlobs
+        // 做全表反連結掃描）；即使本輪一筆訊息都沒刪也會跑，用來收清除期間之外既有的歷史孤兒
         await DeleteOrphanBlobsAsync(dbContext, cancellationToken);
 
         logger.LogInformation(
