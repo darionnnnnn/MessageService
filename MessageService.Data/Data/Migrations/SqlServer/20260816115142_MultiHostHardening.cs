@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using Microsoft.EntityFrameworkCore.Migrations;
 
 #nullable disable
@@ -17,6 +17,13 @@ namespace MessageService.Data.Data.Migrations.SqlServer
                 type: "datetimeoffset",
                 nullable: true);
 
+            migrationBuilder.AddColumn<string>(
+                name: "ClaimedBy",
+                table: "MessageContents",
+                type: "nvarchar(128)",
+                maxLength: 128,
+                nullable: true);
+
             migrationBuilder.CreateIndex(
                 name: "IX_GroupMessages_MessageType",
                 table: "GroupMessages",
@@ -29,6 +36,10 @@ namespace MessageService.Data.Data.Migrations.SqlServer
             migrationBuilder.DropIndex(
                 name: "IX_GroupMessages_MessageType",
                 table: "GroupMessages");
+
+            migrationBuilder.DropColumn(
+                name: "ClaimedBy",
+                table: "MessageContents");
 
             migrationBuilder.DropColumn(
                 name: "ClaimedAt",

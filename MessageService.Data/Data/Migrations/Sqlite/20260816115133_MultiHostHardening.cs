@@ -1,4 +1,4 @@
-﻿using Microsoft.EntityFrameworkCore.Migrations;
+using Microsoft.EntityFrameworkCore.Migrations;
 
 #nullable disable
 
@@ -16,6 +16,13 @@ namespace MessageService.Data.Data.Migrations.Sqlite
                 type: "INTEGER",
                 nullable: true);
 
+            migrationBuilder.AddColumn<string>(
+                name: "ClaimedBy",
+                table: "MessageContents",
+                type: "TEXT",
+                maxLength: 128,
+                nullable: true);
+
             migrationBuilder.CreateIndex(
                 name: "IX_GroupMessages_MessageType",
                 table: "GroupMessages",
@@ -28,6 +35,10 @@ namespace MessageService.Data.Data.Migrations.Sqlite
             migrationBuilder.DropIndex(
                 name: "IX_GroupMessages_MessageType",
                 table: "GroupMessages");
+
+            migrationBuilder.DropColumn(
+                name: "ClaimedBy",
+                table: "MessageContents");
 
             migrationBuilder.DropColumn(
                 name: "ClaimedAt",

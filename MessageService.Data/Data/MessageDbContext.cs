@@ -80,6 +80,7 @@ public class MessageDbContext(DbContextOptions options, FieldCipher? cipher = nu
         modelBuilder.Entity<MessageContent>(entity =>
         {
             entity.Property(c => c.DownloadStatus).HasConversion<string>().HasMaxLength(20);
+            entity.Property(c => c.ClaimedBy).HasMaxLength(128);
 
             // GetPendingIdsAsync／認領邏輯只關心「還沒下載完」的列，但這張表裝著所有 blob——
             // 沒有索引就是全表掃描。篩選索引只蓋未完成的列，兩個 provider 的篩選子句語法不同

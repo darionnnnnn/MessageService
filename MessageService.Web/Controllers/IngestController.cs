@@ -1,4 +1,4 @@
-﻿using MessageService.Options;
+using MessageService.Options;
 using MessageService.Services;
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Mvc;
@@ -106,8 +106,10 @@ public class IngestController(
     // 那時撿回 Downloading 是對的。新版 Edge 的週期重掃會明確帶 false。
     [HttpGet("content-work")]
     public async Task<ActionResult<IReadOnlyList<long>>> GetContentWork(
-        [FromQuery] bool reclaimDownloading = true, CancellationToken cancellationToken = default) =>
-        Ok(await contentWorkSource.GetPendingIdsAsync(reclaimDownloading, cancellationToken));
+        [FromQuery] bool reclaimDownloading = true,
+        [FromQuery] bool isStartup = false,
+        CancellationToken cancellationToken = default) =>
+        Ok(await contentWorkSource.GetPendingIdsAsync(reclaimDownloading, isStartup, cancellationToken));
 
     [HttpGet("content-work/{id:long}")]
     public async Task<ActionResult<ContentWorkItem>> GetContentWorkItem(long id, CancellationToken cancellationToken)
