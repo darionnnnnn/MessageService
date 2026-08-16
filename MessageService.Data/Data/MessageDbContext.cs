@@ -105,7 +105,14 @@ public class MessageDbContext(DbContextOptions options, FieldCipher? cipher = nu
 
         modelBuilder.Entity<UserAlias>().HasKey(a => a.UserId);
 
-        modelBuilder.Entity<AnonymousIdentity>().HasKey(a => new { a.GroupId, a.UserId });
+        modelBuilder.Entity<AnonymousIdentity>(entity =>
+        {
+            entity.HasKey(a => new { a.GroupId, a.UserId });
+
+            // 併發指派代號時避免同群組撞名（不同使用者分到相同 Label），
+            // 靠資料庫唯一索引擋下並轉成衝突例外，供服務端捕捉重試。
+            entity.HasIndex(a => new { a.GroupId, a.Label }).IsUnique();
+        });
 
         modelBuilder.Entity<HostHeartbeat>(entity =>
         {

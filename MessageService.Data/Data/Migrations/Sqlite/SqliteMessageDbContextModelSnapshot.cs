@@ -38,6 +38,9 @@ namespace MessageService.Data.Migrations.Sqlite
 
                     b.HasKey("GroupId", "UserId");
 
+                    b.HasIndex("GroupId", "Label")
+                        .IsUnique();
+
                     b.ToTable("AnonymousIdentities");
                 });
 
