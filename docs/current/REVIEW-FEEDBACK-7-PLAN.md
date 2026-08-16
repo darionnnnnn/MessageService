@@ -129,8 +129,45 @@
 | C-4 撞鍵重試 | agy | 完成，736 綠（+3） | 通過 | 逾時中斷未自驗 |
 | D busy_timeout | agy | 完成，740 綠（+4） | 通過 | 它在 `appsettings.json` 加了 `//` 註解（該檔其餘無註解），Claude 移除 |
 | E 掃描上限 | agy | 完成，745 綠（+5） | 通過 | 排序改用 **Id 由小到大**而非規劃寫的 `ReceivedAt`：`ReceivedAt` 在 SQLite 上沒有支援範圍比較的轉換（同一個理由讓 Failed 的 cutoff 也只能在記憶體篩），Id 遞增等價於到達順序。outbox `CreatedAt` 索引結案不做——outbox 在各主機本機的獨立 SQLite，表很小 |
+| G-1 體檢修正 | agy | 完成 `724473a`，752 綠（+5+2 我改介面收斂） | 通過 | 見下方終檢段 |
+| G-2 體檢修正 | agy | 完成 `80dfca0`，755 綠（+3） | 通過 | 見下方終檢段 |
 | F 文件 | Claude | 完成 | — | `SplitBlobTables` 拉成兩 provider 共通節＋SQLite 離線升級步驟；DEPLOYMENT-MODES 補四個新設定鍵、貼圖回填歸屬、雙 Core 不支援、NLog 說明 |
 
 **推翻原規劃之處**：`HostHeartbeats` 原本判斷「缺唯一索引」是錯的——它的主鍵本來就是複合鍵
 `(Role, MachineName)`，撞鍵表現是拋 `DbUpdateException` 而非插出重複列，所以 C-1 的 migration
 只剩 `ClaimedAt` 與 `MessageType` 索引，心跳改成純撞鍵重試（C-4）。
+
+### 併回前終檢（兩個獨立審查）
+
+**程式碼審查抓到三個真問題，都已修（作業 G）：**
+
+1. **租約在最後一步破功**（最嚴重）：`CompleteAsync` 結尾把狀態改成 `Completed` 的 UPDATE
+   只用 `Id` 當條件。租約逾期被另一台回收、對方重新認領並寫入後，原本那台（其實還活著、
+   只是慢）寫完仍會無條件標成 Completed——blob 由兩個寫入者交錯，狀態卻是完成，再也沒有
+   機制能撿回來。修法：加 `ClaimedBy` 欄位（併進尚未發布的 `MultiHostHardening` migration），
+   完成／失敗／回退三條路徑都只動「認領仍屬於自己」的列，被回收時記 Warning 放棄本次結果。
+2. **崩潰後回收退化**：舊行為是啟動時所有 `Downloading` 一律撿回，改租約後要等滿 60 分鐘，
+   單機部署等於媒體一小時打不開。修法：啟動掃描（`isStartup`）額外回收本機名下的認領。
+3. **Failed 重試會永久飢餓**：`Take` 在記憶體 cutoff 篩選之前，超過保留視窗的舊 Failed 永遠
+   不會被更新狀態、Id 又最小，累積到上限就把整個視窗佔滿，新的可重試項目再也撈不到，
+   而 log 每輪都報「reached limit」。修法：SQL 端先用 `GroupMessage.EventTimestamp` 粗篩
+   （**不能用 `ReceivedAt`**——它沒有支援範圍比較的轉換，下推會在 SQLite 上壞掉），
+   兩段查詢並共用同一個上限。
+
+另外收斂：貼圖回填的 `catch (DbUpdateException)` 原本把磁碟滿／逾時／BUSY 都吞成
+Information 並整批跳過，改成只認唯一鍵違反且逐筆補完該批其餘資料；孤兒 blob 清理從每批
+一次改成整輪一次（每批一次是對 `MessageContentBlobs` 的全表反連結掃描）；拿不到 migration
+鎖而跳過時，若真有待套用的 migration 就直接讓啟動失敗，不要帶著落後的 schema 服務。
+
+**文件審查抓到的**：README 仍寫著被本輪推翻的「不碰 Downloading、孤兒只在啟動接續撿回」、
+缺三個新設定鍵、migration 鎖沒寫「不跨機器」、三處背景服務清單都漏了貼圖回填；
+DEPLOYMENT-GUIDE 的保留期清除節沒說明孤兒 blob 那則 Warning 怎麼解讀。皆已修。
+
+### 尚未做的
+
+- **實機驗證**：SQL Server 的 migration 只有 SQLite 端實跑測試，正式環境仍需人工
+  `dotnet ef database update` 驗證；IIS 上 `startupTimeLimit` 的實際效果未實測。
+- 週期重掃仍會重複入列「已在下載但尚未開始寫入資料庫」的 Pending（`ClaimedAt` 是在開始寫入
+  時才寫的），多主機下可能重複下載同一顆內容——只是浪費 LINE 配額與頻寬，不產生髒資料。
+  要根治得把認領提前到取工作項時，但那會破壞影片轉檔輪詢反覆呼叫 `GetAsync` 的既有設計，
+  本輪不動。

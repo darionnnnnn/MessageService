@@ -101,7 +101,7 @@ RetentionCleanupService（每日固定時間讀取檢視端設定頁存的保留
 | `ContentDownload:MaxConcurrency` | 並行下載 worker 數（預設 3）——一支等轉檔的影片不會卡住排在後面的圖片/檔案 |
 | `ContentDownload:FailedRetryWindowDays` / `MaxFailedRetries` | Failed 內容只在訊息到達後這麼多天內（預設 7）、且累計失敗次數未達上限（預設 10）才會被重新撿回，避免 LINE 內容過期後每次重啟都無限重跑 |
 | `ContentDownload:RequeueIntervalMinutes` | 週期性重掃待下載內容的間隔（預設 15 分鐘，0 表示只在啟動時掃一次，上限 24 天）。撿回其他主機或回填服務補出的 Pending、仍可重試的 Failed，以及**租約已逾期**的 Downloading。重複入列由認領檢查擋掉，不會重複下載 |
-| `ContentDownload:ClaimLeaseMinutes` | 下載認領的租約分鐘數（預設 60）。認領時寫入 `MessageContents.ClaimedAt`，只有 `ClaimedAt` 為空或早於租約期限的 Downloading 才會被回收改回 Pending——別台主機正在下載中的不會被誤收，卡住的下載也不必等重啟 |
+| `ContentDownload:ClaimLeaseMinutes` | 下載認領的租約分鐘數（預設 60）。認領時寫入 `MessageContents.ClaimedAt`／`ClaimedBy`，只有租約為空或已逾期的 Downloading 才會被回收改回 Pending——別台主機正在下載中的不會被誤收，卡住的下載也不必等重啟。**啟動掃描**額外回收掛在本機名下的認領（那一定是上次行程留下的孤兒），所以崩潰重啟不必等滿租約。完成／失敗時也會確認「認領仍屬於自己」才寫結果，租約被別台接手後本機的寫入結果會被放棄並記 Warning |
 | `ContentDownload:MaxPendingIdsPerScan` | 單輪掃描最多撈多少待處理內容（預設 5000，Id 小的先處理），其餘留給下一輪。沒有上限時大量積壓會整包進記憶體，SQL Server 端還會撞上 2100 個查詢參數的硬限制 |
 | `Database:SqliteBusyTimeoutMs` | SQLite 寫鎖被別的行程佔用時最多等這麼久（預設 30000 毫秒）。WAL 只讓讀寫不互相阻塞，寫／寫仍是全庫互斥 |
 | `ProfileCache:RefreshAfter` | 群組/成員名稱快取的過期時間（預設 7 天） |
