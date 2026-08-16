@@ -114,5 +114,22 @@
 - 各作業獨立 commit。
 
 ## 7. 執行紀錄
+
+分支 `feature/multihost-review-7`（自 dev）。委派模型中途切換：C-1 的回饋輪撞上 Claude 池
+五小時額度用罄，之後全部改用 `gemini-3.7-flash-high`（使用者同時把 skill 預設改成它）。
+
 | 作業-階段 | 執行者 | 結果 | 驗收 | 落差與處置 |
 |---|---|---|---|---|
+| A 升級路徑 | Claude | 完成 `966727f` | 722→ build 0 警告 | 搬遷 SQL 抽成 `SplitBlobTablesDataMove` 供兩 provider 與測試共用（避免測試驗的是抄過去的另一份 SQL） |
+| B 孤兒清理 | agy(sonnet) | 完成，721 綠 | 通過 | 無 |
+| C-1 schema | agy→Claude | 完成 `8c47af2`，722 綠 | 通過 | agy 為了不存在的問題自建 EF 內部 API 的 `IMigrationsAssembly`（過度設計），回饋要求還原；重產 migration 由 Claude 用 `dotnet ef` 做掉。**真正的衝突不是 `ClaimedAt` 而是新索引**：`LegacySqliteBaselinerTests` 的「模擬舊檔」是用今日模型 `EnsureCreated` 後再砍後期欄位，新索引要一併列入砍除清單 |
+| C-2 租約 | agy | 完成 `19690b2`，728 綠（+6） | 通過 | 逾時中斷未自驗，由 Claude 重跑 |
+| C-3 貼圖回填 | agy | 完成 `d43095a`，733 綠（+5） | 通過 | 無 |
+| C-4 撞鍵重試 | agy | 完成，736 綠（+3） | 通過 | 逾時中斷未自驗 |
+| D busy_timeout | agy | 完成，740 綠（+4） | 通過 | 它在 `appsettings.json` 加了 `//` 註解（該檔其餘無註解），Claude 移除 |
+| E 掃描上限 | agy | 完成，745 綠（+5） | 通過 | 無 |
+| F 文件 | Claude | 完成 | — | `SplitBlobTables` 拉成兩 provider 共通節＋SQLite 離線升級步驟；DEPLOYMENT-MODES 補四個新設定鍵、貼圖回填歸屬、雙 Core 不支援、NLog 說明 |
+
+**推翻原規劃之處**：`HostHeartbeats` 原本判斷「缺唯一索引」是錯的——它的主鍵本來就是複合鍵
+`(Role, MachineName)`，撞鍵表現是拋 `DbUpdateException` 而非插出重複列，所以 C-1 的 migration
+只剩 `ClaimedAt` 與 `MessageType` 索引，心跳改成純撞鍵重試（C-4）。
