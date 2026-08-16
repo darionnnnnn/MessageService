@@ -55,9 +55,9 @@ public class DbProfileStoreTests : IDisposable
 
         await store.UpsertGroupAsync("g1", summary, CancellationToken.None);
 
-        var group = await _dbContext.Groups.FindAsync("g1");
+        var group = await _dbContext.Groups.Include(g => g.Picture).FirstOrDefaultAsync(g => g.GroupId == "g1");
         Assert.NotNull(group);
-        Assert.Equal(pictureBytes, group.PictureContent);
+        Assert.Equal(pictureBytes, group.Picture?.Content);
         Assert.Equal("image/jpeg", group.PictureContentType);
         Assert.Equal("https://example.com/pic", group.PictureFetchedUrl);
         Assert.NotNull(group.PictureUpdatedAt);
@@ -76,9 +76,9 @@ public class DbProfileStoreTests : IDisposable
         var summary2 = new GroupSummary("g1", "Group 1", "https://example.com/pic2", null, null);
         await store.UpsertGroupAsync("g1", summary2, CancellationToken.None);
 
-        var group = await _dbContext.Groups.FindAsync("g1");
+        var group = await _dbContext.Groups.Include(g => g.Picture).FirstOrDefaultAsync(g => g.GroupId == "g1");
         Assert.NotNull(group);
-        Assert.Equal(pictureBytes, group.PictureContent);
+        Assert.Equal(pictureBytes, group.Picture?.Content);
         Assert.Equal("image/jpeg", group.PictureContentType);
         Assert.Equal("https://example.com/pic", group.PictureFetchedUrl);
     }
@@ -94,9 +94,9 @@ public class DbProfileStoreTests : IDisposable
 
         await store.UpsertMemberAsync("g1", "u1", profile, CancellationToken.None);
 
-        var member = await _dbContext.GroupMembers.FindAsync("g1", "u1");
+        var member = await _dbContext.GroupMembers.Include(m => m.Picture).FirstOrDefaultAsync(m => m.GroupId == "g1" && m.UserId == "u1");
         Assert.NotNull(member);
-        Assert.Equal(pictureBytes, member.PictureContent);
+        Assert.Equal(pictureBytes, member.Picture?.Content);
         Assert.Equal("image/jpeg", member.PictureContentType);
         Assert.Equal("https://example.com/pic", member.PictureFetchedUrl);
         Assert.NotNull(member.PictureUpdatedAt);
@@ -115,9 +115,9 @@ public class DbProfileStoreTests : IDisposable
         var profile2 = new MemberProfile("u1", "User 1", "https://example.com/pic2", null, null);
         await store.UpsertMemberAsync("g1", "u1", profile2, CancellationToken.None);
 
-        var member = await _dbContext.GroupMembers.FindAsync("g1", "u1");
+        var member = await _dbContext.GroupMembers.Include(m => m.Picture).FirstOrDefaultAsync(m => m.GroupId == "g1" && m.UserId == "u1");
         Assert.NotNull(member);
-        Assert.Equal(pictureBytes, member.PictureContent);
+        Assert.Equal(pictureBytes, member.Picture?.Content);
         Assert.Equal("image/jpeg", member.PictureContentType);
         Assert.Equal("https://example.com/pic", member.PictureFetchedUrl);
     }
@@ -133,9 +133,9 @@ public class DbProfileStoreTests : IDisposable
 
         await store.UpsertGroupAsync("g1", summary, CancellationToken.None);
 
-        var group = await _dbContext.Groups.FindAsync("g1");
+        var group = await _dbContext.Groups.Include(g => g.Picture).FirstOrDefaultAsync(g => g.GroupId == "g1");
         Assert.NotNull(group);
-        Assert.NotNull(group.PictureContent);
-        Assert.True(ChunkedBlobCipher.IsEncryptedHeader(group.PictureContent));
+        Assert.NotNull(group.Picture?.Content);
+        Assert.True(ChunkedBlobCipher.IsEncryptedHeader(group.Picture.Content));
     }
 }

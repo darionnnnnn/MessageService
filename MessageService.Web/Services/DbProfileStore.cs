@@ -14,19 +14,19 @@ public class DbProfileStore(MessageDbContext dbContext, FieldCipher cipher, ILog
     public async Task<ProfileStaleness> GetStalenessAsync(
         string groupId, string? userId, DateTimeOffset cutoff, CancellationToken cancellationToken)
     {
-        var group = await dbContext.Groups.FindAsync([groupId], cancellationToken);
+        var group = await dbContext.Groups.Include(g => g.Picture).FirstOrDefaultAsync(g => g.GroupId == groupId, cancellationToken);
         var groupStale = group is null || group.UpdatedAt < cutoff;
         var groupFetchedUrl = group?.PictureFetchedUrl;
-        var hasGroupPicture = group?.PictureContent != null;
+        var hasGroupPicture = group?.Picture != null;
 
         if (userId is null)
         {
             return new ProfileStaleness(groupStale, false, groupFetchedUrl, null, hasGroupPicture, false);
         }
 
-        var member = await dbContext.GroupMembers.FindAsync([groupId, userId], cancellationToken);
+        var member = await dbContext.GroupMembers.Include(m => m.Picture).FirstOrDefaultAsync(m => m.GroupId == groupId && m.UserId == userId, cancellationToken);
         var memberStale = member is null || member.UpdatedAt < cutoff;
-        return new ProfileStaleness(groupStale, memberStale, groupFetchedUrl, member?.PictureFetchedUrl, hasGroupPicture, member?.PictureContent != null);
+        return new ProfileStaleness(groupStale, memberStale, groupFetchedUrl, member?.PictureFetchedUrl, hasGroupPicture, member?.Picture != null);
     }
 
     public async Task UpsertGroupAsync(string groupId, GroupSummary summary, CancellationToken cancellationToken)
@@ -50,7 +50,7 @@ public class DbProfileStore(MessageDbContext dbContext, FieldCipher cipher, ILog
 
     private async Task ApplyGroupUpsertAsync(string groupId, GroupSummary summary, CancellationToken cancellationToken)
     {
-        var existing = await dbContext.Groups.FindAsync([groupId], cancellationToken);
+        var existing = await dbContext.Groups.Include(g => g.Picture).FirstOrDefaultAsync(g => g.GroupId == groupId, cancellationToken);
         if (existing is null)
         {
             var entity = new Group
@@ -76,7 +76,7 @@ public class DbProfileStore(MessageDbContext dbContext, FieldCipher cipher, ILog
 
     public async Task UpsertMemberAsync(string groupId, string userId, MemberProfile profile, CancellationToken cancellationToken)
     {
-        var existing = await dbContext.GroupMembers.FindAsync([groupId, userId], cancellationToken);
+        var existing = await dbContext.GroupMembers.Include(m => m.Picture).FirstOrDefaultAsync(m => m.GroupId == groupId && m.UserId == userId, cancellationToken);
         if (existing is null)
         {
             var entity = new GroupMember
@@ -105,7 +105,15 @@ public class DbProfileStore(MessageDbContext dbContext, FieldCipher cipher, ILog
     {
         if (bytes != null)
         {
-            entity.PictureContent = EncryptPictureContent(bytes);
+            var encrypted = EncryptPictureContent(bytes);
+            if (entity.Picture is not null)
+            {
+                entity.Picture.Content = encrypted;
+            }
+            else
+            {
+                entity.Picture = new GroupPicture { GroupId = entity.GroupId, Content = encrypted };
+            }
             entity.PictureContentType = contentType;
             entity.PictureFetchedUrl = url;
             entity.PictureUpdatedAt = entity.UpdatedAt;
@@ -116,7 +124,15 @@ public class DbProfileStore(MessageDbContext dbContext, FieldCipher cipher, ILog
     {
         if (bytes != null)
         {
-            entity.PictureContent = EncryptPictureContent(bytes);
+            var encrypted = EncryptPictureContent(bytes);
+            if (entity.Picture is not null)
+            {
+                entity.Picture.Content = encrypted;
+            }
+            else
+            {
+                entity.Picture = new GroupMemberPicture { GroupId = entity.GroupId, UserId = entity.UserId, Content = encrypted };
+            }
             entity.PictureContentType = contentType;
             entity.PictureFetchedUrl = url;
             entity.PictureUpdatedAt = entity.UpdatedAt;

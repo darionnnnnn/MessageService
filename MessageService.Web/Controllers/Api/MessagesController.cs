@@ -118,7 +118,7 @@ public class MessagesController(
         var members = await dbContext.GroupMembers
             .AsNoTracking()
             .Where(m => m.GroupId == groupId && userIds.Contains(m.UserId))
-            .Select(m => new { m.UserId, m.DisplayName, HasPicture = m.PictureContent != null })
+            .Select(m => new { m.UserId, m.DisplayName, HasPicture = m.Picture != null })
             .ToDictionaryAsync(m => m.UserId, cancellationToken);
 
         // 一個請求只載入一次遮蔽規則，套用到每則訊息時全是同步運算，不會每則訊息各打一次 DB

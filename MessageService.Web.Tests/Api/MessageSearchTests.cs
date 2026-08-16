@@ -318,7 +318,7 @@ public class MessageSearchTests : IDisposable
                 GroupId = "G1",
                 UserId = "U1",
                 DisplayName = "小明",
-                PictureContent = new byte[] { 1, 2, 3 },
+                Picture = new GroupMemberPicture { GroupId = "G1", UserId = "U1", Content = new byte[] { 1, 2, 3 } },
                 UpdatedAt = now
             });
             (await dbContext.ViewerSettings.SingleAsync()).NameDisplayMode = NameDisplayMode.Original;
@@ -345,7 +345,7 @@ public class MessageSearchTests : IDisposable
                 GroupId = "G1",
                 UserId = "U1",
                 DisplayName = "小明",
-                PictureContent = new byte[] { 1, 2, 3 },
+                Picture = new GroupMemberPicture { GroupId = "G1", UserId = "U1", Content = new byte[] { 1, 2, 3 } },
                 UpdatedAt = now
             });
             dbContext.GroupMembers.Add(new GroupMember
@@ -353,7 +353,7 @@ public class MessageSearchTests : IDisposable
                 GroupId = "G2",
                 UserId = "U2",
                 DisplayName = "小華",
-                PictureContent = new byte[] { 4, 5, 6 },
+                Picture = new GroupMemberPicture { GroupId = "G2", UserId = "U2", Content = new byte[] { 4, 5, 6 } },
                 UpdatedAt = now
             });
             (await dbContext.ViewerSettings.SingleAsync()).NameDisplayMode = NameDisplayMode.Original;

@@ -54,7 +54,7 @@ public class DbContentWorkSourceTests : IDisposable
     {
         using var scope = _provider.CreateScope();
         var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
-        return await dbContext.MessageContents.SingleAsync(c => c.Id == id);
+        return await dbContext.MessageContents.Include(c => c.Blob).SingleAsync(c => c.Id == id);
     }
 
     private async Task<(MessageDbContext DbContext, long ContentId)> SeedFailedContentAsync(
@@ -221,7 +221,7 @@ public class DbContentWorkSourceTests : IDisposable
 
         var reloaded = await ReloadContentAsync(contentId);
         Assert.Equal(DownloadStatus.Completed, reloaded.DownloadStatus);
-        Assert.Equal(firstPayload, reloaded.Content); // 第二次呼叫沒有覆寫掉第一次寫入的內容
+        Assert.Equal(firstPayload, reloaded.Blob?.Content); // 第二次呼叫沒有覆寫掉第一次寫入的內容
     }
 
     [Fact]
@@ -246,9 +246,9 @@ public class DbContentWorkSourceTests : IDisposable
             source.CompleteAsync(groupMessage.Content!.Id, new MemoryStream(payload), payload.Length, "image/png", CancellationToken.None));
 
         Assert.Null(ex);
-        var reloaded = await dbContext.MessageContents.AsNoTracking().SingleAsync(c => c.Id == groupMessage.Content.Id);
+        var reloaded = await dbContext.MessageContents.Include(c => c.Blob).AsNoTracking().SingleAsync(c => c.Id == groupMessage.Content.Id);
         Assert.Equal(DownloadStatus.Downloading, reloaded.DownloadStatus); // 沒被改動，也沒被誤標 Completed
-        Assert.Null(reloaded.Content);
+        Assert.Null(reloaded.Blob);
     }
 
     // 體檢輪揪出的真 bug：認領（Pending→Downloading）之後若寫入失敗（長度不符、連線中斷等），
@@ -287,7 +287,7 @@ public class DbContentWorkSourceTests : IDisposable
 
         var completed = await ReloadContentAsync(contentId);
         Assert.Equal(DownloadStatus.Completed, completed.DownloadStatus);
-        Assert.Equal(payload, completed.Content);
+        Assert.Equal(payload, completed.Blob?.Content);
     }
 
     [Fact]
@@ -389,7 +389,7 @@ public class DbContentWorkSourceTests : IDisposable
 
         var reloaded = await ReloadContentAsync(groupMessage.Content.Id);
         Assert.Equal(DownloadStatus.Completed, reloaded.DownloadStatus);
-        Assert.Equal(payload, reloaded.Content);
+        Assert.Equal(payload, reloaded.Blob?.Content);
         Assert.Equal("image/png", reloaded.ContentType);
         Assert.NotNull(reloaded.CompletedAt);
     }
@@ -417,7 +417,7 @@ public class DbContentWorkSourceTests : IDisposable
         await source.CompleteAsync(groupMessage.Content!.Id, new MemoryStream(payload), payload.Length, "video/mp4", CancellationToken.None);
 
         var reloaded = await ReloadContentAsync(groupMessage.Content.Id);
-        Assert.Equal(payload, reloaded.Content);
+        Assert.Equal(payload, reloaded.Blob?.Content);
     }
 
     // === 加密啟用時：CompleteAsync 寫進去的是分塊密文，不是明文（blob 不走 EF ValueConverter，
@@ -473,9 +473,9 @@ public class DbContentWorkSourceTests : IDisposable
         await source.CompleteAsync(groupMessage.Content!.Id, new MemoryStream(payload), payload.Length, "image/png", CancellationToken.None);
 
         var reloaded = await ReloadContentAsync(groupMessage.Content.Id);
-        Assert.NotEqual(payload, reloaded.Content); // 磁碟上不是明文
-        Assert.True(ChunkedBlobCipher.IsEncryptedHeader(reloaded.Content.AsSpan(0, ChunkedBlobCipher.HeaderSize)));
-        Assert.Equal(payload, DecryptStoredBlob(reloaded.Content!));
+        Assert.NotEqual(payload, reloaded.Blob?.Content); // 磁碟上不是明文
+        Assert.True(ChunkedBlobCipher.IsEncryptedHeader(reloaded.Blob!.Content.AsSpan(0, ChunkedBlobCipher.HeaderSize)));
+        Assert.Equal(payload, DecryptStoredBlob(reloaded.Blob.Content!));
     }
 
     [Fact]
@@ -501,8 +501,8 @@ public class DbContentWorkSourceTests : IDisposable
         var reloaded = await ReloadContentAsync(groupMessage.Content.Id);
         Assert.Equal(
             ChunkedBlobCipher.ComputeEncryptedLength(payload.Length),
-            reloaded.Content!.LongLength);
-        Assert.Equal(payload, DecryptStoredBlob(reloaded.Content));
+            reloaded.Blob!.Content.LongLength);
+        Assert.Equal(payload, DecryptStoredBlob(reloaded.Blob.Content));
     }
 
     // ==== 任務要求驗收測試：原子累加、ChangeTracker 隔離、邊界與失敗路徑 ====
@@ -555,7 +555,7 @@ public class DbContentWorkSourceTests : IDisposable
         Assert.Empty(dbContext.ChangeTracker.Entries<MessageContent>());
         var reloaded = await ReloadContentAsync(contentId);
         Assert.Equal(DownloadStatus.Completed, reloaded.DownloadStatus);
-        Assert.Equal(payload, reloaded.Content);
+        Assert.Equal(payload, reloaded.Blob?.Content);
     }
 
     [Fact]
@@ -712,7 +712,7 @@ public class DbContentWorkSourceTests : IDisposable
         // 驗證狀態維持在 Downloading（沒有被 RevertClaim 成 Pending）
         var reloaded = await ReloadContentAsync(contentId);
         Assert.Equal(DownloadStatus.Downloading, reloaded.DownloadStatus);
-        Assert.Equal(payload, reloaded.Content); // blob 確實已寫入
+        Assert.Equal(payload, reloaded.Blob?.Content); // blob 確實已寫入
     }
 
     private sealed class CapturingLogger : ILogger<DbContentWorkSource>

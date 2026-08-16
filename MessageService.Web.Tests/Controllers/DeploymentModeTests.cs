@@ -414,9 +414,9 @@ public class DeploymentModeTests : IDisposable
 
         using var scope = factory.Services.CreateScope();
         var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
-        var saved = await dbContext.MessageContents.SingleAsync(c => c.Id == contentId);
+        var saved = await dbContext.MessageContents.Include(c => c.Blob).SingleAsync(c => c.Id == contentId);
         Assert.Equal(DownloadStatus.Completed, saved.DownloadStatus);
-        Assert.Equal(bytes, saved.Content);
+        Assert.Equal(bytes, saved.Blob?.Content);
         Assert.Equal("image/jpeg", saved.ContentType);
     }
 

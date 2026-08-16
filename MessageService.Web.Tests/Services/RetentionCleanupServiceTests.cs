@@ -67,7 +67,7 @@ public class RetentionCleanupServiceTests : IDisposable
                     Content = new MessageContent
                     {
                         DownloadStatus = DownloadStatus.Completed,
-                        Content = [1, 2, 3],
+                        Blob = new MessageContentBlob { Content = [1, 2, 3] },
                         ContentType = "image/jpeg"
                     }
                 },

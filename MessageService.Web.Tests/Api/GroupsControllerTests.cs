@@ -421,7 +421,7 @@ public class GroupsControllerTests : IDisposable
             {
                 GroupId = "G1",
                 GroupName = "工作群組A",
-                PictureContent = new byte[] { 0x00 },
+                Picture = new GroupPicture { GroupId = "G1", Content = new byte[] { 0x00 } },
                 UpdatedAt = now
             });
             dbContext.GroupMessages.Add(new GroupMessage

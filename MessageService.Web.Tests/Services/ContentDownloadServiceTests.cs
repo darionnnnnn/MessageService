@@ -1,4 +1,4 @@
-﻿using MessageService.Data;
+using MessageService.Data;
 using MessageService.Data.Crypto;
 using MessageService.Models;
 using MessageService.Options;
@@ -85,7 +85,7 @@ public class ContentDownloadServiceTests : IDisposable
     {
         using var scope = _provider.CreateScope();
         var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
-        return await dbContext.MessageContents.SingleAsync(c => c.Id == id);
+        return await dbContext.MessageContents.Include(c => c.Blob).SingleAsync(c => c.Id == id);
     }
 
     [Fact]
@@ -99,7 +99,7 @@ public class ContentDownloadServiceTests : IDisposable
 
         var content = await ReloadContentAsync(contentId);
         Assert.Equal(DownloadStatus.Completed, content.DownloadStatus);
-        Assert.Equal(new byte[] { 1, 2, 3, 4 }, content.Content);
+        Assert.Equal(new byte[] { 1, 2, 3, 4 }, content.Blob?.Content);
         Assert.Equal("image/jpeg", content.ContentType);
         Assert.NotNull(content.CompletedAt);
         Assert.Single(_contentClient.ContentCalls);
