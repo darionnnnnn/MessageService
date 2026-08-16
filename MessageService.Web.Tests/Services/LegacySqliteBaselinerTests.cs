@@ -78,6 +78,7 @@ public class LegacySqliteBaselinerTests : IDisposable
             DROP INDEX IF EXISTS IX_GroupMessages_GroupId_Id;
             DROP INDEX IF EXISTS IX_GroupMessages_GroupId_EventTimestamp;
             DROP INDEX IF EXISTS IX_MessageContents_DownloadStatus;
+            DROP INDEX IF EXISTS IX_GroupMessages_MessageType;
             """;
         drop.ExecuteNonQuery();
     }

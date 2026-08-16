@@ -178,6 +178,8 @@ namespace MessageService.Data.Migrations.SqlServer
 
                     b.HasKey("Id");
 
+                    b.HasIndex("MessageType");
+
                     b.HasIndex("WebhookEventId")
                         .IsUnique();
 
@@ -272,6 +274,9 @@ namespace MessageService.Data.Migrations.SqlServer
                         .HasColumnType("bigint");
 
                     SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<long>("Id"));
+
+                    b.Property<DateTimeOffset?>("ClaimedAt")
+                        .HasColumnType("datetimeoffset");
 
                     b.Property<DateTimeOffset?>("CompletedAt")
                         .HasColumnType("datetimeoffset");
