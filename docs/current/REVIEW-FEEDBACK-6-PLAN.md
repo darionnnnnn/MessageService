@@ -133,5 +133,36 @@
 - 每作業獨立 commit，可逐一 revert。
 
 ## 7. 執行紀錄
+
+基準：dev@da56cde，692 測試綠。最終：717 綠、build 零警告。
+
 | 作業-階段 | 執行者 | 結果 | 驗收 | 落差與處置 |
 |---|---|---|---|---|
+| A-1 DbContentWorkSource | agy | 完成 | 701 綠 | agy 把 `ILogger` 改成 optional + NullLogger 以迴避測試 DI，違反全專案「必填」慣例；Claude 改回必填、測試端補 `AddLogging()`。另補回被刪掉的 `FailedAttempts=0` 原因註解、log 訊息改繁中 |
+| D-1 模型與 DbContext | agy | 完成 | build 零警告，測試 251 紅（migration 未加，預期內） | 無 |
+| D-2 兩 provider migration | agy | 完成 | migration 四支測試綠，其餘 72 紅皆為 raw SQL 未改（預期內） | agy 逾時中斷未回報摘要，以 git diff 與自跑測試驗收。`LegacySqliteBaselinerTests` 5 紅不屬預期類別：測試用「現行 schema 砍欄位」模擬舊版庫，新表與已移除欄位要同步維護；Claude 補上三張新表的 DROP，agy 後續再補 `ADD COLUMN Content BLOB`（更貼近真實舊庫） |
+| D-3 raw SQL 改接 | agy | 完成 | 704 綠 | 無。順手收掉一句冗贅註解 |
+| D-4 測試 seed | — | 隨 D-1 完成 | grep 無 `PictureContent =` 殘留 | 無 |
+| B-1 熱路徑收斂 | agy | 完成 | 710 綠 | `TrackAsync` 的 Attach 空殼會留在 change tracker，Claude 補註解記錄「同一 DbContext 之後不可讀 Group 其他欄位」的約束 |
+| E 體檢 | Claude | 完成 | 見下 | 揪出一項真漏網（見 §8） |
+| E-修正 頭貼 upsert | agy | 完成 | 717 綠 | agy 把 `ApplyPicture` 拆散成 4 份重複程式碼，Claude 收斂回 `UpsertPictureRow` + `ApplyPictureMetadata` 兩個 helper |
+| C 文件 | Claude | 完成 | — | README／ENCRYPTION／DEPLOYMENT-GUIDE／LINE-BOT-SETUP／CLAUDE.md |
+
+## 8. 體檢輪發現
+
+| 項目 | 判定 |
+|---|---|
+| `DbProfileStore` 的 upsert 仍 `Include(... .Picture)` | **真漏網，已修**。這是本輪拆表唯一漏掉的整份載入點，而且無條件執行——即使這次不換頭貼（`PictureBytes == null`）也照樣把舊圖整份撈進記憶體，`ProfileRefreshService` 每次刷新都走一次 |
+| CASCADE 鏈（Blob → MessageContents → GroupMessages） | 兩 provider 皆完整，保留期清除的 `ExecuteDelete` 靠它帶走 blob |
+| 兩份 ModelSnapshot、SqlServer script | 與 migration 一致，Up 順序正確、只搬非 NULL、Down 對稱 |
+| `TrackAsync` 空殼被 `DbProfileStore` 撿到的風險 | 目前無任何呼叫路徑會在同一 `DbContext` 內交會；即使發生也不會寫錯資料（被寫的欄位都明確覆寫）。屬設計脆弱點而非缺陷，已用註解與 `CLAUDE.md` 規則釘住 |
+| `AvatarsController` 解密時 2× 記憶體峰值 | 不處理。頭貼上限 2MB，且常態路徑已被 304 短路 |
+| 死程式碼 | 無殘留（`EncryptPictureContent`、`PictureBytes` 都仍在用） |
+
+## 9. 待人工驗收
+
+- SQL Server 的 `SplitBlobTables` migration **沒有在真實 SQL Server 上跑過**（本機無實例）。
+  已產生 script 供人工核對，內容與 Sqlite 版同構、與 EF 產生的 Up 一致。
+  正式環境升級前請先在測試庫跑一次，並依 `docs/DEPLOYMENT-GUIDE.md` 的兩倍空間與
+  空間回收提醒安排維護時段。
+- 本輪只在 SQLite 上驗證過 `SqliteBlob` 對新表的 rowid 存取。

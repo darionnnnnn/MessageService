@@ -176,6 +176,20 @@ dotnet ef database update --project MessageService.Data --context SqlServerMessa
 SQLite 環境不受影響——既有檔案由 `LegacySqliteBaseliner` 一次性橋接到 baseline，
 之後跟全新 SQLite migrations 走同一條路，沒有 `ALTER COLUMN` 鎖表的問題。
 
+#### `SplitBlobTables` 這一次的額外注意事項
+
+這個 migration 把三個 blob 欄位（`MessageContents.Content`、`Groups.PictureContent`、
+`GroupMembers.PictureContent`）搬到 `MessageContentBlobs`／`GroupPictures`／`GroupMemberPictures`
+三張新表，做法是「建表 → `INSERT … SELECT` 整批複製 → 刪掉舊欄位」，包在單一交易裡。
+所以除了上面五個步驟以外還要留意：
+
+- **資料庫在升級當下需要約兩倍的 blob 空間**（舊欄位刪除前，同一份內容在新舊兩處各存一份），
+  交易紀錄檔的用量也對應放大。空間估算一樣用 `SUM(DATALENGTH(Content))`。
+- **升級完成後空間不會自己回收**：刪掉的舊欄位留下的是可重用的空頁。要真的把檔案縮小，
+  SQL Server 端在確認服務正常後另外安排 `DBCC SHRINKFILE`（會造成索引碎片，記得之後重建），
+  SQLite 端跑一次 `VACUUM`。兩者都建議排在維護時段而不是升級當下。
+- 全新部署不受影響：新表從一開始就是空的，migration 的搬遷步驟不搬任何列。
+
 ### 既有 SQLite 環境升級到新的預設資料庫路徑
 
 **這一節只適用於「按舊版樣板部署過」的既有環境**——舊版樣板把 `messages.db`／`outbox.db`
