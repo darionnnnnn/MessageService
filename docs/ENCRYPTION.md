@@ -103,7 +103,7 @@ $bytes = New-Object byte[] 32
 
 ## 內容 blob：分塊加密，保留 Range 拖進度能力
 
-`MessageContents.Content` 不能像文字欄位那樣整值加密——影片／語音要支援瀏覽器的 Range
+`MessageContentBlobs.Content` 不能像文字欄位那樣整值加密——影片／語音要支援瀏覽器的 Range
 請求（拖進度），解密必須能只處理使用者實際要的那一小段位元組，不能每次都把整個檔案
 解密一遍。格式（`MSE2`，帶 key id）：
 
