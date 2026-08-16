@@ -1,4 +1,4 @@
-using System.Net;
+﻿using System.Net;
 using System.Net.Http.Json;
 using MessageService.Services;
 using MessageService.Tests.TestSupport;
@@ -27,11 +27,25 @@ public class ApiContentWorkSourceTests
             Content = JsonContent.Create(new long[] { 3, 7 })
         });
 
-        var ids = await source.GetPendingIdsAsync(CancellationToken.None);
+        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, CancellationToken.None);
 
         Assert.Equal([3, 7], ids);
-        Assert.Equal("https://db-host.example/api/ingest/content-work", handler.LastRequest!.RequestUri!.ToString());
+        Assert.Equal("https://db-host.example/api/ingest/content-work?reclaimDownloading=true", handler.LastRequest!.RequestUri!.ToString());
         Assert.Equal("ingest", Assert.Single(factory.RequestedClientNames)); // 小型 JSON 走短 timeout 的 client
+    }
+
+    [Fact]
+    public async Task GetPendingIdsAsync_PeriodicRequeue_SendsReclaimDownloadingFalse()
+    {
+        // 週期重掃時 Edge 端的 worker 正在跑，必須明確告訴 Core 端不要撿回 Downloading
+        var (source, handler, _) = Create(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = JsonContent.Create(Array.Empty<long>())
+        });
+
+        await source.GetPendingIdsAsync(reclaimDownloading: false, CancellationToken.None);
+
+        Assert.EndsWith("content-work?reclaimDownloading=false", handler.LastRequest!.RequestUri!.ToString());
     }
 
     [Fact]

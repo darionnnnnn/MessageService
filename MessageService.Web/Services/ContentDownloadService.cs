@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using MessageService.Options;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
@@ -15,6 +15,9 @@ public class ContentDownloadService(
 {
     private readonly ContentDownloadOptions _options = options.Value;
 
+    /// <summary>週期重掃間隔的封頂值（24 天），略低於 Task.Delay 能接受的最大值。</summary>
+    private const int MaxRequeueIntervalMinutes = 24 * 24 * 60;
+
     /// <summary>每個 messageContentId 目前查了幾次轉檔狀態——單例服務的生命週期內有效，行程
     /// 重啟會歸零，等同重新給滿額度：重啟後或週期重掃時由 RequeuePendingAsync 撈回，語意跟現狀一致，
     /// 不需要跨重啟持久化。查詢達到 Succeeded／Failed 或門檻上限時務必移除，防止洩漏。</summary>
@@ -27,7 +30,8 @@ public class ContentDownloadService(
         // 漏掉的 Pending 會在下次服務重啟或週期重掃時再被撈回
         try
         {
-            await RequeuePendingAsync(stoppingToken);
+            // 啟動時還沒有任何 worker 在跑，Downloading 一律是上次行程留下的孤兒，連它一起撿回
+            await RequeuePendingAsync(reclaimDownloading: true, stoppingToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -46,7 +50,10 @@ public class ContentDownloadService(
 
         if (_options.RequeueIntervalMinutes > 0)
         {
-            tasks.Add(RunPeriodicRequeueAsync(TimeSpan.FromMinutes(_options.RequeueIntervalMinutes), stoppingToken));
+            // Task.Delay 的上限約 24.8 天，設定值再大就直接封頂——設錯不該讓整個 host 因
+            // ArgumentOutOfRangeException 停掉（BackgroundServiceExceptionBehavior.StopHost）
+            var interval = TimeSpan.FromMinutes(Math.Min(_options.RequeueIntervalMinutes, MaxRequeueIntervalMinutes));
+            tasks.Add(RunPeriodicRequeueAsync(interval, stoppingToken));
         }
 
         await Task.WhenAll(tasks);
@@ -91,12 +98,14 @@ public class ContentDownloadService(
         }
     }
 
-    public async Task RequeuePendingAsync(CancellationToken cancellationToken)
+    /// <summary>把工作來源裡待處理的內容重新入列。<paramref name="reclaimDownloading"/> 的語意見
+    /// IContentWorkSource.GetPendingIdsAsync：只有啟動接續可以傳 true。</summary>
+    public async Task RequeuePendingAsync(bool reclaimDownloading, CancellationToken cancellationToken)
     {
         using var scope = scopeFactory.CreateScope();
         var workSource = scope.ServiceProvider.GetRequiredService<IContentWorkSource>();
 
-        var pendingIds = await workSource.GetPendingIdsAsync(cancellationToken);
+        var pendingIds = await workSource.GetPendingIdsAsync(reclaimDownloading, cancellationToken);
         foreach (var contentId in pendingIds)
         {
             queue.Enqueue(contentId);
@@ -108,7 +117,8 @@ public class ContentDownloadService(
         }
     }
 
-    /// <summary>週期性重掃資料來源中的待處理項目並重新入列。
+    /// <summary>週期性重掃資料來源中的 Pending／可重試 Failed 並重新入列（不碰 Downloading，
+    /// 見 IContentWorkSource.GetPendingIdsAsync 的說明）。
     /// 重複入列是安全的：DbContentWorkSource.CompleteAsync 等下游有認領檢查（認領到 0 筆就跳過），
     /// 重複丟同一筆不會重複下載。
     /// 這條迴圈是「本機不下載、由另一台主機下載」的拆機部署下（例如 Core 補出資料但由 Edge 下載，
@@ -133,7 +143,8 @@ public class ContentDownloadService(
 
             try
             {
-                await RequeuePendingAsync(cancellationToken);
+                // worker 正在跑，Downloading 是真的在下載中，絕不能撿——只撈 Pending 與可重試的 Failed
+                await RequeuePendingAsync(reclaimDownloading: false, cancellationToken);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {

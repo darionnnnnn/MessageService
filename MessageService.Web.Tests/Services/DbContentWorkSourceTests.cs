@@ -1,4 +1,4 @@
-using MessageService.Data;
+﻿using MessageService.Data;
 using MessageService.Data.Crypto;
 using MessageService.Models;
 using MessageService.Options;
@@ -79,7 +79,7 @@ public class DbContentWorkSourceTests : IDisposable
         var (dbContext, contentId) = await SeedFailedContentAsync(DateTimeOffset.UtcNow.AddDays(-1), failedAttempts: 1);
         var source = CreateSource(dbContext, new ContentDownloadOptions { FailedRetryWindowDays = 7, MaxFailedRetries = 10 });
 
-        var ids = await source.GetPendingIdsAsync(CancellationToken.None);
+        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, CancellationToken.None);
 
         Assert.Equal(contentId, Assert.Single(ids));
         // AsNoTracking 是必要的：狀態是用 ExecuteUpdateAsync 直接下 SQL 改的（刻意不載入實體，
@@ -97,7 +97,7 @@ public class DbContentWorkSourceTests : IDisposable
         var (dbContext, contentId) = await SeedFailedContentAsync(DateTimeOffset.UtcNow.AddDays(-10), failedAttempts: 1);
         var source = CreateSource(dbContext, new ContentDownloadOptions { FailedRetryWindowDays = 7, MaxFailedRetries = 10 });
 
-        var ids = await source.GetPendingIdsAsync(CancellationToken.None);
+        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, CancellationToken.None);
 
         Assert.Empty(ids);
         var reloaded = await dbContext.MessageContents.SingleAsync(c => c.Id == contentId);
@@ -110,7 +110,7 @@ public class DbContentWorkSourceTests : IDisposable
         var (dbContext, contentId) = await SeedFailedContentAsync(DateTimeOffset.UtcNow.AddDays(-1), failedAttempts: 10);
         var source = CreateSource(dbContext, new ContentDownloadOptions { FailedRetryWindowDays = 7, MaxFailedRetries = 10 });
 
-        var ids = await source.GetPendingIdsAsync(CancellationToken.None);
+        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, CancellationToken.None);
 
         Assert.Empty(ids);
         var reloaded = await dbContext.MessageContents.SingleAsync(c => c.Id == contentId);
@@ -132,7 +132,7 @@ public class DbContentWorkSourceTests : IDisposable
         await dbContext.SaveChangesAsync();
         var source = CreateSource(dbContext);
 
-        var ids = await source.GetPendingIdsAsync(CancellationToken.None);
+        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, CancellationToken.None);
 
         Assert.Equal(groupMessage.Content!.Id, Assert.Single(ids));
     }
@@ -302,11 +302,41 @@ public class DbContentWorkSourceTests : IDisposable
         await dbContext.SaveChangesAsync();
         var source = CreateSource(dbContext);
 
-        var ids = await source.GetPendingIdsAsync(CancellationToken.None);
+        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, CancellationToken.None);
 
         Assert.Equal(groupMessage.Content!.Id, Assert.Single(ids));
         var reloaded = await dbContext.MessageContents.AsNoTracking().SingleAsync(c => c.Id == groupMessage.Content.Id);
         Assert.Equal(DownloadStatus.Pending, reloaded.DownloadStatus);
+    }
+
+    [Fact]
+    public async Task GetPendingIdsAsync_WithoutReclaim_LeavesDownloadingUntouched()
+    {
+        // 週期重掃時 worker 活著、Downloading 是真的在下載中：不能撈、也不能改回 Pending，
+        // 否則另一個 worker 會再度認領同一顆 blob（CompleteAsync 的認領互斥就是為了擋這個）
+        using var scope = _provider.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+        var downloading = new GroupMessage
+        {
+            WebhookEventId = "e1", LineMessageId = "m1", GroupId = "G1", MessageType = "image",
+            EventTimestamp = DateTimeOffset.UtcNow, ReceivedAt = DateTimeOffset.UtcNow,
+            Content = new MessageContent { DownloadStatus = DownloadStatus.Downloading }
+        };
+        var pending = new GroupMessage
+        {
+            WebhookEventId = "e2", LineMessageId = "m2", GroupId = "G1", MessageType = "image",
+            EventTimestamp = DateTimeOffset.UtcNow, ReceivedAt = DateTimeOffset.UtcNow,
+            Content = new MessageContent { DownloadStatus = DownloadStatus.Pending }
+        };
+        dbContext.GroupMessages.AddRange(downloading, pending);
+        await dbContext.SaveChangesAsync();
+        var source = CreateSource(dbContext);
+
+        var ids = await source.GetPendingIdsAsync(reclaimDownloading: false, CancellationToken.None);
+
+        Assert.Equal(pending.Content!.Id, Assert.Single(ids));
+        var reloaded = await dbContext.MessageContents.AsNoTracking().SingleAsync(c => c.Id == downloading.Content!.Id);
+        Assert.Equal(DownloadStatus.Downloading, reloaded.DownloadStatus);
     }
 
     [Fact]

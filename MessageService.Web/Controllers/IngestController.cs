@@ -1,4 +1,4 @@
-using MessageService.Options;
+﻿using MessageService.Options;
 using MessageService.Services;
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Mvc;
@@ -102,9 +102,12 @@ public class IngestController(
 
     // === 媒體下載（Line:OutboundHere=true 時，Line 端的 ApiContentWorkSource 打這幾支） ===
 
+    // reclaimDownloading 預設 true 是為了相容還沒帶這個參數的舊版 Edge：舊版只在啟動時打這支，
+    // 那時撿回 Downloading 是對的。新版 Edge 的週期重掃會明確帶 false。
     [HttpGet("content-work")]
-    public async Task<ActionResult<IReadOnlyList<long>>> GetContentWork(CancellationToken cancellationToken) =>
-        Ok(await contentWorkSource.GetPendingIdsAsync(cancellationToken));
+    public async Task<ActionResult<IReadOnlyList<long>>> GetContentWork(
+        [FromQuery] bool reclaimDownloading = true, CancellationToken cancellationToken = default) =>
+        Ok(await contentWorkSource.GetPendingIdsAsync(reclaimDownloading, cancellationToken));
 
     [HttpGet("content-work/{id:long}")]
     public async Task<ActionResult<ContentWorkItem>> GetContentWorkItem(long id, CancellationToken cancellationToken)

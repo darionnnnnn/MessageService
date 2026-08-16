@@ -107,4 +107,15 @@
 | D | Claude | `GET /api/groups` 與 `GroupDto.UnreadCount` 註解改寫（點名 settings.js 是真實呼叫端、側欄用 POST /list） | build 綠 | 未移除端點——審查建議移除，但設定頁實際在用 |
 | E | Claude | README 補 `ContentDownload:RequeueIntervalMinutes`；DEPLOYMENT-MODES 已知限制改為「最多延遲一個重掃週期」；`DbContentWorkSource` 過時註解同步 | 689 綠 | 無 |
 
+### 體檢輪（獨立審查整批 diff）
+
+| 嚴重度 | 發現 | 處置 |
+|---|---|---|
+| 高 | 週期重掃沿用 `GetPendingIdsAsync` 會把 `Downloading` 無條件打回 `Pending`——啟動時前提是「沒有 worker 活著」，週期時 worker 正在下載大檔（最長 10 分鐘），被打回後另一 worker 再度認領，兩邊同時寫同一顆 blob，正是 `CompleteAsync` 認領互斥要擋的情境；Edge 拓撲經 ingest API 同樣中招。**規劃 A 時漏掉的交互，A-1 的測試也抓不到。** | `IContentWorkSource.GetPendingIdsAsync` 加 `reclaimDownloading`：啟動 `true`（舊行為）、週期 `false`（只撈 Pending＋可重試 Failed）；ingest API 以 query 帶過去、預設 `true` 相容舊版 Edge。行程活著時下載失敗本就由 `RevertClaimAsync` 改回 Pending，所以週期不碰 Downloading 幾乎不損失回收能力。補 4 筆測試（Db 來源不動 Downloading、迴圈一律傳 false、啟動傳 true、API 帶參數）。文件同步：README／DEPLOYMENT-MODES 已知限制與升級順序 |
+| 低 | `RequeueIntervalMinutes` 設到 >24.8 天會讓 `Task.Delay` 拋 `ArgumentOutOfRange` 冒出 `ExecuteAsync` → StopHost | 封頂 24 天 |
+| 中（不改） | 第 1 路採用他人寫入的列後本地計數用 `Math.Max` 遞增，同批下一人可能多一次撞名重試才拿到號 | 最終正確（唯一索引＋重試兜底），代價是多一次 INSERT，不值得再查一次 |
+| 中（不改） | migration 修補後綴「X (2)」若與既有資料撞會讓建索引失敗、啟動炸 | 專案沒有任何路徑會產生「X (n)」格式（服務端是「X n」、無 UI 可編輯 Label），實務不可能 |
+
+體檢後：692 綠、build 0 警告。
+
 待人工驗收：SqlServer 的 migration 只跑過模型一致性測試，實機部署前先 `dotnet ef migrations script -c SqlServerMessageDbContext` 確認修補 SQL 與 `nvarchar(450)` 轉型在真實資料上沒問題。

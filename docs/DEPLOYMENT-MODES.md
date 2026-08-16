@@ -130,7 +130,10 @@ Edge 端排空 outbox 時預設一次 HTTP 請求送整批（`Outbox:BatchSize` 
 
 **升級順序：先升 Core 再升 Edge。** Edge 打到還沒升級、沒有 `/api/ingest/events-batch`
 這支端點的舊版 Core 時會收到 404，自動退回逐筆模式（每次都照樣先試批次端點，Core 升級後
-不用重啟 Edge 就會自動改用批次），只記一次警告 log 避免過渡期洗版。
+不用重啟 Edge 就會自動改用批次），只記一次警告 log 避免過渡期洗版。同一條順序也適用於
+`content-work` 端點的 `reclaimDownloading` 參數：舊版 Core 會忽略它、一律撿回 `Downloading`，
+新版 Edge 的週期重掃打到舊版 Core 就會把正在下載中的項目打回 `Pending`；舊版 Edge 打新版
+Core 則沒有問題（參數預設值就是舊行為）。
 
 ## 設定
 
@@ -155,9 +158,11 @@ Edge 端排空 outbox 時預設一次 HTTP 請求送整批（`Outbox:BatchSize` 
   `Core + OutboundHere=false` 記一則說明性 log 指出線索在 Edge 端，但最終仍只能靠
   部署檢查表把關。
 - **待下載內容的回收最多延遲一個重掃週期**：`ContentDownloadService` 除了啟動時掃一次，
-  之後每隔 `ContentDownload:RequeueIntervalMinutes`（預設 15 分鐘）重掃一次。所以
-  worker 崩潰後卡在 `Downloading` 的項目、以及 Core 端補出但由 Edge 端下載的 `Pending`
-  項目，最壞情況要等一個週期才會被撿回。把間隔設為 0 會退回「只在啟動時掃一次」。
+  之後每隔 `ContentDownload:RequeueIntervalMinutes`（預設 15 分鐘）重掃一次 `Pending` 與
+  仍可重試的 `Failed`。Core 端補出但由 Edge 端下載的 `Pending` 項目最壞要等一個週期才會被撿回。
+  週期重掃**不碰 `Downloading`**（那時 worker 活著，`Downloading` 是真的在下載中；行程活著時
+  下載失敗會自己改回 `Pending`），所以「行程被殺、狀態停在 `Downloading`」的孤兒仍只在
+  下一次啟動時撿回。把間隔設為 0 會退回「只在啟動時掃一次」。
 - **outbox 批次排空的吞吐量提升沒有正式量測**：Edge→Core 的 round-trip 從逐筆改成整批，
   理論上吞吐量會明顯提升，但目前只有功能面的等價性測試，沒有實際負載下的量測數據。
 - **遮蔽規則快取在拆機部署下有最長 30 秒的漂移窗口**：`MaskingService` 把遮蔽設定與規則

@@ -22,19 +22,22 @@ public class DbContentWorkSource(MessageDbContext dbContext, IOptions<ContentDow
     private const int BufferSize = 81920;
     private readonly ContentDownloadOptions _options = options.Value;
 
-    public async Task<IReadOnlyList<long>> GetPendingIdsAsync(CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<long>> GetPendingIdsAsync(bool reclaimDownloading, CancellationToken cancellationToken)
     {
         // Downloading：上次行程被殺／當機時卡在「已認領但沒做完」的列，見 GetAsync 的認領邏輯
         // 與 DownloadStatus.Downloading 的說明。啟動接續沒辦法分辨「真的還在下載中」跟「已經
-        // 沒有 worker 在處理」，一律當成中斷、整批撿回改回 Pending 重跑。這條路徑除了啟動時跑一次，
-        // ContentDownloadService 每隔 ContentDownload:RequeueIntervalMinutes 也會再跑，所以
-        // 「worker 崩潰但行程沒重啟」最多延遲一個重掃週期就會被撿回
+        // 沒有 worker 在處理」，一律當成中斷、整批撿回改回 Pending 重跑——但這個「一律」只在
+        // 啟動時成立（reclaimDownloading=true）。ContentDownloadService 每隔
+        // ContentDownload:RequeueIntervalMinutes 的週期重掃走的是 reclaimDownloading=false：
+        // 那時 worker 活著、可能正在下載大檔，Downloading 是真的在下載，不能碰。行程活著時
+        // 下載中途失敗會由 CompleteAsync 的 RevertClaimAsync 自己改回 Pending，不會留孤兒。
         var pendingIds = await dbContext.MessageContents
-            .Where(c => c.DownloadStatus == DownloadStatus.Pending || c.DownloadStatus == DownloadStatus.Downloading)
+            .Where(c => c.DownloadStatus == DownloadStatus.Pending
+                || (reclaimDownloading && c.DownloadStatus == DownloadStatus.Downloading))
             .Select(c => c.Id)
             .ToListAsync(cancellationToken);
 
-        if (pendingIds.Count > 0)
+        if (reclaimDownloading && pendingIds.Count > 0)
         {
             await dbContext.MessageContents
                 .Where(c => pendingIds.Contains(c.Id) && c.DownloadStatus == DownloadStatus.Downloading)

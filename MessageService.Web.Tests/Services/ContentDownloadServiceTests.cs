@@ -1,4 +1,4 @@
-using MessageService.Data;
+﻿using MessageService.Data;
 using MessageService.Data.Crypto;
 using MessageService.Models;
 using MessageService.Options;
@@ -259,7 +259,7 @@ public class ContentDownloadServiceTests : IDisposable
             OptionsFactory.Create(new ContentDownloadOptions()),
             NullLogger<ContentDownloadService>.Instance);
 
-        await service.RequeuePendingAsync(CancellationToken.None);
+        await service.RequeuePendingAsync(reclaimDownloading: true, CancellationToken.None);
 
         Assert.Equal(contentId, Assert.Single(queue.Enqueued));
     }
@@ -280,7 +280,7 @@ public class ContentDownloadServiceTests : IDisposable
             OptionsFactory.Create(new ContentDownloadOptions()),
             NullLogger<ContentDownloadService>.Instance);
 
-        await service.RequeuePendingAsync(CancellationToken.None);
+        await service.RequeuePendingAsync(reclaimDownloading: true, CancellationToken.None);
 
         Assert.Equal(contentId, Assert.Single(queue.Enqueued));
         Assert.Equal(DownloadStatus.Pending, (await ReloadContentAsync(contentId)).DownloadStatus);
@@ -332,6 +332,8 @@ public class ContentDownloadServiceTests : IDisposable
         Assert.True(workSource.GetPendingIdsCallCount >= 2);
         Assert.Contains(10, queue.Enqueued);
         Assert.Contains(20, queue.Enqueued);
+        // 週期重掃一律不撿 Downloading（worker 正在跑）
+        Assert.All(workSource.ReclaimDownloadingCalls, reclaim => Assert.False(reclaim));
     }
 
     [Fact]
@@ -364,6 +366,8 @@ public class ContentDownloadServiceTests : IDisposable
             }
 
             Assert.Equal(1, workSource.GetPendingIdsCallCount);
+            // 啟動那次要撿回上次行程留下的 Downloading 孤兒
+            Assert.Equal([true], workSource.ReclaimDownloadingCalls);
 
             await Task.Delay(100);
 

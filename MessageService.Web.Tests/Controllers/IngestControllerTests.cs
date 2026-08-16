@@ -1,4 +1,4 @@
-using MessageService.Controllers;
+﻿using MessageService.Controllers;
 using MessageService.Options;
 using MessageService.Services;
 using MessageService.Tests.TestSupport;
@@ -207,10 +207,23 @@ public class IngestControllerTests
         var source = new FakeContentWorkSource { PendingIds = [1, 2, 3] };
         var controller = CreateController(contentWorkSource: source);
 
-        var result = await controller.GetContentWork(CancellationToken.None);
+        var result = await controller.GetContentWork(cancellationToken: CancellationToken.None);
 
         var ok = Assert.IsType<OkObjectResult>(result.Result);
         Assert.Equal(new long[] { 1, 2, 3 }, Assert.IsAssignableFrom<IReadOnlyList<long>>(ok.Value));
+        // 沒帶參數＝舊版 Edge 的啟動接續，預設要撿回 Downloading（維持舊行為）
+        Assert.Equal([true], source.ReclaimDownloadingCalls);
+    }
+
+    [Fact]
+    public async Task GetContentWork_PassesReclaimDownloadingFlagThrough()
+    {
+        var source = new FakeContentWorkSource();
+        var controller = CreateController(contentWorkSource: source);
+
+        await controller.GetContentWork(reclaimDownloading: false, CancellationToken.None);
+
+        Assert.Equal([false], source.ReclaimDownloadingCalls);
     }
 
     [Fact]
