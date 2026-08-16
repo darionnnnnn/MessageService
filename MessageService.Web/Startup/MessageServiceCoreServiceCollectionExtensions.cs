@@ -115,8 +115,8 @@ public static class MessageServiceCoreServiceCollectionExtensions
 
         // 直連資料庫（AllInOne／Core／Viewer）才需要的一切：主資料庫本身、把 outbox 落地用的
         // DirectIngestSink。媒體下載／頭貼快取的背景服務不在這裡——它們跟著 Line:OutboundHere 走
-        // （見下面）；保留期清除也不在這裡，它只在 capabilities.RunsRetention 為真時註冊（比
-        // HasDatabaseAccess 窄——三台拓撲下 Viewer 主機雖然直連資料庫，但不該跟 Core 搶著清同一張表）
+        // （見下面）；保留期清除與貼圖回填等維護背景服務也不在這裡，它們只在 capabilities.RunsRetention 為真時註冊（比
+        // HasDatabaseAccess 窄——貼圖回填與保留清除屬於維護工作，三台拓撲下只由 Core 負責，Viewer 純讀不回填，不該跟 Core 搶著清同一張表或回填貼圖）
         if (capabilities.HasDatabaseAccess)
         {
             // 用衍生類別（實作型別）而非 MessageDbContext 本身註冊，純粹是為了讓 EF migrations
@@ -138,12 +138,12 @@ public static class MessageServiceCoreServiceCollectionExtensions
             }
 
             builder.Services.AddScoped<IIngestSink, DirectIngestSink>();
-            builder.Services.AddHostedService<StickerContentBackfillService>();
         }
 
         if (capabilities.RunsRetention)
         {
             builder.Services.AddHostedService<RetentionCleanupService>();
+            builder.Services.AddHostedService<StickerContentBackfillService>();
         }
 
         // 檢視端專屬服務：都依賴 MessageDbContext，只在 ViewerEnabled 時註冊——Development 環境下

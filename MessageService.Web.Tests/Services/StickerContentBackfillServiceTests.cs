@@ -1,10 +1,16 @@
 using MessageService.Data;
 using MessageService.Models;
+using MessageService.Options;
+using MessageService.Services;
 using MessageService.Tests.TestSupport;
 using MessageService.Web.Services;
+using MessageService.Web.Startup;
+using Microsoft.AspNetCore.Builder;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace MessageService.Tests.Services;
@@ -114,5 +120,113 @@ public class StickerContentBackfillServiceTests : IDisposable
         // 內容列數量保持不變
         var contentCount = await db.MessageContents.CountAsync();
         Assert.Equal(1, contentCount);
+    }
+
+    [Fact]
+    public async Task RunBackfillAsync_WhenBatchThrowsDbUpdateException_ClearsChangeTracker_AdvancesCursor_AndContinuesToNextBatch()
+    {
+        using var connection = SqliteTestDatabase.CreateOpenConnection();
+        var interceptor = new FirstBatchDbUpdateExceptionInterceptor();
+        var services = new ServiceCollection();
+        services.AddDbContext<MessageDbContext>(o =>
+            o.UseSqlite(connection)
+             .AddInterceptors(interceptor));
+        using var provider = services.BuildServiceProvider();
+
+        using (var scope = provider.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+            db.Database.EnsureCreated();
+
+            // 建立 501 筆貼圖訊息：前 500 筆為第 1 批，第 501 筆為第 2 批
+            var messages = new List<GroupMessage>(501);
+            for (int i = 1; i <= 501; i++)
+            {
+                messages.Add(new GroupMessage
+                {
+                    WebhookEventId = $"evt_{i}",
+                    LineMessageId = $"msg_{i}",
+                    GroupId = "g1",
+                    MessageType = "sticker",
+                    StickerId = $"sticker_{i}",
+                    EventTimestamp = DateTimeOffset.UtcNow,
+                    ReceivedAt = DateTimeOffset.UtcNow
+                });
+            }
+            db.GroupMessages.AddRange(messages);
+            await db.SaveChangesAsync();
+        }
+
+        interceptor.Enabled = true;
+
+        var queue = new FakeContentDownloadQueue();
+        var service = new StickerContentBackfillService(
+            provider.GetRequiredService<IServiceScopeFactory>(),
+            queue,
+            NullLogger<StickerContentBackfillService>.Instance);
+
+        await service.RunBackfillAsync(CancellationToken.None);
+
+        using (var scope = provider.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+
+            // 第 1 批因撞鍵失敗，該批未成功寫入 Content
+            var reloadedMsg1 = await db.GroupMessages.Include(m => m.Content).SingleAsync(m => m.LineMessageId == "msg_1");
+            Assert.Null(reloadedMsg1.Content);
+
+            // 第 2 批成功執行，msg_501 成功取得 MessageContent
+            var reloadedMsg501 = await db.GroupMessages.Include(m => m.Content).SingleAsync(m => m.LineMessageId == "msg_501");
+            Assert.NotNull(reloadedMsg501.Content);
+            Assert.Equal(DownloadStatus.Pending, reloadedMsg501.Content.DownloadStatus);
+
+            // 只有第 2 批成功的 Content Id 會被丟進下載佇列
+            Assert.Single(queue.Enqueued);
+            Assert.Equal(reloadedMsg501.Content.Id, queue.Enqueued.Single());
+        }
+    }
+
+    [Theory]
+    [InlineData(DeploymentMode.Viewer, false)]
+    [InlineData(DeploymentMode.Core, true)]
+    [InlineData(DeploymentMode.AllInOne, true)]
+    [InlineData(DeploymentMode.Edge, false)]
+    public void AddMessageServiceCore_RegistersStickerContentBackfillService_AccordingToDeploymentMode(
+        DeploymentMode mode, bool shouldBeRegistered)
+    {
+        var builder = WebApplication.CreateBuilder();
+        builder.Configuration["Database:Provider"] = "Sqlite";
+        builder.Configuration["ConnectionStrings:Sqlite"] = "Data Source=:memory:";
+        var ingestOptions = new IngestOptions { BaseUrl = "https://example.com" };
+        var capabilities = DeploymentCapabilities.Derive(mode, new LineOptions(), new ViewerOptions(), ingestOptions);
+
+        builder.AddMessageServiceCore(capabilities, mode, ingestOptions);
+
+        var isRegistered = builder.Services.Any(d =>
+            d.ServiceType == typeof(IHostedService) &&
+            d.ImplementationType == typeof(StickerContentBackfillService));
+
+        Assert.Equal(shouldBeRegistered, isRegistered);
+    }
+
+    private sealed class FirstBatchDbUpdateExceptionInterceptor : SaveChangesInterceptor
+    {
+        public bool Enabled { get; set; }
+        private int _callCount;
+
+        public override ValueTask<InterceptionResult<int>> SavingChangesAsync(
+            DbContextEventData eventData,
+            InterceptionResult<int> result,
+            CancellationToken cancellationToken = default)
+        {
+            if (Enabled && Interlocked.Increment(ref _callCount) == 1)
+            {
+                throw new DbUpdateException(
+                    "Simulated duplicate key collision on batch 1",
+                    new Exception("UNIQUE constraint failed: MessageContents.GroupMessageId"));
+            }
+
+            return base.SavingChangesAsync(eventData, result, cancellationToken);
+        }
     }
 }

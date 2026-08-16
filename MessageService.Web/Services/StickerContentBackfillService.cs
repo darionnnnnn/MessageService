@@ -65,24 +65,37 @@ public class StickerContentBackfillService(
                     };
                     m.Content = content;
                     createdContents.Add(content);
-                    totalCreated++;
-                    lastProcessedId = m.Id;
                 }
 
-                await dbContext.SaveChangesAsync(stoppingToken);
+                var batchLastId = messages[^1].Id;
 
-                // 存檔後 EF Core 會回填自增的主鍵 Id，在清空 ChangeTracker 前把 Id 入列到 IContentDownloadQueue。
-                // 註：在「本機不下載、由另一台主機下載」的拆機部署下，本機的佇列是 Null 實作，入列是無操作；
-                // 那種拓撲靠 ContentDownloadService 的週期重掃（設定項 RequeueIntervalMinutes）收回。
-                foreach (var content in createdContents)
+                try
                 {
-                    downloadQueue.Enqueue(content.Id);
-                }
+                    await dbContext.SaveChangesAsync(stoppingToken);
 
-                // 分批的意義是「同時間只有一批在記憶體裡」，但變更追蹤器會累積每一批的實體，
-                // 舊訊息可能有數萬則、跑上百批，不清掉的話記憶體與後續 SaveChanges 的
-                // DetectChanges 成本會隨批次數一路墊高。已經存檔完畢，清空是安全的
-                dbContext.ChangeTracker.Clear();
+                    totalCreated += createdContents.Count;
+                    lastProcessedId = batchLastId;
+
+                    // 存檔後 EF Core 會回填自增的主鍵 Id，在清空 ChangeTracker 前把 Id 入列到 IContentDownloadQueue。
+                    // 註：在「本機不下載、由另一台主機下載」的拆機部署下，本機的佇列是 Null 實作，入列是無操作；
+                    // 那種拓撲靠 ContentDownloadService 的週期重掃（設定項 RequeueIntervalMinutes）收回。
+                    foreach (var content in createdContents)
+                    {
+                        downloadQueue.Enqueue(content.Id);
+                    }
+
+                    // 分批的意義是「同時間只有一批在記憶體裡」，但變更追蹤器會累積每一批的實體，
+                    // 舊訊息可能有數萬則、跑上百批，不清掉的話記憶體與後續 SaveChanges 的
+                    // DetectChanges 成本會隨批次數一路墊高。已經存檔完畢，清空是安全的
+                    dbContext.ChangeTracker.Clear();
+                }
+                catch (DbUpdateException ex)
+                {
+                    // 撞鍵時（如另一台主機／行程已先補好同一批）清空追蹤器並略過該批，游標推至該批末尾繼續下一批
+                    dbContext.ChangeTracker.Clear();
+                    lastProcessedId = batchLastId;
+                    logger.LogInformation(ex, "Sticker content batch up to message ID {LastProcessedId} was already backfilled elsewhere, skipping batch.", lastProcessedId);
+                }
             }
 
             stopwatch.Stop();
