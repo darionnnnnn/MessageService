@@ -34,7 +34,7 @@ public static class MessageServiceDatabaseMigrationExtensions
             // 炸掉。具名 mutex（DatabaseMigrationMutex，跟啟動時的 SQL Server 探測共用同一把鎖）讓它們
             // 排隊而不是打架——Baseliner 必須也包在裡面（它的偵測→補齊不是原子操作，正是最需要排隊
             // 的那段）。單一實例的情況下這裡幾乎瞬間就能拿到鎖，沒有實際延遲。
-            DatabaseMigrationMutex.RunExclusive(
+            var migrated = DatabaseMigrationMutex.RunExclusive(
                 () =>
                 {
                     if (registration.DatabaseStartupDecision.EffectiveProvider == "Sqlite")
@@ -61,8 +61,19 @@ public static class MessageServiceDatabaseMigrationExtensions
                 },
                 onLockUnavailable: () => migrationLogger.LogWarning(
                     "無法取得跨行程 migration 鎖（Global\\MessageService.Migrate，通常是同機另一個應用程式" +
-                    "集區身分已建立過這個具名物件）——改為不加鎖執行 migration。單站台部署不受影響；" +
-                    "同機多站台情境請確認集區身分一致，或錯開兩者的啟動時間降低競爭視窗。"));
+                    "集區身分已建立過這個具名物件）——本次啟動跳過 migration，不做無鎖硬跑。"),
+                // 無鎖硬跑等於兩個站台同時對同一顆資料庫下 DDL（Baseliner 的偵測→補齊、
+                // Migrate() 建 __EFMigrationsHistory、資料搬遷都不是原子的），正是這把鎖要防的事；
+                // 寧可跳過，讓拿得到鎖的那個站台負責升級 schema。
+                runWithoutLock: false);
+
+            if (!migrated)
+            {
+                migrationLogger.LogWarning(
+                    "本次啟動未執行 schema migration。若這是唯一會 migrate 的站台，請確認同機各站台的" +
+                    "應用程式集區身分一致，或改由外部 dotnet ef database update 升級 schema；" +
+                    "三台拓撲建議只讓 Core 開 Database:AutoMigrate，Viewer 設為 false。");
+            }
         }
 
         if (capabilities.ReceivesWebhook)

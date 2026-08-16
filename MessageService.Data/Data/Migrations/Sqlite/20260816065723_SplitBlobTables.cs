@@ -1,3 +1,4 @@
+using MessageService.Data.Data.Migrations;
 using Microsoft.EntityFrameworkCore.Migrations;
 
 #nullable disable
@@ -65,22 +66,8 @@ namespace MessageService.Data.Data.Migrations.Sqlite
                         onDelete: ReferentialAction.Cascade);
                 });
 
-            migrationBuilder.Sql("""
-                INSERT INTO GroupPictures (GroupId, Content)
-                SELECT GroupId, PictureContent
-                FROM Groups
-                WHERE PictureContent IS NOT NULL;
-
-                INSERT INTO GroupMemberPictures (GroupId, UserId, Content)
-                SELECT GroupId, UserId, PictureContent
-                FROM GroupMembers
-                WHERE PictureContent IS NOT NULL;
-
-                INSERT INTO MessageContentBlobs (MessageContentId, Content)
-                SELECT Id, Content
-                FROM MessageContents
-                WHERE Content IS NOT NULL;
-                """);
+            // 搬遷 SQL 與可重跑（NOT EXISTS）的理由見 SplitBlobTablesDataMove
+            migrationBuilder.Sql(SplitBlobTablesDataMove.Sqlite);
 
             migrationBuilder.DropColumn(
                 name: "PictureContent",
