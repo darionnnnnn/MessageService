@@ -13,7 +13,7 @@ namespace MessageService.Web.Services;
 /// 不用 EF 把整個 blob 讀進記憶體。
 /// 在 SQLite 下，Range 請求不能使用 SQL 運算式 substr，因為 substr 屬於純量運算式，
 /// SQLite 必須先將整個 blob 欄位物化至記憶體後才能切片；因此 SQLite 改採 Microsoft.Data.Sqlite.SqliteBlob
-/// 原生增量讀取，以 Seek() 搭配區間複製只讀取實際需要的位元組，避免記憶體暴增。
+/// 原生增量讀取，以 Seek() 搭配區間複製只讀取實際需要的位元組，避免記憶體暴增。表頭讀取（判斷是否為密文的前 16 bytes）同樣走 SqliteBlob，不是只有 Range 切片。
 /// 而 SQL Server 的 SUBSTRING 原生即支援部分讀取，不會物化整份 blob，因此維持既有的 ADO.NET 串流查詢。
 /// 兩種 provider 都不會在單一連線內做 Seek，瀏覽器的拖曳進度條是透過發出新的 Range 請求來達成。
 ///
@@ -240,7 +240,7 @@ public class ContentStreamService(MessageDbContext dbContext, FieldCipher cipher
 
             await using var reader = await command.ExecuteReaderAsync(
                 CommandBehavior.SequentialAccess | CommandBehavior.SingleRow, cancellationToken);
-            if (await reader.ReadAsync(cancellationToken))
+            if (await reader.ReadAsync(cancellationToken) && !await reader.IsDBNullAsync(0, cancellationToken))
             {
                 await using var blobStream = reader.GetStream(0);
                 await blobStream.CopyToAsync(response.Body, BufferSize, cancellationToken);
@@ -428,16 +428,41 @@ public class ContentStreamService(MessageDbContext dbContext, FieldCipher cipher
             : "SELECT DATALENGTH(Content) FROM MessageContents WHERE Id = @id";
         AddParameter(command, "@id", messageContentId);
         var result = await command.ExecuteScalarAsync(cancellationToken);
-        return Convert.ToInt64(result);
+        return result is null or DBNull ? 0 : Convert.ToInt64(result);
     }
 
+    /// <summary>讀取 blob 前 ChunkedBlobCipher.HeaderSize（16 bytes）表頭，用以判斷是否為 MSE1／MSE2 密文格式。
+    /// 在 SQLite 下，每個 Range 請求都會呼叫此處；若使用 SQL 運算式 substr 會將整份 blob 物化至記憶體，
+    /// 抵銷 Range 切片路徑的優化，因此改採 SqliteBlob 原生增量讀取。
+    /// 而 SQL Server 的 SUBSTRING 原生即支援局部讀取且無物化問題，維持既有的 SQL 查詢。
+    /// 捕獲 SqliteException 是防禦性設計：當 Content 為 NULL 或資料列異常時，SqliteBlob 建構子會拋出
+    /// SqliteException，此處回傳空陣列退化為未加密內容處理，避免產生未處理的 500 例外。</summary>
     private static async Task<byte[]> ReadHeaderBytesAsync(
         DbConnection connection, bool isSqlite, long messageContentId, CancellationToken cancellationToken)
     {
+        if (isSqlite)
+        {
+            try
+            {
+                await using var blob = new SqliteBlob((SqliteConnection)connection, "MessageContents", "Content", messageContentId, readOnly: true);
+                var length = (int)Math.Min(ChunkedBlobCipher.HeaderSize, blob.Length);
+                if (length <= 0)
+                {
+                    return [];
+                }
+
+                var header = new byte[length];
+                await ReadExactlyAsync(blob, header, cancellationToken);
+                return header;
+            }
+            catch (SqliteException)
+            {
+                return [];
+            }
+        }
+
         await using var command = connection.CreateCommand();
-        command.CommandText = isSqlite
-            ? "SELECT substr(Content, 1, @length) FROM MessageContents WHERE Id = @id"
-            : "SELECT SUBSTRING(Content, 1, @length) FROM MessageContents WHERE Id = @id";
+        command.CommandText = "SELECT SUBSTRING(Content, 1, @length) FROM MessageContents WHERE Id = @id";
         AddParameter(command, "@id", messageContentId);
         AddParameter(command, "@length", ChunkedBlobCipher.HeaderSize);
         var result = await command.ExecuteScalarAsync(cancellationToken);

@@ -4,6 +4,7 @@ using MessageService.Middleware;
 using MessageService.Options;
 using MessageService.Services;
 using MessageService.Web.Middleware;
+using MessageService.Web.Services;
 using Microsoft.AspNetCore.HttpOverrides;
 
 namespace MessageService.Web.Startup;
@@ -144,6 +145,7 @@ public static class MessageServiceRequestPipelineExtensions
         // 就緒探針：依據部署模式的能力旗標決定檢查邏輯。
         // - 有資料庫能力時：從請求服務取得 MessageDbContext 並檢查資料庫連線能力，
         //   無法連線或發生例外時皆回傳 503 Service Unavailable，避免未處理例外變成 500。
+        //   探測結果快取 5 秒，監控輪詢間隔低於 5 秒也不會增加資料庫連線。
         // - 無資料庫能力時（Line／Edge 模式）：直接回傳 200 OK。該主機的就緒狀態本來就不依賴
         //   本機資料庫；若此時回傳 404，監控系統會把「該模式沒有資料庫概念」誤判成「服務故障」，
         //   統一回傳 200 才能讓監控用同一份設定涵蓋所有部署模式。
@@ -157,7 +159,9 @@ public static class MessageServiceRequestPipelineExtensions
             try
             {
                 var dbContext = context.RequestServices.GetRequiredService<MessageDbContext>();
-                var canConnect = await dbContext.Database.CanConnectAsync(cancellationToken);
+                var readinessCache = context.RequestServices.GetRequiredService<ReadinessCache>();
+                var canConnect = await readinessCache.IsReadyAsync(
+                    ct => dbContext.Database.CanConnectAsync(ct), cancellationToken);
                 return canConnect ? Results.Ok() : Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
             }
             catch

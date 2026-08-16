@@ -1,8 +1,10 @@
 namespace MessageService.Web.Dtos;
 
-/// <summary>搜尋回應。results 之外還要帶 limitedByEncryption，是因為加密啟用時候選集
-/// 在關鍵字比對前就被截斷成最新 300 則，使用者搜不到舊訊息時需要知道原因，
-/// 否則「找不到」跟「超出可搜尋範圍」在畫面上完全無法區分。</summary>
+/// <summary>搜尋回應。加密啟用時，密文無法以 SQL LIKE 比對，搜尋範圍受限於天數視窗與候選筆數上限。
+/// 將限制拆分為結構化的天數視窗（恆常限制）與是否達到候選上限（忙碌時才觸發），避免以單一布林旗標常態誤報，
+/// 讓使用者在內容真正被截斷時仍能獲得明確訊號。加密未啟用時 Limit 為 null。</summary>
 public record MessageSearchResponseDto(
     IReadOnlyList<MessageSearchResultDto> Results,
-    bool LimitedByEncryption);
+    SearchLimitDto? Limit);
+
+public record SearchLimitDto(int WindowDays, bool CandidateCapped);

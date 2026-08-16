@@ -1,5 +1,6 @@
 using System.Net.Http.Json;
 using MessageService.Models;
+using MessageService.Web.Controllers.Api;
 using MessageService.Web.Dtos;
 using MessageService.Web.Tests.TestSupport;
 using Microsoft.EntityFrameworkCore;
@@ -388,16 +389,16 @@ public class MessageSearchTests : IDisposable
     }
 
     [Fact]
-    public async Task Search_EncryptionDisabled_ReturnsLimitedByEncryptionFalse()
+    public async Task Search_EncryptionDisabled_ReturnsLimitNull()
     {
         var response = await _fixture.Client.GetFromJsonAsync<MessageSearchResponseDto>("/api/messages/search?q=測試");
 
         Assert.NotNull(response);
-        Assert.False(response.LimitedByEncryption);
+        Assert.Null(response.Limit);
     }
 
     [Fact]
-    public async Task Search_EncryptionEnabled_ReturnsLimitedByEncryptionTrue()
+    public async Task Search_EncryptionEnabled_ReturnsLimitWithWindowDaysAndCandidateCappedFalse()
     {
         var key = Convert.ToBase64String(Enumerable.Range(0, 32).Select(i => (byte)i).ToArray());
         using var encryptedFixture = new WebAppFactoryFixture(encryptionKey: key);
@@ -405,11 +406,13 @@ public class MessageSearchTests : IDisposable
         var response = await encryptedFixture.Client.GetFromJsonAsync<MessageSearchResponseDto>("/api/messages/search?q=測試");
 
         Assert.NotNull(response);
-        Assert.True(response.LimitedByEncryption);
+        Assert.NotNull(response.Limit);
+        Assert.Equal(14, response.Limit.WindowDays);
+        Assert.False(response.Limit.CandidateCapped);
     }
 
     [Fact]
-    public async Task Search_EmptyQuery_EncryptionEnabled_ReturnsLimitedByEncryptionTrue()
+    public async Task Search_EmptyQuery_EncryptionEnabled_ReturnsLimitWithCandidateCappedFalseAndEmptyResults()
     {
         var key = Convert.ToBase64String(Enumerable.Range(0, 32).Select(i => (byte)i).ToArray());
         using var encryptedFixture = new WebAppFactoryFixture(encryptionKey: key);
@@ -417,7 +420,33 @@ public class MessageSearchTests : IDisposable
         var response = await encryptedFixture.Client.GetFromJsonAsync<MessageSearchResponseDto>("/api/messages/search?q=");
 
         Assert.NotNull(response);
-        Assert.True(response.LimitedByEncryption);
+        Assert.NotNull(response.Limit);
+        Assert.Equal(14, response.Limit.WindowDays);
+        Assert.False(response.Limit.CandidateCapped);
         Assert.Empty(response.Results);
+    }
+
+    [Fact]
+    public async Task Search_EncryptionEnabled_CandidateCountExceedsLimit_ReturnsCandidateCappedTrue()
+    {
+        var key = Convert.ToBase64String(Enumerable.Range(0, 32).Select(i => (byte)i).ToArray());
+        using var encryptedFixture = new WebAppFactoryFixture(encryptionKey: key);
+
+        var now = DateTimeOffset.UtcNow;
+        var count = MessagesController.SearchCandidateLimit + 1;
+        await encryptedFixture.SeedAsync(async dbContext =>
+        {
+            for (var i = 0; i < count; i++)
+            {
+                dbContext.GroupMessages.Add(TextMessage($"e{i}", "G1", "U1", now.AddMinutes(i), $"測試訊息 {i}"));
+            }
+            await Task.CompletedTask;
+        });
+
+        var response = await encryptedFixture.Client.GetFromJsonAsync<MessageSearchResponseDto>("/api/messages/search?q=測試");
+
+        Assert.NotNull(response);
+        Assert.NotNull(response.Limit);
+        Assert.True(response.Limit.CandidateCapped);
     }
 }

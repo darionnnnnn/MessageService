@@ -67,6 +67,9 @@
         // 從搜尋結果跳轉到歷史上下文時為 true：pollNewer 暫停把新訊息接到視窗尾端
         // （避免時間軸斷層），使用者要點「回到最新」整個重置回即時畫面才會恢復
         historicalView: false,
+        noMoreNewer: false,
+        // latch 生效當下該群組的 lastMessageId，用來判斷「是否有新訊息進來」
+        noMoreNewerAt: null,
         searchScope: 'group',
         // 跟 requestToken 分開算——切群組不該讓正在飛的搜尋請求作廢，反之亦然
         searchRequestToken: 0
@@ -181,7 +184,7 @@
         const notice = document.createElement('div');
         notice.className = 'truncated-notice';
         const span = document.createElement('span');
-        span.textContent = `此區間訊息過多，僅顯示最近 ${MESSAGE_WINDOW_LIMIT} 則`;
+        span.textContent = `此區間訊息過多，先顯示最近 ${MESSAGE_WINDOW_LIMIT} 則，可繼續往前載入`;
         notice.appendChild(span);
         return notice;
     }
@@ -489,6 +492,12 @@
 
     function prependMessages(messages) {
         const list = els.messageList;
+        // 截斷提示只屬於「目前視窗的最頂端」；往前加載之後它就不再是最頂端了，先摘掉。
+        // 不摘的話 notice 會被壓在新插入的舊訊息下面（語意變成對話中間有缺口），
+        // 而且下面用 firstChild.dataset.dateKey 做的日期分隔線去重會因為 notice 沒有
+        // dateKey 而整段失效，接縫處會冒出兩條同一天的分隔線。
+        list.querySelector(':scope > .truncated-notice')?.remove();
+
         const previousScrollHeight = list.scrollHeight;
         const previousScrollTop = list.scrollTop;
         // 銜接處判斷用：往前加載的這批訊息接上既有清單頂端時，如果兩邊同一天，
@@ -768,16 +777,20 @@
         if (token !== state.searchRequestToken) {
             return;
         }
-        renderSearchResults(response.results, response.limitedByEncryption, query);
+        renderSearchResults(response.results, response.limit, query);
     }
 
-    function renderSearchResults(results, limitedByEncryption, query) {
+    function renderSearchResults(results, limit, query) {
         els.searchResults.innerHTML = '';
 
-        if (limitedByEncryption) {
+        if (limit) {
             const notice = document.createElement('div');
             notice.className = 'search-encryption-notice';
-            notice.textContent = `訊息內容已加密，僅能搜尋最近 ${SEARCH_CANDIDATE_LIMIT} 則文字訊息。要找更早的內容，請指定單一群組縮小範圍。`;
+            let message = `訊息內容已加密，僅搜尋最近 ${limit.windowDays} 天的文字訊息。`;
+            if (limit.candidateCapped) {
+                message += `已達 ${SEARCH_CANDIDATE_LIMIT} 則候選上限，可指定單一群組縮小範圍。`;
+            }
+            notice.textContent = message;
             els.searchResults.appendChild(notice);
         }
 
@@ -845,6 +858,8 @@
         state.windowNewestId = null;
         state.hasMoreOlder = false;
         state.historicalView = true;
+        state.noMoreNewer = false;
+        state.noMoreNewerAt = null;
         updateHistoricalBanner();
         updateLoadNewerButton();
         setFollowing(true);
@@ -888,7 +903,11 @@
     // === 資料載入 ===
 
     async function loadGroups() {
-        const groups = await fetchJson('api/groups' + readQuerySuffix());
+        const groups = await fetchJson('api/groups/list', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(readRequestBody())
+        });
         state.groups = groups;
         seedReadStateForNewGroups(groups);
         renderGroupList(els.groupSearch.value);
@@ -908,8 +927,23 @@
         }
         state.groupsPolling = true;
         try {
-            const groups = await fetchJson('api/groups' + readQuerySuffix());
+            const groups = await fetchJson('api/groups/list', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(readRequestBody())
+            });
             state.groups = groups;
+            // 側欄每 10 秒更新一次；latch 生效後只要該群組的 lastMessageId 真的變了（有新訊息，
+            // 或後端把漂移的值修正回來），就解除 latch 讓「載入更新」重新可用。比對的是「值有沒有變」
+            // 而不是「有沒有大於 windowNewestId」——漂移情境下後者恆為真，latch 會每 10 秒被解除一次
+            // 而失去意義。
+            if (state.noMoreNewer) {
+                const currentGroup = groups.find(g => g.groupId === state.groupId);
+                if (currentGroup && currentGroup.lastMessageId !== state.noMoreNewerAt) {
+                    state.noMoreNewer = false;
+                    state.noMoreNewerAt = null;
+                }
+            }
             seedReadStateForNewGroups(groups);
 
             const previousScrollTop = els.groupList.scrollTop;
@@ -947,6 +981,8 @@
         state.daysWindow = INITIAL_DAYS;
         state.hasMoreOlder = false;
         state.historicalView = false;
+        state.noMoreNewer = false;
+        state.noMoreNewerAt = null;
         updateHistoricalBanner();
         updateLoadNewerButton();
         setFollowing(true);
@@ -1048,6 +1084,9 @@
                 renderWindow(page);
             } else {
                 if (page.messages.length > 0) {
+                    // 這裡不依 page.truncated 重新插入 .truncated-notice 提示：後端在 beforeId 路徑截斷時，
+                    // 丟掉的是更久遠的那批訊息，hasMore 仍為 true，下一次按「載入更早」就會接回來，
+                    // 中間並無缺口，不需要（也不應該）在此處提示，避免誤導使用者以為對話有缺漏。
                     prependMessages(page.messages);
                     state.oldestId = page.messages[0].id;
                 }
@@ -1063,7 +1102,7 @@
     }
 
     async function loadNewer() {
-        if (state.loadingNewer || !state.historicalView || state.windowNewestId == null) {
+        if (state.loadingNewer || !state.historicalView || state.noMoreNewer || state.windowNewestId == null) {
             return;
         }
         const token = state.requestToken;
@@ -1078,6 +1117,12 @@
             if (page.messages.length > 0) {
                 appendMessages(page.messages, false);
                 state.windowNewestId = page.messages[page.messages.length - 1].id;
+            } else {
+                // lastMessageId 漂移（指向已被保留期清除的訊息）時 afterId 會永遠回 0 筆、
+                // maybeExitHistoricalView 的條件永遠不成立，沒有這個 latch 的話使用者停在底部時
+                // 每個捲動 tick 都會打一次空請求。
+                state.noMoreNewer = true;
+                state.noMoreNewerAt = state.groups.find(g => g.groupId === state.groupId)?.lastMessageId ?? null;
             }
             maybeExitHistoricalView();
             setConnectionOk(true);
@@ -1257,7 +1302,7 @@
         try {
             const raw = localStorage.getItem(READ_STATE_KEY);
             const parsed = raw ? JSON.parse(raw) : null;
-            // 只收「群組 → 數字」的健康條目，壞資料一律丟掉，不讓它污染後續查詢字串
+            // 只收「群組 → 數字」的健康條目，壞資料一律丟掉，不讓它污染後續送出的請求
             if (parsed && typeof parsed === 'object') {
                 for (const [groupId, id] of Object.entries(parsed)) {
                     if (typeof id === 'number' && Number.isFinite(id)) {
@@ -1289,24 +1334,25 @@
         }
     }
 
-    // /api/groups 帶上目前畫面上有出現群組的已讀基準；整串一次 encode，冒號與逗號在伺服器端會被還原後解析。
+    // POST /api/groups/list 帶上目前畫面上有出現群組的已讀基準。
     // state.groups 要等第一次 loadGroups 回來才有值，而 loadGroups 自己就得先呼叫這裡——這時不能過濾，
     // 否則一個基準都送不出去，而後端把「沒帶基準的群組」視為全部已讀（見 GroupsController），
     // 症狀是重新整理後整排未讀數歸零、要等下一輪輪詢才回來。readState 本身已由
-    // seedReadStateForNewGroups 清成只含現存群組，長度受群組數限制，這條退路不會讓查詢字串失控。
-    function readQuerySuffix() {
+    // seedReadStateForNewGroups 清成只含現存群組。
+    function readRequestBody() {
         const knownGroupIds = new Set(state.groups.map(g => g.groupId));
-        const pairs = Object.entries(state.readState)
-            .filter(([groupId]) => knownGroupIds.size === 0 || knownGroupIds.has(groupId))
-            .map(([groupId, id]) => `${groupId}:${id}`);
-        return pairs.length === 0 ? '' : `?read=${encodeURIComponent(pairs.join(','))}`;
+        const read = Object.fromEntries(
+            Object.entries(state.readState)
+                .filter(([groupId]) => knownGroupIds.size === 0 || knownGroupIds.has(groupId))
+        );
+        return { read };
     }
 
     // 讓已讀基準跟最新的群組清單對齊：
     // 1. 第一次看到的群組（本裝置沒有任何已讀紀錄）直接以最後一則為基準視為已讀，
     //    避免初次開啟整排都跳出一大包未讀；
     // 2. 已經不存在的群組（訊息被保留期清除）把基準一併移除，
-    //    ?read= 查詢字串只帶目前清單中的群組，不會無限累積
+    //    請求 body 只帶目前清單中的群組，不會無限累積
     function seedReadStateForNewGroups(groups) {
         let changed = false;
         for (const group of groups) {

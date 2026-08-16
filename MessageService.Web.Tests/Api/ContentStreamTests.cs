@@ -513,4 +513,58 @@ public class ContentStreamTests : IDisposable
         Assert.Equal("document.pdf", response.Content.Headers.ContentDisposition?.FileName);
         Assert.Equal(bytes, await response.Content.ReadAsByteArrayAsync());
     }
+
+    /// <summary>零長度內容：DownloadStatus.Completed 且 Content 為 Array.Empty&lt;byte&gt;()，
+    /// 透過 SqliteBlob 讀取表頭長度為 0 回傳空陣列，回傳 200 OK 且 Content-Length 為 0、body 為空。</summary>
+    [Fact]
+    public async Task GetContent_ZeroLengthContent_Returns200WithZeroLengthBody()
+    {
+        var bytes = Array.Empty<byte>();
+        var contentId = await SeedCompletedContentAsync(bytes);
+
+        var response = await _fixture.Client.GetAsync($"/api/messages/{contentId}/content");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(0, response.Content.Headers.ContentLength);
+        Assert.Empty(await response.Content.ReadAsByteArrayAsync());
+    }
+
+    /// <summary>Content 為 NULL 但狀態誤標 Completed：資料異常情境，
+    /// SqliteBlob 建構時因欄位為 NULL 拋出 SqliteException，被捕獲後退化回傳空陣列（當作未加密內容），
+    /// LENGTH(NULL) 評估為 NULL 並轉為長度 0，明確斷言不可回傳 500，並回傳 200 OK 且 body 長度為 0。</summary>
+    [Fact]
+    public async Task GetContent_NullContentWithCompletedStatus_Returns200WithZeroContentLength()
+    {
+        long contentId = 0;
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            var groupMessage = new GroupMessage
+            {
+                WebhookEventId = Guid.NewGuid().ToString(),
+                LineMessageId = "m_null",
+                GroupId = "G1",
+                MessageType = "file",
+                EventTimestamp = DateTimeOffset.UtcNow,
+                ReceivedAt = DateTimeOffset.UtcNow,
+                Content = new MessageContent
+                {
+                    DownloadStatus = DownloadStatus.Completed,
+                    Content = null,
+                    ContentType = "application/octet-stream",
+                    FileName = "null-content.bin",
+                    CompletedAt = DateTimeOffset.UtcNow
+                }
+            };
+            dbContext.GroupMessages.Add(groupMessage);
+            await dbContext.SaveChangesAsync();
+            contentId = groupMessage.Content.Id;
+        });
+
+        var response = await _fixture.Client.GetAsync($"/api/messages/{contentId}/content");
+
+        Assert.NotEqual(HttpStatusCode.InternalServerError, response.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(0, response.Content.Headers.ContentLength);
+        Assert.Empty(await response.Content.ReadAsByteArrayAsync());
+    }
 }

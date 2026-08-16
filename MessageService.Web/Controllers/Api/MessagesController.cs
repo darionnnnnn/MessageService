@@ -248,7 +248,7 @@ public class MessagesController(
     }
 
     public const int SearchResultLimit = 100;
-    private const int SearchCandidateLimit = 300;
+    public const int SearchCandidateLimit = 300;
 
     /// <summary>單次狀態查詢的內容 id 數量上限，與前端 chat.js 的 STATUS_POLL_BATCH_SIZE 一致。
     /// 沒有上限的話這裡就是一個外部可控長度的 IN 清單，而且查詢字串本身也會撞上 IIS 的
@@ -267,9 +267,12 @@ public class MessagesController(
         q = q?.Trim();
         if (string.IsNullOrEmpty(q))
         {
+            var emptyLimit = encryptionOptions.Value.Enabled
+                ? new SearchLimitDto(encryptionOptions.Value.EffectiveSearchWindowDays, false)
+                : null;
             return Ok(new MessageSearchResponseDto(
                 Array.Empty<MessageSearchResultDto>(),
-                encryptionOptions.Value.Enabled));
+                emptyLimit));
         }
 
         var maskingRules = await maskingService.LoadRulesAsync(cancellationToken);
@@ -357,6 +360,10 @@ public class MessagesController(
             .Select(m => new { m.Id, m.GroupId, m.UserId, m.MessageType, m.Text, m.EventTimestamp })
             .ToListAsync(cancellationToken);
 
+        var searchLimit = encryptionOptions.Value.Enabled
+            ? new SearchLimitDto(encryptionOptions.Value.EffectiveSearchWindowDays, textCandidates.Count >= SearchCandidateLimit)
+            : null;
+
         // 內容命中與姓名命中各自保留固定配額（見類別常數說明）——不然搜「王」這種同時是常見字
         // 又是姓氏的關鍵字，結果會被該姓氏成員的近期訊息灌滿，真正含關鍵字的訊息反而排不進來
         var merged = new Dictionary<long, (string GroupId, string? UserId, string MessageType, string? Text, DateTimeOffset EventTimestamp)>();
@@ -412,7 +419,7 @@ public class MessagesController(
         {
             return Ok(new MessageSearchResponseDto(
                 Array.Empty<MessageSearchResultDto>(),
-                encryptionOptions.Value.Enabled));
+                searchLimit));
         }
 
         var resultGroupIds = top.Select(kv => kv.Value.GroupId).Distinct().ToList();
@@ -461,7 +468,7 @@ public class MessagesController(
             return new MessageSearchResultDto(id, rowGroupId, groupDisplayName, displayName, snippet, eventTimestamp);
         }).OrderByDescending(r => r.EventTimestamp).ToList();
 
-        return Ok(new MessageSearchResponseDto(results, encryptionOptions.Value.Enabled));
+        return Ok(new MessageSearchResponseDto(results, searchLimit));
     }
 
     private static string EscapeLikePattern(string value) =>

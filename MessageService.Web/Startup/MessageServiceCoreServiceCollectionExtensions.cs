@@ -67,6 +67,8 @@ public static class MessageServiceCoreServiceCollectionExtensions
         // 見 MessageDbContextModelCacheKeyFactory 對「模型依 cipher 狀態分開快取」的說明。合併前
         // 收錄端與檢視端各自持有一份，現在單一行程只有一份，跨行程金鑰不一致的風險本身也隨之消失
         builder.Services.AddSingleton<FieldCipher>();
+        builder.Services.AddSingleton(TimeProvider.System);
+        builder.Services.AddSingleton<ReadinessCache>();
 
         // 需求2：Database:Provider 顯式設定永遠優先；未設定時依 ConnectionStrings:SqlServer 有沒有值
         // 推導（純推導邏輯見 DatabaseProviderResolver，可單元測試）

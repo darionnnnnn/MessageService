@@ -19,9 +19,29 @@ public class GroupsController(MessageDbContext dbContext, IMaskingService maskin
 
     private record LastMessagePreview(long Id, string MessageType, string? Text, DateTimeOffset EventTimestamp);
 
+    // 保留 GET /api/groups 作為一般檢視端 API 使用（仍被健康檢查與 IP 白名單相關測試當成一般檢視端 API 使用），
+    // 不帶已讀基準，所有群組未讀數一律為 0。
     [HttpGet]
-    public async Task<ActionResult<IReadOnlyList<GroupDto>>> GetGroups(
-        [FromQuery] string? read, CancellationToken cancellationToken)
+    public async Task<ActionResult<IReadOnlyList<GroupDto>>> GetGroups(CancellationToken cancellationToken)
+    {
+        return await BuildGroupListAsync(new Dictionary<string, long>(), cancellationToken);
+    }
+
+    // 側欄清單（帶已讀基準）。缺漏的 body（空內容）、Read 為 null、或空字典都當成「沒帶基準」處理，
+    // 回 200 不是 400——側欄不該因為基準缺漏就整個掛掉。
+    // 這個寬容只到「缺漏」為止：Read 的值型別不對（例如 {"read":{"G1":"abc"}}）時，[ApiController]
+    // 的模型繫結會在進到這裡之前就回 400（實測確認）。舊的 ?read= 字串版本是自己解析、壞掉的 pair
+    // 直接略過，所以型別錯誤也回 200；改成 JSON 後這條行為變了，但唯一的呼叫端是自家前端
+    // （送的一定是數字），不值得為此關掉模型繫結的驗證。
+    [HttpPost("list")]
+    public async Task<ActionResult<IReadOnlyList<GroupDto>>> ListGroups(
+        [FromBody] GroupListRequestDto? request, CancellationToken cancellationToken)
+    {
+        return await BuildGroupListAsync(request?.Read ?? new Dictionary<string, long>(), cancellationToken);
+    }
+
+    private async Task<ActionResult<IReadOnlyList<GroupDto>>> BuildGroupListAsync(
+        IReadOnlyDictionary<string, long> readBaselines, CancellationToken cancellationToken)
     {
         // 側欄清單改讀 Groups.LastMessageId／LastMessageAt（由 GroupLastMessageTracker 在訊息
         // 落地時維護），不再對 GroupMessages 全表做 GroupBy+Max——Groups 表只有幾十列，
@@ -37,11 +57,10 @@ public class GroupsController(MessageDbContext dbContext, IMaskingService maskin
             return Ok(Array.Empty<GroupDto>());
         }
 
-        // 已讀基準：每個瀏覽器自己記在 localStorage，用 ?read=群組:最後已讀Id,... 帶上來。
+        // 已讀基準：每個瀏覽器自己記在 localStorage，由 POST body 帶上來。
         // 未讀數＝該群組 Id 大於基準的訊息數（上限 UnreadCap）。沒帶基準的群組視為全部已讀（0），
         // 避免第一次開啟就整排 99+。只對「有 baseline 且確實有新訊息」的群組才查——
         // N+1 的 N 從「所有有訊息的群組」縮成「真的有未讀的群組」，且每查都走 (GroupId, Id) 索引
-        var readBaselines = ParseReadBaselines(read);
         var unreadByGroup = new Dictionary<string, int>();
         foreach (var g in groups)
         {
@@ -142,32 +161,4 @@ public class GroupsController(MessageDbContext dbContext, IMaskingService maskin
 
         return actual;
     }
-
-    // 解析 ?read=群組:最後已讀Id,群組:最後已讀Id... 成對照表；格式不合的 pair 直接略過，
-    // 不讓一個壞掉的查詢字串整個弄垮側欄
-    private static Dictionary<string, long> ParseReadBaselines(string? read)
-    {
-        var baselines = new Dictionary<string, long>();
-        if (string.IsNullOrWhiteSpace(read))
-        {
-            return baselines;
-        }
-
-        foreach (var pair in read.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
-        {
-            var separator = pair.LastIndexOf(':');
-            if (separator <= 0 || separator == pair.Length - 1)
-            {
-                continue;
-            }
-            var groupId = pair[..separator];
-            if (long.TryParse(pair[(separator + 1)..], out var lastReadId))
-            {
-                baselines[groupId] = lastReadId;
-            }
-        }
-
-        return baselines;
-    }
-
 }

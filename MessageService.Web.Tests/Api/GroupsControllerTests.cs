@@ -197,7 +197,9 @@ public class GroupsControllerTests : IDisposable
         });
 
         // baseline = 第一則的 Id，之後兩則算未讀
-        var groups = await _fixture.Client.GetFromJsonAsync<List<GroupDto>>($"/api/groups?read=G1:{first.Id}");
+        var response = await _fixture.Client.PostAsJsonAsync("/api/groups/list", new { read = new Dictionary<string, long> { ["G1"] = first.Id } });
+        response.EnsureSuccessStatusCode();
+        var groups = await response.Content.ReadFromJsonAsync<List<GroupDto>>();
 
         Assert.Equal(2, Assert.Single(groups!).UnreadCount);
     }
@@ -220,18 +222,95 @@ public class GroupsControllerTests : IDisposable
         });
 
         // baseline = 0：全部 105 則都算未讀，但要在 SQL 端截斷成上限 100
-        var groups = await _fixture.Client.GetFromJsonAsync<List<GroupDto>>("/api/groups?read=G1:0");
+        var response = await _fixture.Client.PostAsJsonAsync("/api/groups/list", new { read = new Dictionary<string, long> { ["G1"] = 0 } });
+        response.EnsureSuccessStatusCode();
+        var groups = await response.Content.ReadFromJsonAsync<List<GroupDto>>();
 
         Assert.Equal(100, Assert.Single(groups!).UnreadCount);
     }
 
-    [Theory]
-    [InlineData("garbage")]
-    [InlineData("G1")]
-    [InlineData(":5")]
-    [InlineData("G1:abc")]
-    [InlineData("G1:")]
-    public async Task GetGroups_MalformedReadParam_IsIgnoredAndTreatedAsRead(string read)
+    [Fact]
+    public async Task GetGroups_EmptyBody_ReturnsOkWithZeroUnread()
+    {
+        var now = DateTimeOffset.UtcNow;
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            dbContext.GroupMessages.Add(new GroupMessage
+            {
+                WebhookEventId = "e1", LineMessageId = "m1", GroupId = "G1", MessageType = "text", Text = "hi",
+                EventTimestamp = now, ReceivedAt = now
+            });
+            dbContext.GroupMessages.Add(new GroupMessage
+            {
+                WebhookEventId = "e2", LineMessageId = "m2", GroupId = "G2", MessageType = "text", Text = "hello",
+                EventTimestamp = now, ReceivedAt = now
+            });
+            await Task.CompletedTask;
+        });
+
+        // body 為 {}（沒有 read 欄位）時回 200，且群組清單長度正確、未讀數為 0
+        var response = await _fixture.Client.PostAsJsonAsync("/api/groups/list", new { });
+        Assert.Equal(System.Net.HttpStatusCode.OK, response.StatusCode);
+
+        var groups = await response.Content.ReadFromJsonAsync<List<GroupDto>>();
+        Assert.NotNull(groups);
+        Assert.Equal(2, groups!.Count);
+        Assert.All(groups, g => Assert.Equal(0, g.UnreadCount));
+    }
+
+    [Fact]
+    public async Task GetGroups_NonExistentGroupInReadBaseline_ReturnsOkAndDoesNotAffectOtherGroups()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var first = new GroupMessage
+        {
+            WebhookEventId = "e1", LineMessageId = "m1", GroupId = "G1", MessageType = "text", Text = "1",
+            EventTimestamp = now.AddMinutes(-2), ReceivedAt = now.AddMinutes(-2)
+        };
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            dbContext.GroupMessages.Add(first);
+            dbContext.GroupMessages.Add(new GroupMessage
+            {
+                WebhookEventId = "e2", LineMessageId = "m2", GroupId = "G1", MessageType = "text", Text = "2",
+                EventTimestamp = now.AddMinutes(-1), ReceivedAt = now.AddMinutes(-1)
+            });
+            dbContext.GroupMessages.Add(new GroupMessage
+            {
+                WebhookEventId = "e3", LineMessageId = "m3", GroupId = "G2", MessageType = "text", Text = "3",
+                EventTimestamp = now, ReceivedAt = now
+            });
+            await Task.CompletedTask;
+        });
+
+        // 帶了 G1 的基準（有 1 則新訊息）以及不存在的群組 NonExistentGroup
+        var response = await _fixture.Client.PostAsJsonAsync("/api/groups/list", new
+        {
+            read = new Dictionary<string, long>
+            {
+                ["G1"] = first.Id,
+                ["NonExistentGroup"] = 99999L
+            }
+        });
+        Assert.Equal(System.Net.HttpStatusCode.OK, response.StatusCode);
+
+        var groups = await response.Content.ReadFromJsonAsync<List<GroupDto>>();
+        Assert.NotNull(groups);
+        Assert.Equal(2, groups!.Count);
+
+        var g1 = Assert.Single(groups, g => g.GroupId == "G1");
+        Assert.Equal(1, g1.UnreadCount);
+
+        var g2 = Assert.Single(groups, g => g.GroupId == "G2");
+        Assert.Equal(0, g2.UnreadCount);
+    }
+
+    /// <summary>已讀基準改成 JSON body 之後，「壞掉的輸入」分成兩種行為，這裡把兩種都釘住：
+    /// 完全沒有 body（缺漏）當成沒帶基準、回 200；值的型別不對則由 [ApiController] 的模型繫結
+    /// 擋在動作方法之前、回 400。舊的 ?read= 字串版是自己解析、壞 pair 一律略過，兩種都回 200，
+    /// 這是行為差異，不是退化——唯一的呼叫端是自家前端，送的一定是數字。</summary>
+    [Fact]
+    public async Task ListGroups_MissingBody_TreatedAsNoBaseline_ButMalformedValueTypeReturns400()
     {
         var now = DateTimeOffset.UtcNow;
         await _fixture.SeedAsync(async dbContext =>
@@ -244,10 +323,16 @@ public class GroupsControllerTests : IDisposable
             await Task.CompletedTask;
         });
 
-        var groups = await _fixture.Client.GetFromJsonAsync<List<GroupDto>>($"/api/groups?read={read}");
-
-        // 壞掉的 pair 一律略過 → 該群組沒有有效 baseline → 未讀視為 0，且不擲例外
+        var emptyBody = new StringContent("", System.Text.Encoding.UTF8, "application/json");
+        var emptyResponse = await _fixture.Client.PostAsync("/api/groups/list", emptyBody);
+        Assert.Equal(System.Net.HttpStatusCode.OK, emptyResponse.StatusCode);
+        var groups = await emptyResponse.Content.ReadFromJsonAsync<List<GroupDto>>();
         Assert.Equal(0, Assert.Single(groups!).UnreadCount);
+
+        var malformed = new StringContent(
+            "{\"read\":{\"G1\":\"abc\"}}", System.Text.Encoding.UTF8, "application/json");
+        var malformedResponse = await _fixture.Client.PostAsync("/api/groups/list", malformed);
+        Assert.Equal(System.Net.HttpStatusCode.BadRequest, malformedResponse.StatusCode);
     }
 
     [Fact]
