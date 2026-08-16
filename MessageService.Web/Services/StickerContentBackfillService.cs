@@ -1,11 +1,14 @@
+using System.Diagnostics;
 using MessageService.Data;
 using MessageService.Models;
+using MessageService.Services;
 using Microsoft.EntityFrameworkCore;
 
 namespace MessageService.Web.Services;
 
 public class StickerContentBackfillService(
     IServiceScopeFactory scopeFactory,
+    IContentDownloadQueue downloadQueue,
     ILogger<StickerContentBackfillService> logger) : BackgroundService
 {
     protected override Task ExecuteAsync(CancellationToken stoppingToken) => RunBackfillAsync(stoppingToken);
@@ -14,8 +17,22 @@ public class StickerContentBackfillService(
     {
         try
         {
+            var stopwatch = Stopwatch.StartNew();
             using var scope = scopeFactory.CreateScope();
             var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+
+            // 開始分批掃描之前先以 AnyAsync 判斷有無待補資料，避免每次啟動都做無索引的反連結全表掃描
+            var hasPending = await dbContext.GroupMessages
+                .AnyAsync(m => m.MessageType == "sticker"
+                            && m.StickerId != null
+                            && m.Content == null, stoppingToken);
+
+            if (!hasPending)
+            {
+                stopwatch.Stop();
+                logger.LogDebug("No pending sticker content rows to backfill ({ElapsedMilliseconds} ms).", stopwatch.ElapsedMilliseconds);
+                return;
+            }
 
             long lastProcessedId = 0;
             const int batchSize = 500;
@@ -39,17 +56,28 @@ public class StickerContentBackfillService(
                     break;
                 }
 
+                var createdContents = new List<MessageContent>(messages.Count);
                 foreach (var m in messages)
                 {
-                    m.Content = new MessageContent
+                    var content = new MessageContent
                     {
                         DownloadStatus = DownloadStatus.Pending
                     };
+                    m.Content = content;
+                    createdContents.Add(content);
                     totalCreated++;
                     lastProcessedId = m.Id;
                 }
 
                 await dbContext.SaveChangesAsync(stoppingToken);
+
+                // 存檔後 EF Core 會回填自增的主鍵 Id，在清空 ChangeTracker 前把 Id 入列到 IContentDownloadQueue。
+                // 註：在「本機不下載、由另一台主機下載」的拆機部署下，本機的佇列是 Null 實作，入列是無操作；
+                // 那種拓撲靠 ContentDownloadService 的週期重掃（設定項 RequeueIntervalMinutes）收回。
+                foreach (var content in createdContents)
+                {
+                    downloadQueue.Enqueue(content.Id);
+                }
 
                 // 分批的意義是「同時間只有一批在記憶體裡」，但變更追蹤器會累積每一批的實體，
                 // 舊訊息可能有數萬則、跑上百批，不清掉的話記憶體與後續 SaveChanges 的
@@ -57,9 +85,10 @@ public class StickerContentBackfillService(
                 dbContext.ChangeTracker.Clear();
             }
 
+            stopwatch.Stop();
             if (totalCreated > 0)
             {
-                logger.LogInformation("Backfilled {TotalCreated} pending content rows for existing sticker messages.", totalCreated);
+                logger.LogInformation("Backfilled {TotalCreated} pending content rows for existing sticker messages ({ElapsedMilliseconds} ms).", totalCreated, stopwatch.ElapsedMilliseconds);
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
