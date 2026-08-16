@@ -19,7 +19,7 @@
 | 直連主資料庫 | ✓ | ✗ | ✓ | ✓ |
 | 本機 outbox＋排空 | ✓ | ✓ | ✗（無 webhook，無事件可寫） | ✗ |
 | 保留期清除 | ✓ | ✗ | ✓ | ✗（即使直連資料庫也不跑，避免三台拓撲下跟 Core 搶著清同一張表） |
-| 貼圖內容回填 | ✓ | ✗ | ✓ | ✗（同上：維護類背景工作只由一台負責，兩台同跑會撞唯一鍵） |
+| 貼圖內容回填 | ✓ | ✗ | ✓ | ✗（同上：維護類背景工作只由一台負責。兩台同跑會撞唯一鍵，程式雖已改成跳過該批續跑，但那是白工） |
 | `Line:OutboundHere` 預設 | `true` | `true` | `false` | `false` |
 | 落地方式 | outbox → `DirectIngestSink` | outbox → `HttpIngestSink` → 對方的 `/api/ingest/events(-batch)` | `IngestController` → `DirectIngestSink` | 不適用 |
 

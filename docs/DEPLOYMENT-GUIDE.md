@@ -283,7 +283,7 @@ SQLite 檔案（`messages.db`／`outbox.db`）預設就放在站台目錄下的 
 ### D4. 設定應用程式集區常駐執行（重要，容易漏掉）
 
 IIS 應用程式集區預設**閒置 20 分鐘沒有請求就回收**、**固定跑滿 1740 分鐘就強制回收**——
-這台主機上跑的背景服務（保留期清除、outbox 排空、媒體下載、頭貼刷新）都不是靠 HTTP 請求
+這台主機上跑的背景服務（保留期清除、貼圖內容回填、outbox 排空、媒體下載、頭貼刷新）都不是靠 HTTP 請求
 觸發的 `BackgroundService`，行程被回收就整個停掉，且不會有任何錯誤訊息，只是「該做的事
 安靜地沒有發生」。
 
@@ -502,6 +502,12 @@ Edge 端的 outbox 排空預設會打 Core 的批次 ingest 端點（`POST /api/
 
 清除完成且真的刪到資料時，log 會記一則 Warning 說明這件事並附上目前的資料庫檔案大小，
 不會讓人以為「清過了空間就會回來」。
+
+> 另一則要注意的 Warning：`Deleted N orphaned MessageContentBlob(s)`。刪訊息之後 blob 子列
+> 是靠 `GroupMessages → MessageContents → MessageContentBlobs` 兩層 FK cascade 一起消失的，
+> 清除流程每批之後會補一句孤兒回收當安全網。**正常情況這裡永遠刪 0 列、不會有 log**；
+> 出現非 0 表示 cascade 沒有作用（例如資料庫是用不建外鍵的工具還原的），要去查，
+> 否則「刪了訊息但空間沒還回來」會一路靜默到硬碟滿。
 
 要實際回收空間只能人工執行 `VACUUM`：
 

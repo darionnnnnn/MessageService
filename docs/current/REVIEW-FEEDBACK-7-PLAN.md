@@ -27,7 +27,7 @@
 | 新：啟動 reclaim 競態 | 🔴 | 每次啟動無條件 Downloading→Pending |
 | 新：Sticker 回填 Core+Viewer 同跑 | 🔴 | 撞 1:1 唯一鍵後整批中止 |
 | 新：SQLite busy_timeout 未設 | 🟠 | 兩處註解「預設 30 秒」錯誤 |
-| 新：HostHeartbeats 無唯一索引 | 🟡 | |
+| 新：HostHeartbeats 無唯一索引 | ❌ | **核對有誤，已推翻**：主鍵本來就是複合鍵 (Role, MachineName)，撞鍵是拋例外不是插重複列，改成撞鍵重試（C-4） |
 | 新：Retention 指標刷新非原子 | 🟡 | 僅雙 Core 誤設時發作，本輪不改程式，文件註明 |
 | 新：效能 | — | GetPendingIds 無 Take／MessageType 無索引／outbox CreatedAt 無索引 |
 
@@ -73,7 +73,7 @@
 - **背景**：啟動 reclaim 把所有 Downloading 打回 Pending，多主機下害同一 blob 並行寫入。
 - **契約**：
   - 認領（`DownloadStatus→Downloading`）時同一句 UPDATE 寫入 `ClaimedAt=now`；Completed／Failed／回 Pending 時清為 null。
-  - 新設定 `ContentDownload:ClaimLeaseMinutes`（預設 30）。回收改為「Downloading 且 `ClaimedAt < now-lease` 或 `ClaimedAt` 為 null」才回 Pending；啟動與週期重掃共用同一條規則，啟動不再無條件回收。
+  - 新設定 `ContentDownload:ClaimLeaseMinutes`（實作定案 60，見 §7）。回收改為「Downloading 且 `ClaimedAt < now-lease` 或 `ClaimedAt` 為 null」才回 Pending；啟動與週期重掃共用同一條規則，啟動不再無條件回收。
   - `Api` work source（Edge）行為由 Core 端同一 SQL 決定，不需改 Edge。
 - **範圍**：`DbContentWorkSource`、`ContentDownloadService`、選項類、appsettings 預設；測試。
 - **驗收**：build／test 綠；新增：`Reclaim_SkipsFreshDownloading`、`Reclaim_ReturnsExpiredDownloading`、`Claim_SetsClaimedAt`、`Complete_ClearsClaimedAt`；既有 reclaim 測試依新規則調整而非刪除。
@@ -95,7 +95,7 @@
 - **驗收**：新增 `SqliteConnection_HasBusyTimeoutApplied`（開連線查 `PRAGMA busy_timeout` 回傳設定值）；grep 不再出現「busy_timeout 預設 30 秒」；build／test 綠。
 
 ### 作業 E-階段 1：GetPendingIds 上限
-- **契約**：`DbContentWorkSource.GetPendingIdsAsync` 加上限（設定 `ContentDownload:MaxPendingIdsPerScan`，預設 5000，依 `ReceivedAt` 舊者優先）；後續 `Contains(ids)` 查詢以 ≤500 一批切分，避免 SQL Server 2100 參數上限；行為與結果順序不變。
+- **契約**：`DbContentWorkSource.GetPendingIdsAsync` 加上限（設定 `ContentDownload:MaxPendingIdsPerScan`，預設 5000，依 Id 由小到大（見 §7））；後續 `Contains(ids)` 查詢以 ≤500 一批切分，避免 SQL Server 2100 參數上限；行為與結果順序不變。
 - **範圍**：`DbContentWorkSource`、選項；測試。
 - **驗收**：新增 `GetPendingIds_RespectsCap`、`Contains_BatchesOver500Ids`（插 1200 筆驗證全部處理）；build／test 綠。
 
@@ -105,12 +105,13 @@
 ## 5. 文件更新（作業 F，Claude 全部驗收後）
 - `DEPLOYMENT-GUIDE.md`：SplitBlobTables 拉成獨立節（適用兩 provider）；SQLite 升級前置：停站→離線 `dotnet ef database update`→確認兩倍空間→部署；升級期 `stdoutLogEnabled=true`；三台拓撲 Viewer 設 `Database:AutoMigrate=false`；雙 Core 不支援（Retention 指標刷新非原子）說明；新設定鍵三個。
 - `appsettings.json` `Logging` 區段加註解或移除，指向 `nlog.config`（Claude 順手）。
-- design notes：ClaimedAt 租約、回填歸屬。
+- README：三個新設定鍵、`Downloading` 回收語意（原本寫「不碰 Downloading」與新行為矛盾）、migration 鎖不跨機器、背景服務清單補貼圖回填。
+- DEPLOYMENT-GUIDE 保留期清除節：孤兒 blob 回收與那則 Warning 的解讀（作業 B，規劃時漏列）。
 - 結案依 docs-current-vs-history 搬 history。
 
 ## 6. 風險與回滾
 - migration 每 provider 一支，回滾用 `Remove-Migration`／`database update <前一支>`；Heartbeat 去重不可逆但資料無價值。
-- 租約 30 分鐘過短時大檔會被回收重下（僅重複下載，不損資料）；可調設定。
+- 租約過短時大檔會被回收重下（僅重複下載，不損資料）；可調設定。
 - 各作業獨立 commit。
 
 ## 7. 執行紀錄
@@ -123,11 +124,11 @@
 | A 升級路徑 | Claude | 完成 `966727f` | 722→ build 0 警告 | 搬遷 SQL 抽成 `SplitBlobTablesDataMove` 供兩 provider 與測試共用（避免測試驗的是抄過去的另一份 SQL） |
 | B 孤兒清理 | agy(sonnet) | 完成，721 綠 | 通過 | 無 |
 | C-1 schema | agy→Claude | 完成 `8c47af2`，722 綠 | 通過 | agy 為了不存在的問題自建 EF 內部 API 的 `IMigrationsAssembly`（過度設計），回饋要求還原；重產 migration 由 Claude 用 `dotnet ef` 做掉。**真正的衝突不是 `ClaimedAt` 而是新索引**：`LegacySqliteBaselinerTests` 的「模擬舊檔」是用今日模型 `EnsureCreated` 後再砍後期欄位，新索引要一併列入砍除清單 |
-| C-2 租約 | agy | 完成 `19690b2`，728 綠（+6） | 通過 | 逾時中斷未自驗，由 Claude 重跑 |
-| C-3 貼圖回填 | agy | 完成 `d43095a`，733 綠（+5） | 通過 | 無 |
+| C-2 租約 | agy | 完成 `19690b2`，728 綠（+6） | 通過 | 逾時中斷未自驗，由 Claude 重跑。**租約預設改 30→60 分鐘**：轉檔輪詢最長 2 分鐘，但大影片下載可能更久，租約太短會讓還在下載的內容被別台回收重下 |
+| C-3 貼圖回填 | agy | 完成 `d43095a`，733 綠（+5） | 通過 | 撞鍵的處理粒度是**整批跳過**而非規劃寫的逐筆：一次 SaveChanges 撞鍵後該批狀態已不可信，整批交給下一輪重掃比逐筆重試簡單且無資料損失 |
 | C-4 撞鍵重試 | agy | 完成，736 綠（+3） | 通過 | 逾時中斷未自驗 |
 | D busy_timeout | agy | 完成，740 綠（+4） | 通過 | 它在 `appsettings.json` 加了 `//` 註解（該檔其餘無註解），Claude 移除 |
-| E 掃描上限 | agy | 完成，745 綠（+5） | 通過 | 無 |
+| E 掃描上限 | agy | 完成，745 綠（+5） | 通過 | 排序改用 **Id 由小到大**而非規劃寫的 `ReceivedAt`：`ReceivedAt` 在 SQLite 上沒有支援範圍比較的轉換（同一個理由讓 Failed 的 cutoff 也只能在記憶體篩），Id 遞增等價於到達順序。outbox `CreatedAt` 索引結案不做——outbox 在各主機本機的獨立 SQLite，表很小 |
 | F 文件 | Claude | 完成 | — | `SplitBlobTables` 拉成兩 provider 共通節＋SQLite 離線升級步驟；DEPLOYMENT-MODES 補四個新設定鍵、貼圖回填歸屬、雙 Core 不支援、NLog 說明 |
 
 **推翻原規劃之處**：`HostHeartbeats` 原本判斷「缺唯一索引」是錯的——它的主鍵本來就是複合鍵
