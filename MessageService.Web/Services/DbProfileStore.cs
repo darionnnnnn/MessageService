@@ -14,19 +14,37 @@ public class DbProfileStore(MessageDbContext dbContext, FieldCipher cipher, ILog
     public async Task<ProfileStaleness> GetStalenessAsync(
         string groupId, string? userId, DateTimeOffset cutoff, CancellationToken cancellationToken)
     {
-        var group = await dbContext.Groups.Include(g => g.Picture).FirstOrDefaultAsync(g => g.GroupId == groupId, cancellationToken);
+        var group = await dbContext.Groups
+            .Where(g => g.GroupId == groupId)
+            .Select(g => new
+            {
+                g.UpdatedAt,
+                g.PictureFetchedUrl,
+                HasPicture = g.Picture != null
+            })
+            .FirstOrDefaultAsync(cancellationToken);
+
         var groupStale = group is null || group.UpdatedAt < cutoff;
         var groupFetchedUrl = group?.PictureFetchedUrl;
-        var hasGroupPicture = group?.Picture != null;
+        var hasGroupPicture = group?.HasPicture ?? false;
 
         if (userId is null)
         {
             return new ProfileStaleness(groupStale, false, groupFetchedUrl, null, hasGroupPicture, false);
         }
 
-        var member = await dbContext.GroupMembers.Include(m => m.Picture).FirstOrDefaultAsync(m => m.GroupId == groupId && m.UserId == userId, cancellationToken);
+        var member = await dbContext.GroupMembers
+            .Where(m => m.GroupId == groupId && m.UserId == userId)
+            .Select(m => new
+            {
+                m.UpdatedAt,
+                m.PictureFetchedUrl,
+                HasPicture = m.Picture != null
+            })
+            .FirstOrDefaultAsync(cancellationToken);
+
         var memberStale = member is null || member.UpdatedAt < cutoff;
-        return new ProfileStaleness(groupStale, memberStale, groupFetchedUrl, member?.PictureFetchedUrl, hasGroupPicture, member?.Picture != null);
+        return new ProfileStaleness(groupStale, memberStale, groupFetchedUrl, member?.PictureFetchedUrl, hasGroupPicture, member?.HasPicture ?? false);
     }
 
     public async Task UpsertGroupAsync(string groupId, GroupSummary summary, CancellationToken cancellationToken)

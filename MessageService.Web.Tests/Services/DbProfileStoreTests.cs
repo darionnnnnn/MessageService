@@ -138,4 +138,52 @@ public class DbProfileStoreTests : IDisposable
         Assert.NotNull(group.Picture?.Content);
         Assert.True(ChunkedBlobCipher.IsEncryptedHeader(group.Picture.Content));
     }
+
+    [Fact]
+    public async Task GetStalenessAsync_DoesNotLoadPicturesIntoChangeTracker()
+    {
+        var cipher = CreateCipher(false);
+        var store = new DbProfileStore(_dbContext, cipher, NullLogger<DbProfileStore>.Instance);
+
+        var group = new Group
+        {
+            GroupId = "g1",
+            GroupName = "Group 1",
+            PictureUrl = "https://example.com/pic1",
+            PictureFetchedUrl = "https://example.com/pic1",
+            PictureContentType = "image/jpeg",
+            UpdatedAt = DateTimeOffset.UtcNow,
+            Picture = new GroupPicture { GroupId = "g1", Content = [1, 2, 3] }
+        };
+        var member = new GroupMember
+        {
+            GroupId = "g1",
+            UserId = "u1",
+            DisplayName = "User 1",
+            PictureUrl = "https://example.com/pic2",
+            PictureFetchedUrl = "https://example.com/pic2",
+            PictureContentType = "image/jpeg",
+            UpdatedAt = DateTimeOffset.UtcNow,
+            Picture = new GroupMemberPicture { GroupId = "g1", UserId = "u1", Content = [4, 5, 6] }
+        };
+        _dbContext.Groups.Add(group);
+        _dbContext.GroupMembers.Add(member);
+        await _dbContext.SaveChangesAsync();
+
+        _dbContext.ChangeTracker.Clear();
+
+        var staleness = await store.GetStalenessAsync("g1", "u1", DateTimeOffset.UtcNow.AddMinutes(-5), CancellationToken.None);
+
+        Assert.False(staleness.GroupStale);
+        Assert.False(staleness.MemberStale);
+        Assert.Equal("https://example.com/pic1", staleness.GroupPictureFetchedUrl);
+        Assert.Equal("https://example.com/pic2", staleness.MemberPictureFetchedUrl);
+        Assert.True(staleness.HasGroupPicture);
+        Assert.True(staleness.HasMemberPicture);
+
+        Assert.Empty(_dbContext.ChangeTracker.Entries<GroupPicture>());
+        Assert.Empty(_dbContext.ChangeTracker.Entries<GroupMemberPicture>());
+        Assert.Empty(_dbContext.ChangeTracker.Entries<Group>());
+        Assert.Empty(_dbContext.ChangeTracker.Entries<GroupMember>());
+    }
 }

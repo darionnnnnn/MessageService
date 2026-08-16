@@ -161,19 +161,15 @@ public class RetentionCleanupService(
                 .Select(m => new { m.Id, m.EventTimestamp })
                 .FirstOrDefaultAsync(cancellationToken);
 
-            var group = await dbContext.Groups.FindAsync([groupId], cancellationToken);
-            if (group is null)
-            {
-                continue;
-            }
+            var latestId = latest?.Id;
+            var latestAt = latest?.EventTimestamp;
 
-            group.LastMessageId = latest?.Id;
-            group.LastMessageAt = latest?.EventTimestamp;
-        }
-
-        if (staleGroupIds.Count > 0)
-        {
-            await dbContext.SaveChangesAsync(cancellationToken);
+            await dbContext.Groups
+                .Where(g => g.GroupId == groupId)
+                .ExecuteUpdateAsync(s => s
+                    .SetProperty(g => g.LastMessageId, latestId)
+                    .SetProperty(g => g.LastMessageAt, latestAt),
+                    cancellationToken);
         }
     }
 
