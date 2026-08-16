@@ -1,0 +1,100 @@
+# 審查回饋第五輪規劃（REVIEW-FEEDBACK-5）
+
+> 依 `plan-before-dev` skill v3 產出。每個「階段」即交給外包 AI 的規格：只鎖契約與驗收，實作方式由執行端決定，執行端須自跑驗收全過才回報。
+> 全域限制：不碰 `docs/`、不碰本階段範圍外的檔案、註解用台灣用語繁體中文、不順手重構或格式化。
+
+## 0. 背景與範圍
+- 輸入：外部審查對 dev@`86b1ed4` 的第五輪意見（P1 貼圖回填不入列、P2 Requeue 只啟動一次、P3 匿名代號撞名、P3-1 回填全表掃、P3-2 GET /api/groups 殘留）。全部五項本輪處理。
+- 已定案（2026-08-16）：P3 加 `(GroupId, Label)` 唯一索引且 migration 先修補既有重複；P3-1 只做 `AnyAsync` 短路＋耗時 log，不加表；P3-2 不移除 GET（`settings.js` 是真實呼叫端），只改註解。
+- 不做：一次性 marker 表；改 `IContentDownloadQueue` 介面。
+
+## 1. 事實核對摘要
+| 項目 | 成立 | 證據 | 補充 |
+|---|---|---|---|
+| P1 | ✅ | `StickerContentBackfillService` 沒注入 queue、SaveChanges 後不入列 | 回填註冊在 `HasDatabaseAccess`，下載服務在 `OutboundHere`；Core-only 拓撲 queue 是 Null → 入列 no-op，靠 P2 補齊 |
+| P2 | ✅ | `ContentDownloadService.ExecuteAsync` 只啟動掃一次；Options 無間隔欄位 | Edge 走 `ApiContentWorkSource`→Core `DbContentWorkSource`，週期重掃在 Edge 也有效；重複入列由 `CompleteAsync` 認領 `claimed==0` 保護 |
+| P3 | ✅ | `MessageDbContext` 只有 `(GroupId,UserId)` 主鍵；服務 catch 後用 `FirstAsync` | migration 每 provider 一套（Sqlite/SqlServer），有一致性測試 |
+| P3-1 | ✅ | GroupMessages 無 MessageType 索引 | — |
+| P3-2 | ⚠️ | 註解說只有測試在用 | 實際 `settings.js` 設定頁在用 |
+
+## 2. 作業總覽
+| 作業 | 目標 | 依賴 | 執行 |
+|---|---|---|---|
+| A | 下載回收週期化（P2） | — | agy |
+| B | 貼圖回填直接入列＋掃描短路（P1、P3-1） | — | agy |
+| C | 匿名代號 `(GroupId,Label)` 唯一＋撞名重試（P3） | — | agy（migration 骨架 Claude 用 `dotnet ef` 產生） |
+| D | GET /api/groups 註解修正（P3-2） | — | Claude |
+| E | 文件更新＋體檢 | A~D 驗收後 | Claude |
+
+順序 A → B → C → D → E。A 先做，因為它是拆機拓撲下 P1 的唯一修法。
+
+## 3. 作業明細
+
+### 作業 A-階段 1：`ContentDownloadService` 週期性重掃
+- **背景**：`RequeuePendingAsync`（撈回 Pending／中斷 Downloading／可重試 Failed）目前只在啟動跑一次；貼圖回填在 Core 補出的列、worker 崩潰後卡住的列，在行程不重啟時永遠不會被撿。
+- **契約**：
+  - `ContentDownloadOptions` 新增 `RequeueIntervalMinutes`（int，預設 15；0 = 停用週期，只保留啟動那一次）。
+  - 服務啟動後除既有那次掃描外，每隔該間隔再跑一次 `RequeuePendingAsync`；**先等一個間隔再掃**（不與啟動那次重複）。
+  - 週期掃描發生例外只記 error log、迴圈不中斷、不影響 worker；停機時正常結束。
+  - 註解須說明：重複入列安全（`DbContentWorkSource.CompleteAsync` 的認領檢查會跳過已被認領者），以及這是拆機拓撲下 Core 補資料的唯一回收路徑。
+- **範圍**：`MessageService.Web/Options/ContentDownloadOptions.cs`、`MessageService.Web/Services/ContentDownloadService.cs`、`MessageService.Web.Tests/Services/` 下新增或修改測試；可用 `InternalsVisibleTo` 讓測試以短間隔驅動迴圈。不動 worker／`ProcessAsync` 邏輯。
+- **驗收**：build 零警告；`dotnet test` 全綠；新增測試至少涵蓋：間隔到期後 work source 被再次查詢；間隔 0 時只查詢一次；某次掃描丟例外後下一輪仍執行。
+- **回報格式**：改動檔案清單、測試總數／綠／紅、偏離契約處。
+
+### 作業 B-階段 1：貼圖回填入列＋短路
+- **背景**：`StickerContentBackfillService` 補建 Pending 列後沒有入列到 `IContentDownloadQueue`；且每次啟動都做一次無索引的反連結掃描。
+- **契約**：
+  - 每批 SaveChanges 後把新建 `MessageContent` 的 Id 入列到 `IContentDownloadQueue`；註解說明 Core-only 拓撲下 queue 為 Null 實作、入列 no-op，該拓撲靠作業 A 的週期重掃收回。
+  - 開始前先以 `AnyAsync` 判斷有無待補；沒有就直接結束並記 debug log；有補時的 info log 加上耗時。
+  - 不改查詢條件、批次大小、DI 註冊。
+- **範圍**：`StickerContentBackfillService.cs`、其測試檔（用既有 `FakeContentDownloadQueue`）。
+- **驗收**：build 零警告；`dotnet test` 全綠；測試涵蓋：回填後 queue 收到的 Id 集合等於新建列的 Id 集合、第二次執行不再入列、空表不入列。
+
+### 作業 C-階段 1：模型唯一索引＋兩套 migration
+- **背景**：`AnonymousIdentity` 只有 `(GroupId, UserId)` 主鍵，併發指派可讓兩個不同使用者拿到同一個 Label；既有資料可能已重複。
+- **契約**：
+  - `MessageDbContext` 對 `AnonymousIdentity` 加 `(GroupId, Label)` 唯一索引，註解說明用途。
+  - Sqlite 與 SqlServer 各一支 migration `AnonymousLabelUnique`（骨架由 Claude 以 `dotnet ef` 產生後交付）；`Up()` 建索引**之前**先修補既有重複：同 `(GroupId, Label)` 依 `AssignedAt, UserId` 排序，第 2 筆起改為 `原Label (n)`（括號後綴，避免與服務端「Label n」格式再撞）。`Down()` 只 drop index，不還原 Label（註解說明）。
+- **範圍**：`MessageService.Data/Data/MessageDbContext.cs`、兩個 provider 的 migration 資料夾與 snapshot、Data 層測試。
+- **驗收**：build 零警告；`MessageDbMigrationsConsistencyTests` 綠；新增測試：以 Sqlite 建到前一版、塞兩筆同 (GroupId,Label) 不同 UserId、套用新 migration 後 Label 變 `X`／`X (2)` 且唯一索引存在。
+
+### 作業 C-階段 2：服務撞名重試
+- **背景**：`AnonymousIdentityService.GetOrAssignAsync` 讀計數→算後綴→寫入無序列化；catch `DbUpdateException` 後用 `FirstAsync` 會把暫時性故障變成 `Sequence contains no elements`。
+- **契約**：SaveChanges 拋 `DbUpdateException` 時：
+  1. 先查同 `(GroupId, UserId)` 是否已存在 → 存在就採用對方那筆。
+  2. 否則若是 Label 撞名 → 後綴遞增重試，上限 50 次，超過拋帶說明的 `InvalidOperationException`。
+  3. 既非主鍵撞也非 Label 撞（暫時性故障）→ 原例外往外拋，不吞。
+  - 回傳型別、`AvatarIconCatalog`、逐筆 SaveChanges 的既有設計不變。
+- **範圍**：`AnonymousIdentityService.cs`、`AnonymousIdentityServiceTests.cs`。
+- **驗收**：build 零警告；既有 7 個測試綠；新增測試涵蓋：兩個不同使用者同 IconKey 併發（或模擬先佔 Label）→ Label 不同且都以 icon.Label 開頭；暫時性 DbUpdateException 原樣拋出（可用 fake/中斷連線模擬，難以模擬時說明並改測邏輯路徑）。
+
+### 作業 D：GET /api/groups 註解（Claude 自做，不外包）
+- 註解改為：不是側欄用的、未讀恆 0；呼叫端為設定頁 `settings.js` 與健康檢查／白名單測試；側欄一律用 `POST /api/groups/list`。`GroupDto.UnreadCount` 若有 XML 註解補一句。
+
+### 作業 E：文件與體檢（Claude）
+- 見第 5 節；跑全測試、看 `git diff --stat`、填執行紀錄。
+
+## 4. 測試計畫
+| 作業-階段 | 要證明的行為 |
+|---|---|
+| A-1 | 週期再查詢；interval 0 只查一次；例外後續跑 |
+| B-1 | 入列 Id 集合正確；冪等不重入列；空表不入列 |
+| C-1 | migration 修補重複 Label；索引存在；一致性測試 |
+| C-2 | 併發不同人不同 Label；暫時性例外原樣拋 |
+
+## 5. 文件更新（Claude，驗收後）
+- `docs/DEPLOYMENT-MODES.md` 已知限制：worker 崩潰卡住／Core 補資料 Edge 不重啟 → 改為最多延遲 `ContentDownload:RequeueIntervalMinutes`（預設 15 分）。
+- README 設定說明新增 `ContentDownload:RequeueIntervalMinutes`。
+- 現行 design notes 若提到匿名代號指派，補「(GroupId, Label) 唯一＋後綴重試」。
+- 結案後本檔移入 `docs/history/`。
+
+## 6. 風險與回滾
+| 作業 | 風險 | 觀察 | 回滾 |
+|---|---|---|---|
+| A | 大量 Failed 時每週期重掃 DB | requeue log 筆數 | 設 `RequeueIntervalMinutes=0` |
+| C | 既有重複 Label 修補後含 `(2)`；SqlServer migration 未實測 | 部署前跑 `migrations script` | `Down()` drop index，Label 不還原 |
+
+## 7. 執行紀錄
+| 作業-階段 | 執行者 | 結果 | 驗收 | 落差與處置 |
+|---|---|---|---|---|
+| | | | | |
