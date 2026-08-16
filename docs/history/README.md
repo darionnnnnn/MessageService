@@ -13,6 +13,7 @@
 | `POST-CONSOLIDATION-REVIEW-PLAN.md` | 部署收斂後的外部審查回饋輪（P0 批次 ingest bug、心跳監測、加密信封 key id 等） |
 | `REVIEW-FEEDBACK-2-PLAN.md` | 部署收斂第二輪審查回饋（SQLite 路徑修正、provider 推導與救場、心跳強化等） |
 | `REVIEW-FEEDBACK-3-PLAN.md` | 第三輪審查回饋：效能與體驗 16 項。含頭貼快取不改 `max-age` 的理由、SQLite Range 改用 `SqliteBlob`、頭貼刷新抑制窗口為何是 5 分鐘、以及全文檢索索引對中文不適用的實測數據 |
+| `2026-08-16_REVIEW-FEEDBACK-5-PLAN.md` | 第五輪審查回饋：貼圖回填補出的內容沒人下載、下載回收改週期化、匿名代號 `(GroupId, Label)` 唯一索引與撞名重試。含委派 agy 的分段執行紀錄，以及 SqlServer 端 Label 連帶改 `nvarchar(450)` 的理由 |
 | `DEPLOYMENT-MODES-DECISIONS.md` | `docs/DEPLOYMENT-MODES.md` 移出的設計決策理由、雙行程端到端驗證紀錄、原始建置分期 |
 | `WEB-UI-DESIGN-NOTES.md` | 檢視端 UI 歷次改版的設計決策理由、放棄的替代方案、已知限制 |
 
