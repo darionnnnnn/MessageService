@@ -1549,12 +1549,11 @@ public class DbContentWorkSourceTests : IDisposable
     }
 
     [Fact]
-    public async Task GetPendingIdsAsync_StartupReclaim_ReclaimsOnlyMatchingOwnerId_NotDifferentOwnerOnSameMachine()
+    public async Task GetPendingIdsAsync_StartupReclaim_ReclaimsOnlyMatchingOwnerId_NotDifferentSiteOnSameMachine()
     {
-        // 驗證 isStartup 回收只回收 ownerId 相同的認領；不同 ownerId 但在同一台機器上的認領不被回收
-        var machineName = Environment.MachineName;
-        var myOwnerId = $"{machineName}-proc1";
-        var otherOwnerId = $"{machineName}-proc2";
+        // 驗證 isStartup 回收只回收相同站台（ownerId 相同）的認領；同一台機器上的不同站台（ownerId 不同）認領不被回收
+        var myOwnerId = new ProcessOwnerId("site-1").Value;
+        var otherOwnerId = new ProcessOwnerId("site-2").Value;
 
         var unexpiredTime = DateTimeOffset.UtcNow.AddMinutes(-5); // 未逾期
 
@@ -1580,6 +1579,30 @@ public class DbContentWorkSourceTests : IDisposable
         Assert.Equal(DownloadStatus.Downloading, reloadedOther.DownloadStatus);
         Assert.Equal(otherOwnerId, reloadedOther.ClaimedBy);
         Assert.NotNull(reloadedOther.ClaimedAt);
+    }
+
+    [Fact]
+    public async Task GetPendingIdsAsync_StartupReclaim_ReclaimsOrphansLeftByPreviousProcessWithSameOwnerId()
+    {
+        // 模擬同一站台前一個行程崩潰留下的孤兒列：DownloadStatus = Downloading、ClaimedBy 等於本次 ownerId、
+        // ClaimedAt 尚未逾期。以 isStartup: true 掃描時應將其回收為 Pending 且清空 ClaimedAt 與 ClaimedBy。
+        var ownerId = new ProcessOwnerId().Value;
+        var unexpiredTime = DateTimeOffset.UtcNow.AddMinutes(-5); // 租約 15 分鐘，尚未逾期
+
+        var orphanContentId = await SeedDownloadingContentAsync(unexpiredTime, claimedBy: ownerId);
+
+        using var scope = _provider.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+        var source = CreateSource(dbContext, new ContentDownloadOptions { ClaimLeaseMinutes = 15 });
+
+        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, isStartup: true, ownerId, CancellationToken.None);
+
+        Assert.Contains(orphanContentId, ids);
+
+        var reloaded = await ReloadContentAsync(orphanContentId);
+        Assert.Equal(DownloadStatus.Pending, reloaded.DownloadStatus);
+        Assert.Null(reloaded.ClaimedAt);
+        Assert.Null(reloaded.ClaimedBy);
     }
 
     private sealed class RaceModificationInterceptor(Func<DbConnection, Task> onFirstSelectExecuted) : DbCommandInterceptor
