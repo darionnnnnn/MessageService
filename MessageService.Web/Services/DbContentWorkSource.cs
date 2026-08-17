@@ -110,9 +110,20 @@ public class DbContentWorkSource(
 
         if (pendingIds.Count + failedCandidatesCount >= maxPending)
         {
-            logger.LogInformation(
-                "Pending content scan reached limit of {Limit} items; remaining items will be processed in subsequent scans",
-                maxPending);
+            // RequeueIntervalMinutes <= 0 時 ContentDownloadService 不會啟動週期重掃，
+            // 這一輪掃不完的要等下次行程啟動才有機會被撿回——不能說「後續掃描會處理」
+            if (_options.RequeueIntervalMinutes > 0)
+            {
+                logger.LogInformation(
+                    "Pending content scan reached limit of {Limit} items; remaining items will be processed in subsequent scans",
+                    maxPending);
+            }
+            else
+            {
+                logger.LogWarning(
+                    "Pending content scan reached limit of {Limit} items, but periodic requeue is disabled (RequeueIntervalMinutes <= 0); remaining items will not be processed until the next startup",
+                    maxPending);
+            }
         }
 
         return pendingIds.Concat(retryableIds).ToList();

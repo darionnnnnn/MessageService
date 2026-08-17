@@ -1172,6 +1172,31 @@ public class DbContentWorkSourceTests : IDisposable
     }
 
     [Fact]
+    public async Task GetPendingIdsAsync_LimitReached_WhenPeriodicRequeueDisabled_LogsWarning()
+    {
+        // 驗證：RequeueIntervalMinutes <= 0（週期重掃停用）時，掃描達上限記的是警告而不是
+        // 「後續掃描會處理」——那句話在沒有後續掃描的情況下不成立
+        await SeedPendingContentsAsync(25);
+        var maxLimit = 10;
+        var logger = new CapturingLogger();
+
+        using var scope = _provider.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+        var source = CreateSource(
+            dbContext,
+            new ContentDownloadOptions { MaxPendingIdsPerScan = maxLimit, RequeueIntervalMinutes = 0 },
+            logger: logger);
+
+        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, isStartup: true, TestOwner, CancellationToken.None);
+
+        Assert.Equal(maxLimit, ids.Count);
+        Assert.Empty(logger.Informations);
+        Assert.Single(logger.Warnings);
+        Assert.Contains(maxLimit.ToString(), logger.Warnings[0]);
+        Assert.Contains("next startup", logger.Warnings[0]);
+    }
+
+    [Fact]
     public async Task GetPendingIdsAsync_PendingExceedsLimit_SubsequentScansProcessAllItemsWithoutLoss()
     {
         // 驗證：上限外的資料在下一輪呼叫時仍會被撈到（連續呼叫多輪直到全部處理完畢）
