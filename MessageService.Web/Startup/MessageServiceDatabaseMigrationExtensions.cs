@@ -127,23 +127,26 @@ public static class MessageServiceDatabaseMigrationExtensions
                 provider,
                 pendingMigrations.Count,
                 string.Join(", ", pendingMigrations));
-
-            var stopwatch = Stopwatch.StartNew();
-            dbContext.Database.Migrate();
-            stopwatch.Stop();
-
-            logger.LogInformation(
-                "{Provider} 資料庫 migration 套用完成，耗時 {ElapsedMilliseconds} ms。",
-                provider,
-                stopwatch.ElapsedMilliseconds);
         }
         else
         {
             logger.LogInformation(
                 "{Provider} 資料庫結構已是最新，本次不需套用 migration。",
                 provider);
+        }
 
-            dbContext.Database.Migrate();
+        // 沒有待套用時 Migrate() 是冪等的空操作，這裡不分支照樣呼叫——保持「migration 到底跑了沒」
+        // 只有一個決定點（與 SqlServer 探測階段已經 migrate 過時的處理同一個理由）
+        var stopwatch = Stopwatch.StartNew();
+        dbContext.Database.Migrate();
+        stopwatch.Stop();
+
+        if (pendingMigrations.Count > 0)
+        {
+            logger.LogInformation(
+                "{Provider} 資料庫 migration 套用完成，耗時 {ElapsedMilliseconds} ms。",
+                provider,
+                stopwatch.ElapsedMilliseconds);
         }
     }
 }

@@ -166,11 +166,19 @@ Core 則沒有問題（參數預設值就是舊行為）。`isStartup`／`ownerI
   仍可重試的 `Failed`。Core 端補出但由 Edge 端下載的 `Pending` 項目最壞要等一個週期才會被撿回。
   `Downloading` 走**認領租約**（`ClaimedAt`／`ClaimedBy`，語意見 README 設定表的
   `ContentDownload:ClaimLeaseMinutes`）：週期重掃只回收租約已逾期的；啟動掃描額外回收掛在
-  本機名下的（一定是上次行程的孤兒）。別台主機正在下載中的內容不會被誤收——這正是舊版
+  **本站台**名下的（一定是上次行程的孤兒）。別台主機正在下載中的內容不會被誤收——這正是舊版
   「啟動時無條件把所有 `Downloading` 打回 `Pending`」在多主機下的 bug。
   把間隔設為 0 會退回「只在啟動時掃一次」。
+  ownerId 的粒度是站台而非行程（組成見 README 設定表），這帶來兩個部署前提：**不可啟用
+  ASP.NET Core Module 的 shadow copy**（BaseDirectory 每次啟動都變，ownerId 會退回每行程一個，
+  啟動掃描就認不出自己的孤兒），**同機兩個站台不可共用同一個實體目錄**（會拿到相同 ownerId）。
+  另一個代價是 IIS 重疊回收過渡期或
+  Web Garden 下同一站台的新舊行程共用同一個 ownerId：新行程可能把舊行程進行中的認領搶回
+  `Pending` 讓那一筆重下載一次，舊行程完成時的寫入則會因為 `ClaimedAt` 對不上而被放棄並記
+  Warning，資料不會被覆蓋。
 - **單輪掃描有上限**：`ContentDownload:MaxPendingIdsPerScan`（預設 5000）限制一輪最多撈多少
-  待處理內容，Id 小的先處理，其餘留給下一輪（被截斷時會記一筆 log）。沒有上限時，
+  待處理內容，Id 小的先處理，其餘留給下一輪（被截斷時會記一筆 log，等級依
+  `RequeueIntervalMinutes` 而定，見 README 設定表）。沒有上限時，
   積壓幾十萬筆會整包載入記憶體，而且 SQL Server 端會撞到 2100 個查詢參數的硬上限——
   積壓越嚴重越跑不動。
 - **同一個角色不支援部署兩台**（例如為了 HA 開兩台 Core）：維護類背景工作靠「每個角色恰好

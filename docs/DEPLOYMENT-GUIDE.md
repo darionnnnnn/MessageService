@@ -165,6 +165,13 @@ dotnet ef database update --project MessageService.Data --context SqlServerMessa
 **這一節只適用於「已經在跑正式資料的既有 SQL Server 環境」升級到新版本**——全新部署、
 或還在用 SQLite 的環境不用管這段。
 
+> **外部工具寫入 `GroupMessages` 要注意 SET 選項**：這張表從 `FilterMessageTypeIndex` 起有了
+> 篩選索引（`MessageContents` 一直都有），SQL Server 要求對帶篩選索引的資料表做 DML 的連線
+> 必須 `ANSI_NULLS`／`QUOTED_IDENTIFIER`／`ANSI_PADDING`／`ANSI_WARNINGS`／
+> `CONCAT_NULL_YIELDS_NULL`／`ARITHABORT` 為 ON、`NUMERIC_ROUNDABORT` 為 OFF，否則寫入會拿到
+> Msg 1934。應用程式自己（SqlClient）預設就對；會踩到的是外部 ETL、`sqlcmd -I` 沒開、
+> 或舊的 OLEDB 工具直接往這張表寫資料的情況。
+
 某幾次改版（例如 `SchemaHardeningRound1` 那次）的 migration 對既有欄位做了
 `ALTER COLUMN`（把幾個 `nvarchar(max)` 欄位收斂成有限長度，好建索引）。SQL Server 執行
 `ALTER COLUMN` 時會**整張表重寫**並持 **Sch-M（結構性）鎖**，鎖持有期間這張表完全無法讀寫；
@@ -227,6 +234,12 @@ dotnet ef database update --project MessageService.Data --context SqlServerMessa
 
 **升級期間建議把 `web.config` 的 `stdoutLogEnabled` 暫時改成 `true`**，讓啟動階段（NLog 還沒
 接手之前）的錯誤有地方落地；確認升級成功後再改回 `false`。
+
+**怎麼確認 migration 是「正在跑」而不是「卡死」**：站台會把過程記在
+`logs/messageservice-{日期}.log`——有待套用時記兩則（開始前的「共 N 個待套用：<名稱清單>」
+與完成後的耗時），已是最新時只記一則「不需套用」。看到開始那則、還沒看到完成那則，
+就是還在搬資料。EF 自己的 `Applying migration` 屬 `Microsoft.*` 類別，已被 `nlog.config`
+濾掉，不要找它。
 
 ### 既有 SQLite 環境升級到新的預設資料庫路徑
 

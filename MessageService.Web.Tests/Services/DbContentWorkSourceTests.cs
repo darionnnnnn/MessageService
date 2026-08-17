@@ -1193,7 +1193,7 @@ public class DbContentWorkSourceTests : IDisposable
         Assert.Empty(logger.Informations);
         Assert.Single(logger.Warnings);
         Assert.Contains(maxLimit.ToString(), logger.Warnings[0]);
-        Assert.Contains("next startup", logger.Warnings[0]);
+        Assert.Contains("periodic requeue is disabled", logger.Warnings[0]);
     }
 
     [Fact]

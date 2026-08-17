@@ -36,7 +36,7 @@ public class DbContentWorkSource(
         // Downloading：卡在「已認領但沒做完」的列。當 reclaimDownloading=true 時，回收
         // 逾期（ClaimedAt < UtcNow - ClaimLeaseMinutes）或 ClaimedAt 為 null（舊資料／異常遺留）的列；
         // 若 isStartup=true，則一併回收該 ownerId 名下（ClaimedBy == ownerId）但未逾期的列（上次行程崩潰孤兒），
-        // 並將狀態改回 Pending、清空 ClaimedAt 與 ClaimedBy 重新撿回。週期重掃（isStartup=false）時本機與其他主機
+        // 並將狀態改回 Pending、清空 ClaimedAt 與 ClaimedBy 重新撿回。週期重掃（isStartup=false）時本站台與其他站台
         // 租約未逾期的 Downloading 表示 worker 仍在正常下載中，一律不碰也不列入待處理清單。
         var maxPending = Math.Max(1, _options.MaxPendingIdsPerScan);
         var leaseCutoff = DateTimeOffset.UtcNow.AddMinutes(-_options.ClaimLeaseMinutes);
@@ -110,8 +110,10 @@ public class DbContentWorkSource(
 
         if (pendingIds.Count + failedCandidatesCount >= maxPending)
         {
-            // RequeueIntervalMinutes <= 0 時 ContentDownloadService 不會啟動週期重掃，
-            // 這一輪掃不完的要等下次行程啟動才有機會被撿回——不能說「後續掃描會處理」
+            // RequeueIntervalMinutes <= 0 時本站台的 ContentDownloadService 不會啟動週期重掃，
+            // 這一輪掃不完的要等下次啟動才有機會被撿回——不能說「後續掃描會處理」。
+            // 拆機部署時這個掃描可能是 Edge 透過 ingest API 觸發的，決定重掃節奏的是 Edge 那邊的
+            // 設定，所以警告文字只講「這台的設定」，不替呼叫端斷言後續會不會有掃描
             if (_options.RequeueIntervalMinutes > 0)
             {
                 logger.LogInformation(
@@ -121,7 +123,7 @@ public class DbContentWorkSource(
             else
             {
                 logger.LogWarning(
-                    "Pending content scan reached limit of {Limit} items, but periodic requeue is disabled (RequeueIntervalMinutes <= 0); remaining items will not be processed until the next startup",
+                    "Pending content scan reached limit of {Limit} items; periodic requeue is disabled on this host (RequeueIntervalMinutes <= 0), so remaining items wait for the next scan the downloader initiates (at its next startup, if it has no periodic requeue either)",
                     maxPending);
             }
         }

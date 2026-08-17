@@ -84,7 +84,8 @@
 見各階段驗收；總數應由 762 增加 ≥ 7。
 
 ## 5. 文件更新（Claude，全部驗收後）
-- `docs/DEPLOYMENT-GUIDE.md`：migration 段補「進度會記在 `logs/messageservice-{日期}.log`（開始／完成／耗時）」；設定表 `ClaimLeaseMinutes` 預設改 15；多主機段補一句「IIS 重疊回收期間新舊行程同 ownerId，進行中下載可能重跑一次，資料由 fencing 保護」。
+- `docs/DEPLOYMENT-GUIDE.md`：migration 段補「進度會記在 `logs/messageservice-{日期}.log`（開始／完成／耗時）」。
+  （原規劃另寫「設定表 `ClaimLeaseMinutes` 預設改 15」與「多主機段補 IIS 重疊回收代價」兩條——實作時發現該檔沒有設定表列、設定語意一律指向 README，認領租約的敘述位置在 `DEPLOYMENT-MODES.md`，故分別改落在 README 與 DEPLOYMENT-MODES。）
 - `web.config` 註解「沒有任何線索」語句更新。
 - `README.md` 若有列 ContentDownload 預設值同步。
 - 本文件填 §7 後依 docs-current-vs-history 收尾。
@@ -95,6 +96,24 @@
 - B、D：純 log，無風險。
 
 ## 7. 執行紀錄
+
 | 作業-階段 | 執行者 | 結果 | 驗收 | 落差與處置 |
 |---|---|---|---|---|
-| | | | | |
+| A-1 ownerId 站台穩定化 | agy | 完成（`c857e8a`） | build 0 警告；766 綠（+4） | agy 三次都在「跑測試建立基準」時逾時 exit 0、無摘要，驗收全由 Claude 跑。改寫的既有測試改用兩個真實 siteKey 建構 ownerId，比原本手工字串更貼近語意，採納 |
+| B-1 migration 進度 log | agy | 完成（`fd31e76`） | build 0 警告；768 綠（+2）；`nlog.config` 未動 | 無落差。測試走真實 `app.MigrateMessageServiceDatabase()` 接線，非直接呼叫內部方法 |
+| C-1 篩選索引＋兩 provider migration | agy | 完成（`a0a9abf`） | build 0 警告；771 綠（+3）；既有 migration 未改 | 超出規格但正向：多寫了一支真實 up/down migration 測試（含資料保存斷言），保留。兩份 snapshot 被 EF 工具加上 BOM，屬工具行為不回退 |
+| D log 分流 | Claude | 完成（`b11a30f`） | 772 綠（+1） | — |
+| E 文件 | Claude | 完成 | — | README 設定表兩列＋欄位表 `ClaimedBy`、DEPLOYMENT-GUIDE 升級段、DEPLOYMENT-MODES 認領段、web.config 註解。原規劃指定的兩處落點依實際文件結構改放（見 §5 括號） |
+
+### 終檢
+
+**文件審查**抓到 9 項，全部處理：
+- `README.md` 欄位表 `ClaimedBy` 仍寫「行程隨機字尾」，與同檔設定表新敘述打架——這是本輪最嚴重的漏改（改一個共用概念時漏改另一處讀取端，與第十四輪的回歸同型）。
+- `web.config` 註解「沒有任何線索」與新增的「進度會記在 log」自相矛盾，刪掉前半句。
+- DEPLOYMENT-GUIDE 寫「記三則訊息」與實作不符（有待套用兩則／已是最新一則），改正。
+- `ContentDownloadOptions`、`DbContentWorkSource` 註解仍用「那台主機」「本機」的機器粒度，改為站台。
+- `ProcessOwnerId` 類別名與新語意不符，XML 註解補一句說明沿用歷史名稱。
+- DEPLOYMENT-MODES 新增段與 README 設定表重複，改為只留增量並指路。
+- README `RequeueIntervalMinutes` 那列過長，把掃描上限的 log 等級敘述移到 `MaxPendingIdsPerScan` 列。
+- 規劃 §5 兩條落點與實作不符，補註說明。
+- 附帶：`MigrateWithLogging` 的 `Migrate()` 在 if/else 兩支各寫一次，收斂成單一呼叫點。

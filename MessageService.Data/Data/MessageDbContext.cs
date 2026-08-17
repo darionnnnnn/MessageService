@@ -73,7 +73,9 @@ public class MessageDbContext(DbContextOptions options, FieldCipher? cipher = nu
             entity.HasIndex(m => new { m.GroupId, m.Id }); // 未讀數／afterId／beforeId／hasMore
             entity.HasIndex(m => new { m.GroupId, m.EventTimestamp }); // 天數視窗／aroundId
 
-            // 貼圖回填服務用 MessageType == "sticker" 過濾，篩選索引只蓋貼圖訊息
+            // 貼圖回填服務用 MessageType == "sticker" 過濾，篩選索引只蓋貼圖訊息。
+            // 查詢端的述詞要維持字面值 "sticker"：改成變數或常數欄位會被 EF 參數化，
+            // 兩個 provider 都不再比對得到這個篩選索引，退回全表掃描
             entity.HasIndex(m => m.MessageType)
                 .HasFilter(Database.IsSqlite() ? "\"MessageType\" = 'sticker'" : "[MessageType] = 'sticker'");
         });
