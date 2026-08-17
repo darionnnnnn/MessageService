@@ -154,8 +154,10 @@ dotnet ef database update --project MessageService.Data --context SqlServerMessa
 > 跑 migration，而那把具名 mutex **只跨行程、不跨機器**。請只讓 **Core 開
 > `Database:AutoMigrate`，Viewer 設成 `false`**，由 Core 單獨負責升級 schema。
 > 同機兩站台若應用程式集區身分不同，第二個站台連建立那把鎖都會被拒絕；這種情況下它會
-> **跳過 migration 並記一筆 Warning**（不做無鎖硬跑），schema 交給拿得到鎖的那一台升級。
-> log 出現「本次啟動未執行 schema migration」就是這個情形。
+> **跳過 migration**（不做無鎖硬跑），schema 交給拿得到鎖的那一台升級。跳過之後若資料庫
+> 沒有待套用的 migration，只記一筆 Warning「本次啟動未執行 schema migration」照常啟動；
+> **若真的有待套用的 migration，站台會直接啟動失敗**（例外訊息會說明落後幾個 migration）——
+> 帶著舊 schema 服務只會產生一連串缺欄位錯誤，Warning 早被淹沒，寧可讓它起不來。
 
 ### 既有 SQL Server 環境升級注意事項
 
@@ -505,7 +507,7 @@ Edge 端的 outbox 排空預設會打 Core 的批次 ingest 端點（`POST /api/
 
 > 另一則要注意的 Warning：`Deleted N orphaned MessageContentBlob(s)`。刪訊息之後 blob 子列
 > 是靠 `GroupMessages → MessageContents → MessageContentBlobs` 兩層 FK cascade 一起消失的，
-> 清除流程每批之後會補一句孤兒回收當安全網。**正常情況這裡永遠刪 0 列、不會有 log**；
+> 清除流程每輪結束會補一句孤兒回收當安全網。**正常情況這裡永遠刪 0 列、不會有 log**；
 > 出現非 0 表示 cascade 沒有作用（例如資料庫是用不建外鍵的工具還原的），要去查，
 > 否則「刪了訊息但空間沒還回來」會一路靜默到硬碟滿。
 

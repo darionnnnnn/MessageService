@@ -62,6 +62,7 @@ LINE Platform ──POST──▶ LineWebhookController
         完成後寫回 MessageContents）                    7 天 TTL，呼叫 LINE profile API）
 
 RetentionCleanupService（每日固定時間讀取檢視端設定頁存的保留天數，分批刪除逾期訊息，內容檔案靠 CASCADE 一併刪除）
+StickerContentBackfillService（啟動時替既有貼圖訊息補出 Pending 內容列，只在 AllInOne／Core 跑）
 ```
 
 ### 訊息型別處理
@@ -276,8 +277,10 @@ dotnet user-secrets set "Line:ChannelAccessToken" "<你的 access token>"
 | GroupMessageId | bigint FK | |
 | FileName | nvarchar(max), null | 檔案訊息的原始檔名（加密開啟時同 Text 走 `ENC2:` 整值加密） |
 | ContentType | nvarchar(max), null | 下載完成後的 MIME type |
-| DownloadStatus | nvarchar(20) | Pending / Completed / Failed |
+| DownloadStatus | nvarchar(20) | Pending / Downloading / Completed / Failed |
 | CompletedAt | datetimeoffset, null | 下載完成時間 |
+| ClaimedAt | datetimeoffset, null | 下載認領時間，租約逾期判斷用（`ContentDownload:ClaimLeaseMinutes`） |
+| ClaimedBy | nvarchar(128), null | 認領的主機名稱；完成／失敗寫回時校驗認領仍屬於自己，啟動時回收本機名下的孤兒 |
 | FailedAttempts | int | 累計下載失敗次數，`ContentDownload:MaxFailedRetries` 用它判斷是否放棄重試 |
 | LastAttemptAt | datetimeoffset, null | 最後一次嘗試下載的時間 |
 
@@ -340,8 +343,9 @@ Migrations 放在 `MessageService.Data`，**每個 provider 一套獨立的 migr
 多實例（同機多站台，或未來多 worker）同時啟動時，`Database.Migrate()` 前會取一個具名
 mutex，避免兩邊同時建 `__EFMigrationsHistory` 互相打架。**這把鎖只跨行程、不跨機器**：
 多台主機直連同一顆資料庫時（三台拓撲），請只讓 Core 開 `Database:AutoMigrate`、Viewer 設
-`false`。同機兩站台若集區身分不同而拿不到鎖，該站台會跳過 migration 並記 Warning，
-不做無鎖硬跑——詳見 [docs/DEPLOYMENT-GUIDE.md](docs/DEPLOYMENT-GUIDE.md)。
+`false`。同機兩站台若集區身分不同而拿不到鎖，該站台會跳過 migration（不做無鎖硬跑）；
+若此時真有待套用的 migration 會直接啟動失敗，而不是帶著舊 schema 服務——詳見
+[docs/DEPLOYMENT-GUIDE.md](docs/DEPLOYMENT-GUIDE.md)。
 
 > 改了 `MessageDbContext` 的模型之後，要對**兩個 provider 都**跑
 > `dotnet ef migrations add <Name> --context SqliteMessageDbContext` 與

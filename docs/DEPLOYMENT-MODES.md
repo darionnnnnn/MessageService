@@ -19,7 +19,7 @@
 | 直連主資料庫 | ✓ | ✗ | ✓ | ✓ |
 | 本機 outbox＋排空 | ✓ | ✓ | ✗（無 webhook，無事件可寫） | ✗ |
 | 保留期清除 | ✓ | ✗ | ✓ | ✗（即使直連資料庫也不跑，避免三台拓撲下跟 Core 搶著清同一張表） |
-| 貼圖內容回填 | ✓ | ✗ | ✓ | ✗（同上：維護類背景工作只由一台負責。兩台同跑會撞唯一鍵，程式雖已改成跳過該批續跑，但那是白工） |
+| 貼圖內容回填 | ✓ | ✗ | ✓ | ✗（同上：維護類背景工作只由一台負責。兩台同跑會撞唯一鍵，程式會逐筆補完該批未撞的部分，但那是白工） |
 | `Line:OutboundHere` 預設 | `true` | `true` | `false` | `false` |
 | 落地方式 | outbox → `DirectIngestSink` | outbox → `HttpIngestSink` → 對方的 `/api/ingest/events(-batch)` | `IngestController` → `DirectIngestSink` | 不適用 |
 
@@ -67,10 +67,8 @@
 | 檢視端的 `AllowedClientIps`（保護檢視端頁面／API） | `Viewer:AllowedClientIps` | 同上，不相容 |
 | （無） | `Viewer:Enabled`（`bool?`） | 新增，三台拓撲用；未設定時依模式推導預設值 |
 | （無） | `Http:UseHttpsRedirection`（`bool`，預設 `false`） | 新增，IIS 直接綁 HTTPS 的部署不需要應用層再轉址一次 |
-| （無） | `Database:AutoMigrate`（`bool`，預設 `true`） | 新增，啟動時自動跑 `Database.Migrate()`；嚴管環境可關閉改手動 `dotnet ef database update`。**三台拓撲請只在 Core 開、Viewer 設 `false`**，migration 鎖只跨行程不跨機器 |
-| （無） | `Database:SqliteBusyTimeoutMs`（`int`，預設 `30000`） | 新增，SQLite 寫鎖被別的行程佔用時最多等這麼久。WAL 只讓讀寫不互相阻塞，寫／寫仍是全庫互斥 |
-| （無） | `ContentDownload:ClaimLeaseMinutes`（`int`，預設 `60`） | 新增，內容下載的認領租約；逾期才會被別台回收重跑 |
-| （無） | `ContentDownload:MaxPendingIdsPerScan`（`int`，預設 `5000`） | 新增，單輪掃描的待處理內容上限 |
+| （無） | `Database:AutoMigrate`（`bool`，預設 `true`） | 新增，啟動時自動跑 `Database.Migrate()`；**三台拓撲請只在 Core 開、Viewer 設 `false`**（鎖不跨機器，見 DEPLOYMENT-GUIDE） |
+| （無） | `Database:SqliteBusyTimeoutMs`／`ContentDownload:ClaimLeaseMinutes`／`ContentDownload:MaxPendingIdsPerScan` | 新增，說明見 README 設定表 |
 
 ## 架構：outbox 是唯一的落地路徑
 
@@ -137,7 +135,8 @@ Edge 端排空 outbox 時預設一次 HTTP 請求送整批（`Outbox:BatchSize` 
 不用重啟 Edge 就會自動改用批次），只記一次警告 log 避免過渡期洗版。同一條順序也適用於
 `content-work` 端點的 `reclaimDownloading` 參數：舊版 Core 會忽略它、一律撿回 `Downloading`，
 新版 Edge 的週期重掃打到舊版 Core 就會把正在下載中的項目打回 `Pending`；舊版 Edge 打新版
-Core 則沒有問題（參數預設值就是舊行為）。
+Core 則沒有問題（參數預設值就是舊行為）。`isStartup` 參數同理：舊版 Core 忽略它，只是少了
+「啟動時立即回收本機孤兒」的優化，等租約逾期仍會回收。
 
 ## 設定
 
@@ -164,11 +163,10 @@ Core 則沒有問題（參數預設值就是舊行為）。
 - **待下載內容的回收最多延遲一個重掃週期**：`ContentDownloadService` 除了啟動時掃一次，
   之後每隔 `ContentDownload:RequeueIntervalMinutes`（預設 15 分鐘）重掃一次 `Pending` 與
   仍可重試的 `Failed`。Core 端補出但由 Edge 端下載的 `Pending` 項目最壞要等一個週期才會被撿回。
-  `Downloading` 走**認領租約**：認領時寫入 `ClaimedAt`，只有 `ClaimedAt` 為空或早於
-  `ContentDownload:ClaimLeaseMinutes`（預設 60 分鐘）的才會被回收改回 `Pending`，啟動掃描與
-  週期重掃套用同一條規則。所以「行程被殺、狀態停在 `Downloading`」的孤兒不必等重啟，
-  租約逾期後的下一次重掃就會撿回；而別台主機正在下載中的內容也不會被誤收
-  （這正是舊版「啟動時無條件把所有 `Downloading` 打回 `Pending`」在多主機下的 bug）。
+  `Downloading` 走**認領租約**（`ClaimedAt`／`ClaimedBy`，語意見 README 設定表的
+  `ContentDownload:ClaimLeaseMinutes`）：週期重掃只回收租約已逾期的；啟動掃描額外回收掛在
+  本機名下的（一定是上次行程的孤兒）。別台主機正在下載中的內容不會被誤收——這正是舊版
+  「啟動時無條件把所有 `Downloading` 打回 `Pending`」在多主機下的 bug。
   把間隔設為 0 會退回「只在啟動時掃一次」。
 - **單輪掃描有上限**：`ContentDownload:MaxPendingIdsPerScan`（預設 5000）限制一輪最多撈多少
   待處理內容，Id 小的先處理，其餘留給下一輪（被截斷時會記一筆 log）。沒有上限時，
