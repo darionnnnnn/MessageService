@@ -73,8 +73,9 @@ public class MessageDbContext(DbContextOptions options, FieldCipher? cipher = nu
             entity.HasIndex(m => new { m.GroupId, m.Id }); // 未讀數／afterId／beforeId／hasMore
             entity.HasIndex(m => new { m.GroupId, m.EventTimestamp }); // 天數視窗／aroundId
 
-            // 貼圖回填服務用 MessageType == "sticker" 過濾，沒有索引是全表掃描
-            entity.HasIndex(m => m.MessageType);
+            // 貼圖回填服務用 MessageType == "sticker" 過濾，篩選索引只蓋貼圖訊息
+            entity.HasIndex(m => m.MessageType)
+                .HasFilter(Database.IsSqlite() ? "\"MessageType\" = 'sticker'" : "[MessageType] = 'sticker'");
         });
 
         modelBuilder.Entity<MessageContent>(entity =>
