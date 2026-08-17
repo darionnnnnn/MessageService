@@ -1,4 +1,5 @@
 using MessageService.Outbox;
+using MessageService.Services;
 using Microsoft.Data.Sqlite;
 
 namespace MessageService.Tests.Outbox;
@@ -10,6 +11,7 @@ public class OutboxSchemaUpgraderTests : IDisposable
 {
     private readonly string _dbPath = Path.Combine(Path.GetTempPath(), $"outbox-schema-test-{Guid.NewGuid():N}.db");
     private string ConnectionString => $"Data Source={_dbPath}";
+    private const int DefaultTimeout = SqliteBusyTimeoutInterceptor.DefaultBusyTimeoutMs;
 
     public void Dispose()
     {
@@ -48,7 +50,7 @@ public class OutboxSchemaUpgraderTests : IDisposable
     {
         CreateLegacySchemaWithOneRow();
 
-        OutboxSchemaUpgrader.EnsureDeadLetterColumn(ConnectionString);
+        OutboxSchemaUpgrader.EnsureDeadLetterColumn(ConnectionString, DefaultTimeout);
 
         using var connection = new SqliteConnection(ConnectionString);
         connection.Open();
@@ -68,7 +70,7 @@ public class OutboxSchemaUpgraderTests : IDisposable
     {
         CreateLegacySchemaWithOneRow();
 
-        OutboxSchemaUpgrader.EnsureDeadLetterColumn(ConnectionString);
+        OutboxSchemaUpgrader.EnsureDeadLetterColumn(ConnectionString, DefaultTimeout);
 
         using var connection = new SqliteConnection(ConnectionString);
         connection.Open();
@@ -85,10 +87,10 @@ public class OutboxSchemaUpgraderTests : IDisposable
     public void EnsureDeadLetterColumn_ColumnAlreadyExists_IsNoOpAndDoesNotThrow()
     {
         CreateLegacySchemaWithOneRow();
-        OutboxSchemaUpgrader.EnsureDeadLetterColumn(ConnectionString);
+        OutboxSchemaUpgrader.EnsureDeadLetterColumn(ConnectionString, DefaultTimeout);
 
         // 再跑一次：模擬新版 EnsureCreated() 已經建好含該欄位的表、或本方法本身被重複呼叫
-        var ex = Record.Exception(() => OutboxSchemaUpgrader.EnsureDeadLetterColumn(ConnectionString));
+        var ex = Record.Exception(() => OutboxSchemaUpgrader.EnsureDeadLetterColumn(ConnectionString, DefaultTimeout));
 
         Assert.Null(ex);
     }
@@ -98,7 +100,7 @@ public class OutboxSchemaUpgraderTests : IDisposable
     {
         CreateLegacySchemaWithOneRow();
 
-        OutboxSchemaUpgrader.EnableWalMode(ConnectionString);
+        OutboxSchemaUpgrader.EnableWalMode(ConnectionString, DefaultTimeout);
 
         using var connection = new SqliteConnection(ConnectionString);
         connection.Open();
@@ -109,19 +111,20 @@ public class OutboxSchemaUpgraderTests : IDisposable
     }
 
     [Fact]
-    public void EnableWalMode_WithCustomBusyTimeout_ExecutesSuccessfully()
+    public void SetBusyTimeout_AppliesConfiguredValueOnThatConnection()
     {
+        // EnableWalMode 等三支方法都是開連線→SetBusyTimeout→做事→關連線，busy_timeout 是連線層級
+        // 屬性、方法回傳時連線已關，從外面驗不到。直接對同一條連線驗 SetBusyTimeout 的效果，
+        // 用非預設值證明不是剛好等於某個預設
         CreateLegacySchemaWithOneRow();
 
-        var ex = Record.Exception(() => OutboxSchemaUpgrader.EnableWalMode(ConnectionString, 12345));
-
-        Assert.Null(ex);
         using var connection = new SqliteConnection(ConnectionString);
         connection.Open();
+        OutboxSchemaUpgrader.SetBusyTimeout(connection, 12345);
+
         using var query = connection.CreateCommand();
-        query.CommandText = "PRAGMA journal_mode;";
-        var mode = (string)query.ExecuteScalar()!;
-        Assert.Equal("wal", mode, ignoreCase: true);
+        query.CommandText = "PRAGMA busy_timeout;";
+        Assert.Equal(12345L, (long)query.ExecuteScalar()!);
     }
 
     /// <summary>模擬已經因為 LINE redelivery 而累積重複 WebhookEventId 的舊 outbox.db——
@@ -154,7 +157,7 @@ public class OutboxSchemaUpgraderTests : IDisposable
     {
         CreateLegacySchemaWithDuplicateWebhookEventIds();
 
-        OutboxSchemaUpgrader.EnsureWebhookEventIdUniqueIndex(ConnectionString);
+        OutboxSchemaUpgrader.EnsureWebhookEventIdUniqueIndex(ConnectionString, DefaultTimeout);
 
         using var connection = new SqliteConnection(ConnectionString);
         connection.Open();
@@ -177,7 +180,7 @@ public class OutboxSchemaUpgraderTests : IDisposable
     {
         CreateLegacySchemaWithDuplicateWebhookEventIds();
 
-        OutboxSchemaUpgrader.EnsureWebhookEventIdUniqueIndex(ConnectionString);
+        OutboxSchemaUpgrader.EnsureWebhookEventIdUniqueIndex(ConnectionString, DefaultTimeout);
 
         using var connection = new SqliteConnection(ConnectionString);
         connection.Open();
@@ -193,9 +196,9 @@ public class OutboxSchemaUpgraderTests : IDisposable
     public void EnsureWebhookEventIdUniqueIndex_NoDuplicates_IsIdempotent()
     {
         CreateLegacySchemaWithOneRow();
-        OutboxSchemaUpgrader.EnsureWebhookEventIdUniqueIndex(ConnectionString);
+        OutboxSchemaUpgrader.EnsureWebhookEventIdUniqueIndex(ConnectionString, DefaultTimeout);
 
-        var ex = Record.Exception(() => OutboxSchemaUpgrader.EnsureWebhookEventIdUniqueIndex(ConnectionString));
+        var ex = Record.Exception(() => OutboxSchemaUpgrader.EnsureWebhookEventIdUniqueIndex(ConnectionString, DefaultTimeout));
 
         Assert.Null(ex);
     }
@@ -223,7 +226,7 @@ public class OutboxSchemaUpgraderTests : IDisposable
             create.ExecuteNonQuery();
         }
 
-        var ex = Record.Exception(() => OutboxSchemaUpgrader.EnsureDeadLetterColumn(ConnectionString));
+        var ex = Record.Exception(() => OutboxSchemaUpgrader.EnsureDeadLetterColumn(ConnectionString, DefaultTimeout));
 
         Assert.Null(ex);
     }

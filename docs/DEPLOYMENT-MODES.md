@@ -135,8 +135,9 @@ Edge 端排空 outbox 時預設一次 HTTP 請求送整批（`Outbox:BatchSize` 
 不用重啟 Edge 就會自動改用批次），只記一次警告 log 避免過渡期洗版。同一條順序也適用於
 `content-work` 端點的 `reclaimDownloading` 參數：舊版 Core 會忽略它、一律撿回 `Downloading`，
 新版 Edge 的週期重掃打到舊版 Core 就會把正在下載中的項目打回 `Pending`；舊版 Edge 打新版
-Core 則沒有問題（參數預設值就是舊行為）。`isStartup` 參數同理：舊版 Core 忽略它，只是少了
-「啟動時立即回收本機孤兒」的優化，等租約逾期仍會回收。
+Core 則沒有問題（參數預設值就是舊行為）。`isStartup`／`ownerId` 參數同理：舊版 Core 忽略它們，只是少了
+「啟動時立即回收自己孤兒」的優化，等租約逾期仍會回收；舊版 Edge 沒帶 `ownerId` 時新版 Core
+一律記成 `legacy-edge`。
 
 ## 設定
 

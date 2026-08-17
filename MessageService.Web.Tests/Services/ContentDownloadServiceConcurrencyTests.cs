@@ -19,7 +19,7 @@ public class ContentDownloadServiceConcurrencyTests
         public int MaxObservedConcurrency { get; private set; }
         public TaskCompletionSource Gate { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        public Task<IReadOnlyList<long>> GetPendingIdsAsync(bool reclaimDownloading, bool isStartup, CancellationToken cancellationToken) =>
+        public Task<IReadOnlyList<long>> GetPendingIdsAsync(bool reclaimDownloading, bool isStartup, string ownerId, CancellationToken cancellationToken) =>
             Task.FromResult<IReadOnlyList<long>>([]);
 
         public async Task<ContentWorkItem?> GetAsync(long contentId, CancellationToken cancellationToken)
@@ -40,10 +40,10 @@ public class ContentDownloadServiceConcurrencyTests
             return new ContentWorkItem(contentId, "line-msg", "image");
         }
 
-        public Task CompleteAsync(long contentId, Stream content, long contentLength, string? contentType, CancellationToken cancellationToken) =>
+        public Task CompleteAsync(long contentId, Stream content, long contentLength, string? contentType, string ownerId, CancellationToken cancellationToken) =>
             Task.CompletedTask;
 
-        public Task FailAsync(long contentId, CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task FailAsync(long contentId, string ownerId, CancellationToken cancellationToken) => Task.CompletedTask;
     }
 
     [Fact]
@@ -92,19 +92,19 @@ public class ContentDownloadServiceConcurrencyTests
     {
         public HashSet<long> CompletedIds { get; } = [];
 
-        public Task<IReadOnlyList<long>> GetPendingIdsAsync(bool reclaimDownloading, bool isStartup, CancellationToken cancellationToken) =>
+        public Task<IReadOnlyList<long>> GetPendingIdsAsync(bool reclaimDownloading, bool isStartup, string ownerId, CancellationToken cancellationToken) =>
             Task.FromResult<IReadOnlyList<long>>([]);
 
         public Task<ContentWorkItem?> GetAsync(long contentId, CancellationToken cancellationToken) =>
             Task.FromResult<ContentWorkItem?>(new ContentWorkItem(contentId, $"line-{contentId}", contentId == 4 ? "image" : "video"));
 
-        public Task CompleteAsync(long contentId, Stream content, long contentLength, string? contentType, CancellationToken cancellationToken)
+        public Task CompleteAsync(long contentId, Stream content, long contentLength, string? contentType, string ownerId, CancellationToken cancellationToken)
         {
             CompletedIds.Add(contentId);
             return Task.CompletedTask;
         }
 
-        public Task FailAsync(long contentId, CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task FailAsync(long contentId, string ownerId, CancellationToken cancellationToken) => Task.CompletedTask;
     }
 
     [Fact]

@@ -131,6 +131,7 @@
 | E 掃描上限 | agy | 完成，745 綠（+5） | 通過 | 排序改用 **Id 由小到大**而非規劃寫的 `ReceivedAt`：`ReceivedAt` 在 SQLite 上沒有支援範圍比較的轉換（同一個理由讓 Failed 的 cutoff 也只能在記憶體篩），Id 遞增等價於到達順序。outbox `CreatedAt` 索引結案不做——outbox 在各主機本機的獨立 SQLite，表很小 |
 | G-1 體檢修正 | agy | 完成 `724473a`，752 綠（+5+2 我改介面收斂） | 通過 | 見下方終檢段 |
 | G-2 體檢修正 | agy | 完成 `80dfca0`，755 綠（+3） | 通過 | 見下方終檢段 |
+| G-3 體檢修正 | agy | 完成，763 綠（+4，另刪 1 支恆真測試、改 1 支弱斷言） | 通過 | 見終檢段第三輪 |
 | F 文件 | Claude | 完成 | — | `SplitBlobTables` 拉成兩 provider 共通節＋SQLite 離線升級步驟；DEPLOYMENT-MODES 補四個新設定鍵、貼圖回填歸屬、雙 Core 不支援、NLog 說明 |
 
 **推翻原規劃之處**：`HostHeartbeats` 原本判斷「缺唯一索引」是錯的——它的主鍵本來就是複合鍵
@@ -165,6 +166,25 @@ Information 並整批跳過，改成只認唯一鍵違反且逐筆補完該批�
 （fail fast、孤兒清理改整輪一次、貼圖回填改逐筆補、`isStartup` 語意）、README 欄位表缺
 `ClaimedAt`／`ClaimedBy`／`Downloading`、DEPLOYMENT-MODES 違反自己「設定鍵不重複一份」的
 約定。皆已修。教訓：**體檢修正輪的程式碼改動也要回頭跑一次文件對照**，不能只在作業 F 做一次。
+
+**第三輪（併回 dev 後的全案體檢）又抓到三個真 bug，開 G-3 修：**
+
+1. **`ClaimedBy` 用 `Environment.MachineName`，但寫入的行程不是下載的行程**——Edge 的認領／完成／
+   失敗都是打 Core 的 ingest API 後在 Core 行程裡執行，所以全部掛 Core 的名字；Edge 啟動傳
+   `isStartup=true` 會讓 Core 把「所有」認領回收，等於退化回舊行為；同機兩站台也互相誤判。
+   修法：`ProcessOwnerId` 單例（機器名＋行程隨機字尾），`IContentWorkSource` 三個方法都帶
+   `ownerId`，Edge 經查詢字串傳給 Core，舊 Edge 沒帶時記成 `legacy-edge`。
+2. **`FailAsync` 的 `ClaimedBy == null` 分支沒看狀態**：別台回收後完成的終態正是 null＋Completed，
+   本機慢路徑最後失敗會把它改成 Failed 並刪掉剛寫好的 blob。修法：兩個分支各綁狀態。
+3. **回收 UPDATE 缺租約述詞**：SELECT 與 UPDATE 之間被別台認領的列會被打回 Pending。
+4. fail fast 會炸掉 SQLite 救場（救場檔待套用一定是全部）→ 救場觸發時不 throw。
+5. 收斂：刪掉四份 `isStartup` 預設 false 的多載、busy_timeout 常數只留一份、interceptor 加
+   `SqliteConnection` 型別防呆、`MaxPendingIdsPerScan` ≤0 防呆；刪掉一支恆真測試
+   （心跳並行 upsert 斷言 `Single`——複合主鍵下不可能失敗）、把 `EnableWalMode_WithCustomBusyTimeout`
+   改成真的驗 pragma 值。
+
+**教訓**：「本機」在拆機拓撲下不是一個自明的概念——寫入的行程、下載的行程、機器三者可以都不同，
+身分要由真正持有租約的那一端提供。
 
 ### 尚未做的
 

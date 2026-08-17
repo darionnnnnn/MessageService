@@ -69,13 +69,19 @@ public static class MessageServiceDatabaseMigrationExtensions
 
             if (!migrated)
             {
-                var pendingMigrations = dbContext.Database.GetPendingMigrations().ToList();
-                if (pendingMigrations.Count > 0)
+                // 當 SQLite 救場觸發時（SqliteFallbackTriggered == true），使用的是全新的救場 SQLite 資料庫檔案，
+                // 此時不存在第二個升級者；若因環境因素（如跨站台集區身分）拿不到 migration 鎖，不應拋出例外中斷服務，
+                // 維持記錄 Warning 讓站台能繼續接收 webhook 達成救場目的。其他情況維持 fail fast 拋出例外。
+                if (!registration.DatabaseStartupDecision.SqliteFallbackTriggered)
                 {
-                    throw new InvalidOperationException(
-                        $"本次啟動拿不到 migration 鎖而跳過，但資料庫 schema 落後 {pendingMigrations.Count} 個 migration，" +
-                        "帶著舊 schema 提供服務只會產生一連串缺欄位錯誤；" +
-                        "請確認同機各站台的應用程式集區身分一致，或改由外部 dotnet ef database update 升級 schema。");
+                    var pendingMigrations = dbContext.Database.GetPendingMigrations().ToList();
+                    if (pendingMigrations.Count > 0)
+                    {
+                        throw new InvalidOperationException(
+                            $"本次啟動拿不到 migration 鎖而跳過，但資料庫 schema 落後 {pendingMigrations.Count} 個 migration，" +
+                            "帶著舊 schema 提供服務只會產生一連串缺欄位錯誤；" +
+                            "請確認同機各站台的應用程式集區身分一致，或改由外部 dotnet ef database update 升級 schema。");
+                    }
                 }
 
                 migrationLogger.LogWarning(

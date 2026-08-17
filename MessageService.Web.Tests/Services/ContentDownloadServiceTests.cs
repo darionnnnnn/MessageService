@@ -260,7 +260,7 @@ public class ContentDownloadServiceTests : IDisposable
             OptionsFactory.Create(new ContentDownloadOptions()),
             NullLogger<ContentDownloadService>.Instance);
 
-        await service.RequeuePendingAsync(reclaimDownloading: true, CancellationToken.None);
+        await service.RequeuePendingAsync(reclaimDownloading: true, isStartup: false, CancellationToken.None);
 
         Assert.Equal(contentId, Assert.Single(queue.Enqueued));
     }
@@ -281,7 +281,7 @@ public class ContentDownloadServiceTests : IDisposable
             OptionsFactory.Create(new ContentDownloadOptions()),
             NullLogger<ContentDownloadService>.Instance);
 
-        await service.RequeuePendingAsync(reclaimDownloading: true, CancellationToken.None);
+        await service.RequeuePendingAsync(reclaimDownloading: true, isStartup: false, CancellationToken.None);
 
         Assert.Equal(contentId, Assert.Single(queue.Enqueued));
         Assert.Equal(DownloadStatus.Pending, (await ReloadContentAsync(contentId)).DownloadStatus);

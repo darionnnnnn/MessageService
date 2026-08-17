@@ -11,9 +11,11 @@ public class ContentDownloadService(
     IContentDownloadQueue queue,
     IServiceScopeFactory scopeFactory,
     IOptions<ContentDownloadOptions> options,
-    ILogger<ContentDownloadService> logger) : BackgroundService
+    ILogger<ContentDownloadService> logger,
+    ProcessOwnerId? processOwnerId = null) : BackgroundService
 {
     private readonly ContentDownloadOptions _options = options.Value;
+    private readonly string _ownerId = (processOwnerId ?? ProcessOwnerId.Instance).Value;
 
     /// <summary>週期重掃間隔的封頂值（24 天），略低於 Task.Delay 能接受的最大值。</summary>
     private const int MaxRequeueIntervalMinutes = 24 * 24 * 60;
@@ -105,7 +107,7 @@ public class ContentDownloadService(
         using var scope = scopeFactory.CreateScope();
         var workSource = scope.ServiceProvider.GetRequiredService<IContentWorkSource>();
 
-        var pendingIds = await workSource.GetPendingIdsAsync(reclaimDownloading, isStartup, cancellationToken);
+        var pendingIds = await workSource.GetPendingIdsAsync(reclaimDownloading, isStartup, _ownerId, cancellationToken);
         foreach (var contentId in pendingIds)
         {
             queue.Enqueue(contentId);
@@ -116,9 +118,6 @@ public class ContentDownloadService(
             logger.LogInformation("Requeued {Count} content downloads from previous run", pendingIds.Count);
         }
     }
-
-    public Task RequeuePendingAsync(bool reclaimDownloading, CancellationToken cancellationToken) =>
-        RequeuePendingAsync(reclaimDownloading, isStartup: false, cancellationToken);
 
     /// <summary>週期性重掃資料來源中的 Pending／可重試 Failed 以及逾期租約的 Downloading 並重新入列。
     /// 重複入列是安全的：DbContentWorkSource.CompleteAsync 等下游有認領檢查（認領到 0 筆就跳過），
@@ -185,7 +184,7 @@ public class ContentDownloadService(
                     return;
                 case TranscodingCheckOutcome.Failed:
                     _transcodingPollCounts.TryRemove(messageContentId, out _);
-                    await workSource.FailAsync(messageContentId, cancellationToken);
+                    await workSource.FailAsync(messageContentId, _ownerId, cancellationToken);
                     return;
                 case TranscodingCheckOutcome.Succeeded:
                     _transcodingPollCounts.TryRemove(messageContentId, out _);
@@ -196,7 +195,7 @@ public class ContentDownloadService(
         if (item.MessageType == "sticker" && item.StickerId == null)
         {
             logger.LogWarning("Message content {MessageContentId} has MessageType 'sticker' but null StickerId, marking as Failed", messageContentId);
-            await workSource.FailAsync(messageContentId, cancellationToken);
+            await workSource.FailAsync(messageContentId, _ownerId, cancellationToken);
             return;
         }
 
@@ -207,7 +206,7 @@ public class ContentDownloadService(
                 await using var result = item.MessageType == "sticker"
                     ? await contentClient.GetStickerAsync(item.StickerId!, cancellationToken)
                     : await contentClient.GetContentAsync(item.LineMessageId, cancellationToken);
-                var bytesWritten = await CompleteFromResultAsync(workSource, messageContentId, result, cancellationToken);
+                var bytesWritten = await CompleteFromResultAsync(workSource, messageContentId, result, _ownerId, cancellationToken);
                 logger.LogInformation("Downloaded content {MessageContentId} for message {LineMessageId} ({Bytes} bytes, {ContentType})",
                     messageContentId, item.LineMessageId, bytesWritten, result.ContentType);
                 return;
@@ -231,17 +230,17 @@ public class ContentDownloadService(
 
         logger.LogError("All {MaxRetries} download attempts failed for message content {MessageContentId}, marking as Failed",
             _options.MaxRetries, messageContentId);
-        await workSource.FailAsync(messageContentId, cancellationToken);
+        await workSource.FailAsync(messageContentId, _ownerId, cancellationToken);
     }
 
     /// <summary>LINE 的回應通常帶 Content-Length，直接串流交給 workSource。少數沒帶的情況下
     /// （SQLite 的分塊寫入需要預知總長度）先落暫存檔量出實際長度，量完就砍掉，不佔用磁碟。</summary>
     private static async Task<long> CompleteFromResultAsync(
-        IContentWorkSource workSource, long messageContentId, LineContentResult result, CancellationToken cancellationToken)
+        IContentWorkSource workSource, long messageContentId, LineContentResult result, string ownerId, CancellationToken cancellationToken)
     {
         if (result.ContentLength is { } knownLength)
         {
-            await workSource.CompleteAsync(messageContentId, result.Content, knownLength, result.ContentType, cancellationToken);
+            await workSource.CompleteAsync(messageContentId, result.Content, knownLength, result.ContentType, ownerId, cancellationToken);
             return knownLength;
         }
 
@@ -253,7 +252,7 @@ public class ContentDownloadService(
             await result.Content.CopyToAsync(tempFile, cancellationToken);
             var length = tempFile.Length;
             tempFile.Position = 0;
-            await workSource.CompleteAsync(messageContentId, tempFile, length, result.ContentType, cancellationToken);
+            await workSource.CompleteAsync(messageContentId, tempFile, length, result.ContentType, ownerId, cancellationToken);
             return length;
         }
     }

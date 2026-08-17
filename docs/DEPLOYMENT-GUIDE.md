@@ -158,6 +158,7 @@ dotnet ef database update --project MessageService.Data --context SqlServerMessa
 > 沒有待套用的 migration，只記一筆 Warning「本次啟動未執行 schema migration」照常啟動；
 > **若真的有待套用的 migration，站台會直接啟動失敗**（例外訊息會說明落後幾個 migration）——
 > 帶著舊 schema 服務只會產生一連串缺欄位錯誤，Warning 早被淹沒，寧可讓它起不來。
+> 唯一例外是 SQLite 救場觸發時（那顆救場檔沒有第二個升級者），照常啟動只記 Warning。
 
 ### 既有 SQL Server 環境升級注意事項
 

@@ -100,16 +100,24 @@ public class IngestController(
         return Ok(results);
     }
 
+    private const string LegacyEdgeOwnerId = "legacy-edge";
+
+    private static string ResolveOwnerId(string? ownerId) =>
+        string.IsNullOrWhiteSpace(ownerId) ? LegacyEdgeOwnerId : ownerId;
+
     // === 媒體下載（Line:OutboundHere=true 時，Line 端的 ApiContentWorkSource 打這幾支） ===
 
-    // reclaimDownloading 預設 true 是為了相容還沒帶這個參數的舊版 Edge：舊版只在啟動時打這支，
-    // 那時撿回 Downloading 是對的。新版 Edge 的週期重掃會明確帶 false。
+    // reclaimDownloading 預設 true 是為了相容還沒帶這個參數的舊版 Edge（舊版只在啟動時呼叫）。
+    // 現況下無論啟動或週期重掃，reclaimDownloading 都傳 true 以回收逾期租約；
+    // isStartup 僅在啟動時傳 true（額外回收本機未逾期認領），週期重掃傳 false。
+    // 舊版 Edge 未傳遞 ownerId 時，以 "legacy-edge" 固定字串代入，避免誤觸發任何 isStartup 回收。
     [HttpGet("content-work")]
     public async Task<ActionResult<IReadOnlyList<long>>> GetContentWork(
         [FromQuery] bool reclaimDownloading = true,
         [FromQuery] bool isStartup = false,
+        [FromQuery] string? ownerId = null,
         CancellationToken cancellationToken = default) =>
-        Ok(await contentWorkSource.GetPendingIdsAsync(reclaimDownloading, isStartup, cancellationToken));
+        Ok(await contentWorkSource.GetPendingIdsAsync(reclaimDownloading, isStartup, ResolveOwnerId(ownerId), cancellationToken));
 
     [HttpGet("content-work/{id:long}")]
     public async Task<ActionResult<ContentWorkItem>> GetContentWorkItem(long id, CancellationToken cancellationToken)
@@ -120,7 +128,10 @@ public class IngestController(
 
     [HttpPut("content/{id:long}")]
     [RequestSizeLimit(long.MaxValue)] // 真正的上限用 IHttpMaxRequestBodySizeFeature 動態套 Ingest:MaxContentBytes（見下）
-    public async Task<IActionResult> UploadContent(long id, CancellationToken cancellationToken)
+    public async Task<IActionResult> UploadContent(
+        long id,
+        [FromQuery] string? ownerId = null,
+        CancellationToken cancellationToken = default)
     {
         // Kestrel 預設請求主體上限 30MB 擋得住 LINE 的大型影片／檔案；Ingest:MaxContentBytes
         // 是設定值不是編譯期常數，沒辦法用 [RequestSizeLimit] 套，必須在讀取 body 之前
@@ -139,14 +150,17 @@ public class IngestController(
             return BadRequest("Content-Length header is required.");
         }
 
-        await contentWorkSource.CompleteAsync(id, Request.Body, contentLength, Request.ContentType, cancellationToken);
+        await contentWorkSource.CompleteAsync(id, Request.Body, contentLength, Request.ContentType, ResolveOwnerId(ownerId), cancellationToken);
         return NoContent();
     }
 
     [HttpPost("content/{id:long}/failed")]
-    public async Task<IActionResult> MarkContentFailed(long id, CancellationToken cancellationToken)
+    public async Task<IActionResult> MarkContentFailed(
+        long id,
+        [FromQuery] string? ownerId = null,
+        CancellationToken cancellationToken = default)
     {
-        await contentWorkSource.FailAsync(id, cancellationToken);
+        await contentWorkSource.FailAsync(id, ResolveOwnerId(ownerId), cancellationToken);
         return NoContent();
     }
 
