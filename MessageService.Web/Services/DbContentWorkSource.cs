@@ -345,6 +345,11 @@ public class DbContentWorkSource(
         command.Parameters.Add(parameter);
     }
 
+    /// <summary>Downloading 分支以 ClaimedBy == ownerId 當 fencing（呼叫端手上沒有 claimTime）。
+    /// ownerId 是站台粒度，IIS 重疊回收窗口內兄弟行程的認領也會符合——極端情況下（本行程的下載
+    /// 重試全數失敗、且該筆已被兄弟行程接手）會把兄弟行程進行中的那一筆標成 Failed 並刪 blob，
+    /// 兄弟行程隨後的完成寫入會因 ClaimedAt 對不上而放棄；後果只是多累計一次失敗、稍後由 Failed
+    /// 重試路徑補跑，不會產生「Completed 但內容不完整」的資料。已知取捨，見 docs/DEPLOYMENT-MODES.md。</summary>
     public async Task FailAsync(long contentId, string ownerId, CancellationToken cancellationToken)
     {
         var now = DateTimeOffset.UtcNow;

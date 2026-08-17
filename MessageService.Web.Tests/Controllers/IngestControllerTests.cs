@@ -261,9 +261,12 @@ public class IngestControllerTests
     [InlineData(-100.5)]
     [InlineData(double.NaN)]
     [InlineData(double.PositiveInfinity)]
+    [InlineData(0.0)]
+    [InlineData(1e11)]   // 約 3170 年，TimeSpan 裝得下但 UtcNow - startupAge 會撞 DateTimeOffset.MinValue
+    [InlineData(1e15)]   // TimeSpan.FromSeconds 直接溢位
     public async Task GetContentWork_NegativeOrInvalidStartupAgeSeconds_PassesNullStartupAge(double invalidAgeSeconds)
     {
-        // 負值或非有限數視同沒送（傳遞 null startupAge）
+        // 零、負值、非有限數、超過一年上界的值一律視同沒送（傳遞 null startupAge），不能變成 500
         var source = new FakeContentWorkSource();
         var controller = CreateController(contentWorkSource: source);
 

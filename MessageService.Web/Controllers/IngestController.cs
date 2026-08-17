@@ -101,6 +101,7 @@ public class IngestController(
     }
 
     private const string LegacyEdgeOwnerId = "legacy-edge";
+    private const double MaxStartupAgeSeconds = 365 * 24 * 60 * 60;
 
     private static string ResolveOwnerId(string? ownerId) =>
         string.IsNullOrWhiteSpace(ownerId) ? LegacyEdgeOwnerId : ownerId;
@@ -120,8 +121,10 @@ public class IngestController(
         [FromQuery] string? ownerId = null,
         CancellationToken cancellationToken = default)
     {
+        // 0 或負值代表「才剛啟動」，沒有可回收的孤兒；超過上界（一年）的值不可能是真實的
+        // 行程存活時間，且會讓 TimeSpan／DateTimeOffset 運算溢位成 500——一律視同沒送
         TimeSpan? startupAge = null;
-        if (startupAgeSeconds is { } seconds && double.IsFinite(seconds) && seconds >= 0)
+        if (startupAgeSeconds is { } seconds && double.IsFinite(seconds) && seconds > 0 && seconds <= MaxStartupAgeSeconds)
         {
             startupAge = TimeSpan.FromSeconds(seconds);
         }

@@ -166,18 +166,18 @@ Core 則沒有問題（參數預設值就是舊行為）。`startupAgeSeconds`�
 - **待下載內容的回收最多延遲一個重掃週期**：`ContentDownloadService` 除了啟動時掃一次，
   之後每隔 `ContentDownload:RequeueIntervalMinutes`（預設 15 分鐘）重掃一次 `Pending` 與
   仍可重試的 `Failed`。Core 端補出但由 Edge 端下載的 `Pending` 項目最壞要等一個週期才會被撿回。
-  `Downloading` 走**認領租約**（`ClaimedAt`／`ClaimedBy`，語意見 README 設定表的
-  `ContentDownload:ClaimLeaseMinutes`）：週期重掃只回收租約已逾期的；啟動掃描額外回收掛在
-  **本站台**名下的（一定是上次行程的孤兒）。別台主機正在下載中的內容不會被誤收——這正是舊版
-  「啟動時無條件把所有 `Downloading` 打回 `Pending`」在多主機下的 bug。
-  把間隔設為 0 會退回「只在啟動時掃一次」。
-  ownerId 的粒度是站台而非行程（組成見 README 設定表），這帶來兩個部署前提：**不可啟用
-  ASP.NET Core Module 的 shadow copy**（BaseDirectory 每次啟動都變，ownerId 會退回每行程一個，
-  啟動掃描就認不出自己的孤兒），**同機兩個站台不可共用同一個實體目錄**（會拿到相同 ownerId）。
-  IIS 重疊回收過渡期或 Web Garden 下同一站台的新舊行程共用同一個 ownerId，所以啟動掃描
-  另外要求「認領時間早於本行程啟動時刻」才回收——孤兒必定早於，兄弟行程進行中的下載必定
-  晚於。這個判準不比對絕對時間戳（拆機時 `ClaimedAt` 是 Core 的時鐘寫的、掃描由 Edge 發動），
-  呼叫端送的是「自己已啟動多久」，由查詢端用自己的時鐘換算。
+  `Downloading` 走**認領租約**（`ClaimedAt`／`ClaimedBy`，回收規則與啟動掃描條件見 README
+  設定表的 `ContentDownload:ClaimLeaseMinutes`），別台主機或同站台兄弟行程正在下載中的內容
+  不會被誤收。把間隔設為 0 會退回「只在啟動時掃一次」。
+  ownerId 的粒度是站台，因此有兩個部署前提：**不可啟用 ASP.NET Core Module 的 shadow copy**
+  （BaseDirectory 每次啟動都變，ownerId 會退回每行程一個，啟動掃描就認不出自己的孤兒）、
+  **同機兩個站台不可共用同一個實體目錄**（會拿到相同 ownerId）。IIS 重疊回收與 Web Garden
+  可以用，但要知道兩個效應：新行程的啟動掃描會把舊行程**進行中**的下載接手過來（那幾筆重
+  下載一次；資料不會壞——SQL Server 是單一原子 INSERT、SQLite 的舊 blob handle 會因列被刪而
+  失效，落後的一方寫入會被放棄並記 Warning）；極端情況下舊行程對同一筆的失敗標記可能落在
+  新行程的認領上，多累計一次失敗後由 Failed 重試路徑補跑。啟動掃描另以「認領時間早於本行程
+  啟動時刻」為條件，避免收走兄弟行程在本行程啟動之後才建立的認領（跨機時鐘不互信，所以用
+  相對時間換算）。
 - **單輪掃描有上限**：`ContentDownload:MaxPendingIdsPerScan`（預設 5000）限制一輪最多撈多少
   待處理內容，Id 小的先處理，其餘留給下一輪（被截斷時會記一筆 log，等級依
   `RequeueIntervalMinutes` 而定，見 README 設定表）。沒有上限時，

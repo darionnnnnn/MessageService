@@ -1187,7 +1187,7 @@ public class DbContentWorkSourceTests : IDisposable
             new ContentDownloadOptions { MaxPendingIdsPerScan = maxLimit, RequeueIntervalMinutes = 0 },
             logger: logger);
 
-        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, startupAge: TimeSpan.FromMinutes(1), TestOwner, CancellationToken.None);
+        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, startupAge: null, TestOwner, CancellationToken.None);
 
         Assert.Equal(maxLimit, ids.Count);
         Assert.Empty(logger.Informations);
