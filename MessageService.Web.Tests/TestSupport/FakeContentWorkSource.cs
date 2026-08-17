@@ -13,14 +13,14 @@ public class FakeContentWorkSource : IContentWorkSource
     public Func<CancellationToken, Task<IReadOnlyList<long>>>? OnGetPendingIds { get; set; }
 
     public List<bool> ReclaimDownloadingCalls { get; } = [];
-    public List<bool> IsStartupCalls { get; } = [];
+    public List<TimeSpan?> StartupAgeCalls { get; } = [];
     public List<string> OwnerIdCalls { get; } = [];
 
-    public Task<IReadOnlyList<long>> GetPendingIdsAsync(bool reclaimDownloading, bool isStartup, string ownerId, CancellationToken cancellationToken)
+    public Task<IReadOnlyList<long>> GetPendingIdsAsync(bool reclaimDownloading, TimeSpan? startupAge, string ownerId, CancellationToken cancellationToken)
     {
         GetPendingIdsCallCount++;
         ReclaimDownloadingCalls.Add(reclaimDownloading);
-        IsStartupCalls.Add(isStartup);
+        StartupAgeCalls.Add(startupAge);
         OwnerIdCalls.Add(ownerId);
         if (OnGetPendingIds is not null)
         {

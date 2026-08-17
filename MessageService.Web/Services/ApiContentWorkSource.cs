@@ -20,9 +20,15 @@ public class ApiContentWorkSource(IHttpClientFactory httpClientFactory) : IConte
     private HttpClient CreateMetadataClient() => httpClientFactory.CreateClient("ingest");
     private HttpClient CreateContentClient() => httpClientFactory.CreateClient("ingest-content");
 
-    public async Task<IReadOnlyList<long>> GetPendingIdsAsync(bool reclaimDownloading, bool isStartup, string ownerId, CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<long>> GetPendingIdsAsync(bool reclaimDownloading, TimeSpan? startupAge, string ownerId, CancellationToken cancellationToken)
     {
-        var url = $"api/ingest/content-work?reclaimDownloading={(reclaimDownloading ? "true" : "false")}&isStartup={(isStartup ? "true" : "false")}&ownerId={Uri.EscapeDataString(ownerId)}";
+        var queryString = $"reclaimDownloading={(reclaimDownloading ? "true" : "false")}";
+        if (startupAge is { } age && age >= TimeSpan.Zero)
+        {
+            queryString += $"&startupAgeSeconds={age.TotalSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture)}";
+        }
+        queryString += $"&ownerId={Uri.EscapeDataString(ownerId)}";
+        var url = $"api/ingest/content-work?{queryString}";
         var ids = await CreateMetadataClient().GetFromJsonAsync<List<long>>(url, cancellationToken);
         return ids ?? [];
     }

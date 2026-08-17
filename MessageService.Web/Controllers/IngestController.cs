@@ -109,15 +109,24 @@ public class IngestController(
 
     // reclaimDownloading 預設 true 是為了相容還沒帶這個參數的舊版 Edge（舊版只在啟動時呼叫）。
     // 現況下無論啟動或週期重掃，reclaimDownloading 都傳 true 以回收逾期租約；
-    // isStartup 僅在啟動時傳 true（額外回收本機未逾期認領），週期重掃傳 false。
-    // 舊版 Edge 未傳遞 ownerId 時，以 "legacy-edge" 固定字串代入，避免誤觸發任何 isStartup 回收。
+    // startupAgeSeconds 僅在啟動時傳送（代表呼叫端行程已啟動多久，用以回收啟動前建立的孤兒認領），週期重掃不傳。
+    // 舊版 Edge 僅傳遞 isStartup=true 但未傳 startupAgeSeconds 時，一律不觸發啟動回收（安全側，由租約逾期機制保障）。
+    // 舊版 Edge 未傳遞 ownerId 時，以 "legacy-edge" 固定字串代入，避免誤觸發任何回收。
     [HttpGet("content-work")]
     public async Task<ActionResult<IReadOnlyList<long>>> GetContentWork(
         [FromQuery] bool reclaimDownloading = true,
         [FromQuery] bool isStartup = false,
+        [FromQuery] double? startupAgeSeconds = null,
         [FromQuery] string? ownerId = null,
-        CancellationToken cancellationToken = default) =>
-        Ok(await contentWorkSource.GetPendingIdsAsync(reclaimDownloading, isStartup, ResolveOwnerId(ownerId), cancellationToken));
+        CancellationToken cancellationToken = default)
+    {
+        TimeSpan? startupAge = null;
+        if (startupAgeSeconds is { } seconds && double.IsFinite(seconds) && seconds >= 0)
+        {
+            startupAge = TimeSpan.FromSeconds(seconds);
+        }
+        return Ok(await contentWorkSource.GetPendingIdsAsync(reclaimDownloading, startupAge, ResolveOwnerId(ownerId), cancellationToken));
+    }
 
     [HttpGet("content-work/{id:long}")]
     public async Task<ActionResult<ContentWorkItem>> GetContentWorkItem(long id, CancellationToken cancellationToken)

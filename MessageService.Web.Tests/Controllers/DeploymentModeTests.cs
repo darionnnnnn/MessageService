@@ -518,11 +518,11 @@ public class DeploymentModeTests : IDisposable
         }
 
         // 用不同的 ownerId 查：不該回收
-        var nonMatchingIds = await apiWorkSource.GetPendingIdsAsync(reclaimDownloading: true, isStartup: true, "different-owner", CancellationToken.None);
+        var nonMatchingIds = await apiWorkSource.GetPendingIdsAsync(reclaimDownloading: true, startupAge: TimeSpan.FromMinutes(1), "different-owner", CancellationToken.None);
         Assert.DoesNotContain(contentId, nonMatchingIds);
 
         // 用相同的 ownerId 查：應該回收
-        var matchingIds = await apiWorkSource.GetPendingIdsAsync(reclaimDownloading: true, isStartup: true, expectedOwnerId, CancellationToken.None);
+        var matchingIds = await apiWorkSource.GetPendingIdsAsync(reclaimDownloading: true, startupAge: TimeSpan.FromMinutes(1), expectedOwnerId, CancellationToken.None);
         Assert.Contains(contentId, matchingIds);
     }
 

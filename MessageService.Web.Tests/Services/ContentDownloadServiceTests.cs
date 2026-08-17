@@ -260,7 +260,7 @@ public class ContentDownloadServiceTests : IDisposable
             OptionsFactory.Create(new ContentDownloadOptions()),
             NullLogger<ContentDownloadService>.Instance);
 
-        await service.RequeuePendingAsync(reclaimDownloading: true, isStartup: false, CancellationToken.None);
+        await service.RequeuePendingAsync(reclaimDownloading: true, startupAge: null, CancellationToken.None);
 
         Assert.Equal(contentId, Assert.Single(queue.Enqueued));
     }
@@ -281,7 +281,7 @@ public class ContentDownloadServiceTests : IDisposable
             OptionsFactory.Create(new ContentDownloadOptions()),
             NullLogger<ContentDownloadService>.Instance);
 
-        await service.RequeuePendingAsync(reclaimDownloading: true, isStartup: false, CancellationToken.None);
+        await service.RequeuePendingAsync(reclaimDownloading: true, startupAge: null, CancellationToken.None);
 
         Assert.Equal(contentId, Assert.Single(queue.Enqueued));
         Assert.Equal(DownloadStatus.Pending, (await ReloadContentAsync(contentId)).DownloadStatus);
@@ -333,8 +333,9 @@ public class ContentDownloadServiceTests : IDisposable
         Assert.True(workSource.GetPendingIdsCallCount >= 2);
         Assert.Contains(10, queue.Enqueued);
         Assert.Contains(20, queue.Enqueued);
-        // 週期重掃同樣傳入 reclaimDownloading: true 以回收逾期的認領
+        // 週期重掃同樣傳入 reclaimDownloading: true 以回收逾期的認領，startupAge 傳 null（不回收未逾期認領）
         Assert.All(workSource.ReclaimDownloadingCalls, reclaim => Assert.True(reclaim));
+        Assert.All(workSource.StartupAgeCalls, age => Assert.Null(age));
     }
 
     [Fact]
@@ -367,8 +368,11 @@ public class ContentDownloadServiceTests : IDisposable
             }
 
             Assert.Equal(1, workSource.GetPendingIdsCallCount);
-            // 啟動那次要撿回上次行程留下的 Downloading 孤兒
+            // 啟動那次要撿回上次行程留下的 Downloading 孤兒（帶非負的 startupAge）
             Assert.Equal([true], workSource.ReclaimDownloadingCalls);
+            var startupAge = Assert.Single(workSource.StartupAgeCalls);
+            Assert.NotNull(startupAge);
+            Assert.True(startupAge!.Value >= TimeSpan.Zero);
 
             await Task.Delay(100);
 
