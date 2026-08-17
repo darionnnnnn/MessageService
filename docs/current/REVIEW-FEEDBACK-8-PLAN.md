@@ -6,7 +6,9 @@
 - **處理項目**：P1、P2、P3-1、P3-2 全做。
 - **明確不做**：`CompleteAsync`（`ClaimedAt == claimTime`）與 `RevertClaimAsync`／`FailAsync`（`ClaimedBy == ownerId`）fencing 欄位不一致——目前皆正確且有測試覆蓋，沒有實證問題，本輪不動，記為已知取捨。
 - **已定案決策**：
-  - P1 採「站台穩定 ownerId」為根因修法（死碼的根因是 ownerId 語意錯：它應代表「站台」而非「行程」），並同時把 `ClaimLeaseMinutes` 預設降到 15，讓極端情況下限也縮短。接受 IIS 重疊回收過渡期新舊行程同 ownerId 造成的「該筆重下載一次」代價，資料安全由 `CompleteAsync` fencing 兜底。
+  - P1 採「站台穩定 ownerId」為根因修法（死碼的根因是 ownerId 語意錯：它應代表「站台」而非「行程」），並同時把 `ClaimLeaseMinutes` 預設降到 15，讓極端情況下限也縮短。
+    ~~接受 IIS 重疊回收過渡期新舊行程同 ownerId 造成的「該筆重下載一次」代價，資料安全由 `CompleteAsync` fencing 兜底。~~
+    **這個評估被終檢推翻**（見 §7）：fencing 只保護狀態欄位、保護不到 blob 位元組，兩個行程會交錯寫同一顆 blob 且最後仍標 Completed。改以作業 F 的「認領時間早於本行程啟動時刻」條件從根本排除，不接受該代價。
   - P3-2 只改 log 訊息分流，**不**在停用週期重掃時拿掉 `Take` 上限（`Take` 是記憶體／`Contains` 分批的保護；也不能用「啟動迴圈掃到見底」，Pending 列每次都會被撈到而死迴圈）。
   - P2 不放寬 `nlog.config` 的 `Microsoft.*` 規則（會放進 SQL 雜訊），改在自己控制的 logger 記錄。
 
@@ -103,6 +105,7 @@
 | B-1 migration 進度 log | agy | 完成（`fd31e76`） | build 0 警告；768 綠（+2）；`nlog.config` 未動 | 無落差。測試走真實 `app.MigrateMessageServiceDatabase()` 接線，非直接呼叫內部方法 |
 | C-1 篩選索引＋兩 provider migration | agy | 完成（`a0a9abf`） | build 0 警告；771 綠（+3）；既有 migration 未改 | 超出規格但正向：多寫了一支真實 up/down migration 測試（含資料保存斷言），保留。兩份 snapshot 被 EF 工具加上 BOM，屬工具行為不回退 |
 | D log 分流 | Claude | 完成（`b11a30f`） | 772 綠（+1） | — |
+| F-1 啟動回收時間守衛＋Revert fencing | agy | 完成（`a21ddef`） | build 0 警告；780 綠（+8）；既有測試未刪（兩支因參數形狀改變而更名，語意等價替換） | 終檢後加開，見下方終檢段 |
 | E 文件 | Claude | 完成 | — | README 設定表兩列＋欄位表 `ClaimedBy`、DEPLOYMENT-GUIDE 升級段、DEPLOYMENT-MODES 認領段、web.config 註解。原規劃指定的兩處落點依實際文件結構改放（見 §5 括號） |
 
 ### 終檢
@@ -117,3 +120,18 @@
 - README `RequeueIntervalMinutes` 那列過長，把掃描上限的 log 等級敘述移到 `MaxPendingIdsPerScan` 列。
 - 規劃 §5 兩條落點與實作不符，補註說明。
 - 附帶：`MigrateWithLogging` 的 `Migrate()` 在 if/else 兩支各寫一次，收斂成單一呼叫點。
+
+**程式碼審查**抓到 10 項，其中第 1 項推翻了 §0 的一個已定案評估，加開作業 F 修正：
+
+| 項 | 處置 |
+|---|---|
+| 1（高）啟動回收不看租約，重疊回收時會搶走兄弟行程**正在寫入 blob** 的認領——`CompleteAsync` 的 fencing 只保護狀態欄位、保護不到 blob 位元組 | 作業 F（`a21ddef`）：啟動回收加上「認領時間早於呼叫端行程啟動時刻」的條件。跨機器不比絕對時間戳（拆機時 `ClaimedAt` 由 Core 的時鐘寫、掃描由 Edge 發動），改傳「已啟動多久」由查詢端換算 |
+| 2（中）`RevertClaimAsync` 仍以 `ClaimedBy` 當 fencing，站台粒度下兄弟行程互相符合 | 作業 F：改用 `ClaimedAt == claimTime` |
+| 3（中）ownerId 超長時截掉的是雜湊，同機各站台會撞成同一個 | `dd19f1e`：改截機器名保雜湊 |
+| 4（中）`BaseDirectory` 當站台鍵的兩個前提沒記錄 | `dd19f1e`：程式碼註解＋DEPLOYMENT-MODES 補 shadow copy／共用實體目錄兩條 |
+| 5（中）Warning 措辭在拆機下會說錯（決定重掃節奏的是 Edge） | `dd19f1e`：改為只講本機設定 |
+| 6（低）migrate 的 else 分支多餘 | 文件終檢時已收斂成單一呼叫點 |
+| 7（低）SQL Server 篩選索引的 SET 選項、述詞須為字面值 | `dd19f1e`：DEPLOYMENT-GUIDE 補 SET 選項要求、DbContext 補註解 |
+| 8（低）租約測試全釘 60 分鐘，預設 15 沒被覆蓋 | 已查證無假通過（皆顯式帶 `ClaimLeaseMinutes = 60`），留待日後 |
+| 9（低）`MessageContent` 模型註解沒跟著改 | `dd19f1e` |
+| 10（低）`HostHeartbeat` 主鍵 `(Role, MachineName)` 同機兩站台會互相覆蓋 | **本輪不做**，與 `ClaimedBy` 是同一類身分粒度問題，已向使用者提出待決 |
