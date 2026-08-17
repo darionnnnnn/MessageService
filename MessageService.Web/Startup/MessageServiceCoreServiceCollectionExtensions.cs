@@ -22,7 +22,7 @@ public record MessageServiceCoreRegistration(
     bool AutoMigrate,
     string? SqliteConnectionString,
     string? OutboxConnectionString,
-    int SqliteBusyTimeoutMs = 30000);
+    int SqliteBusyTimeoutMs);
 
 public static class MessageServiceCoreServiceCollectionExtensions
 {
@@ -70,6 +70,7 @@ public static class MessageServiceCoreServiceCollectionExtensions
         builder.Services.AddSingleton<FieldCipher>();
         builder.Services.AddSingleton(TimeProvider.System);
         builder.Services.AddSingleton<ReadinessCache>();
+        builder.Services.AddSingleton(ProcessOwnerId.Instance);
 
         // 需求2：Database:Provider 顯式設定永遠優先；未設定時依 ConnectionStrings:SqlServer 有沒有值
         // 推導（純推導邏輯見 DatabaseProviderResolver，可單元測試）
@@ -85,7 +86,7 @@ public static class MessageServiceCoreServiceCollectionExtensions
         var sqliteFallbackEnabled = builder.Configuration.GetValue("Database:SqliteFallback", true);
         var sqliteFallbackTriggered = false;
         string? sqliteFallbackReason = null;
-        var sqliteBusyTimeoutMs = builder.Configuration.GetValue("Database:SqliteBusyTimeoutMs", 30000);
+        var sqliteBusyTimeoutMs = builder.Configuration.GetValue("Database:SqliteBusyTimeoutMs", SqliteBusyTimeoutInterceptor.DefaultBusyTimeoutMs);
 
         // SQLite 救場：僅 AllInOne。執行中 SQL Server 斷線已由 outbox 緩衝保護（暫時性失敗退避重試、
         // 永不死信，見 OutboxForwarderService），不會掉資料；真正會掉訊息的缺口是「啟動時連不上／

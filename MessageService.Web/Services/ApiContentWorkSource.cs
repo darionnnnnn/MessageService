@@ -20,15 +20,12 @@ public class ApiContentWorkSource(IHttpClientFactory httpClientFactory) : IConte
     private HttpClient CreateMetadataClient() => httpClientFactory.CreateClient("ingest");
     private HttpClient CreateContentClient() => httpClientFactory.CreateClient("ingest-content");
 
-    public async Task<IReadOnlyList<long>> GetPendingIdsAsync(bool reclaimDownloading, bool isStartup, CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<long>> GetPendingIdsAsync(bool reclaimDownloading, bool isStartup, string ownerId, CancellationToken cancellationToken)
     {
-        var url = $"api/ingest/content-work?reclaimDownloading={(reclaimDownloading ? "true" : "false")}&isStartup={(isStartup ? "true" : "false")}";
+        var url = $"api/ingest/content-work?reclaimDownloading={(reclaimDownloading ? "true" : "false")}&isStartup={(isStartup ? "true" : "false")}&ownerId={Uri.EscapeDataString(ownerId)}";
         var ids = await CreateMetadataClient().GetFromJsonAsync<List<long>>(url, cancellationToken);
         return ids ?? [];
     }
-
-    public Task<IReadOnlyList<long>> GetPendingIdsAsync(bool reclaimDownloading, CancellationToken cancellationToken) =>
-        GetPendingIdsAsync(reclaimDownloading, isStartup: false, cancellationToken);
 
     public async Task<ContentWorkItem?> GetAsync(long contentId, CancellationToken cancellationToken)
     {
@@ -41,7 +38,7 @@ public class ApiContentWorkSource(IHttpClientFactory httpClientFactory) : IConte
         return await response.Content.ReadFromJsonAsync<ContentWorkItem>(cancellationToken);
     }
 
-    public async Task CompleteAsync(long contentId, Stream content, long contentLength, string? contentType, CancellationToken cancellationToken)
+    public async Task CompleteAsync(long contentId, Stream content, long contentLength, string? contentType, string ownerId, CancellationToken cancellationToken)
     {
         // StreamContent 邊讀邊送，不把整份內容（可達數百 MB）先讀進記憶體組成 byte[]；
         // 來源串流多半不支援 Seek（例如 LINE API 的回應本身），所以要明講 ContentLength，
@@ -53,13 +50,15 @@ public class ApiContentWorkSource(IHttpClientFactory httpClientFactory) : IConte
             body.Headers.ContentType = MediaTypeHeaderValue.Parse(contentType);
         }
 
-        using var response = await CreateContentClient().PutAsync($"api/ingest/content/{contentId}", body, cancellationToken);
+        using var response = await CreateContentClient().PutAsync(
+            $"api/ingest/content/{contentId}?ownerId={Uri.EscapeDataString(ownerId)}", body, cancellationToken);
         response.EnsureSuccessStatusCode();
     }
 
-    public async Task FailAsync(long contentId, CancellationToken cancellationToken)
+    public async Task FailAsync(long contentId, string ownerId, CancellationToken cancellationToken)
     {
-        using var response = await CreateMetadataClient().PostAsync($"api/ingest/content/{contentId}/failed", content: null, cancellationToken);
+        using var response = await CreateMetadataClient().PostAsync(
+            $"api/ingest/content/{contentId}/failed?ownerId={Uri.EscapeDataString(ownerId)}", content: null, cancellationToken);
         response.EnsureSuccessStatusCode();
     }
 }

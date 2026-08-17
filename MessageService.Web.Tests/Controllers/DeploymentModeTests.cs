@@ -476,6 +476,61 @@ public class DeploymentModeTests : IDisposable
         Assert.Equal("測試群組", group.GroupName);
     }
 
+    [Fact]
+    public async Task ContentWork_ApiWorkSourceToIngestController_TransfersOwnerId()
+    {
+        using var factory = CreateDbModeFactoryWithContentWork(_dbPath);
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Ingest-Key", "correct-key");
+
+        var envelope = SampleEnvelope(webhookEventId: "evt-owner-propagation") with { MessageType = "image", Text = null, HasContent = true };
+        var submitResponse = await client.PostAsJsonAsync("/api/ingest/events", envelope);
+        var submitBody = await submitResponse.Content.ReadFromJsonAsync<IngestEventResponse>();
+        var contentId = submitBody!.ContentId!.Value;
+
+        const string expectedOwnerId = "edge-custom-owner-42";
+
+        var httpClientFactory = new DelegatingTestHttpClientFactory(client);
+        var apiWorkSource = new ApiContentWorkSource(httpClientFactory);
+
+        // 1. 驗證 CompleteAsync 時傳遞 ownerId
+        var bytes = new byte[] { 1, 2, 3, 4 };
+        await apiWorkSource.CompleteAsync(contentId, new MemoryStream(bytes), bytes.Length, "image/png", expectedOwnerId, CancellationToken.None);
+
+        using (var scope = factory.Services.CreateScope())
+        {
+            var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+            var saved = await dbContext.MessageContents.Include(c => c.Blob).SingleAsync(c => c.Id == contentId);
+            Assert.Equal(DownloadStatus.Completed, saved.DownloadStatus);
+            Assert.Equal(bytes, saved.Blob?.Content);
+        }
+
+        // 2. 驗證 isStartup 回收時比對 ownerId
+        using (var scope = factory.Services.CreateScope())
+        {
+            var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+            var unexpired = DateTimeOffset.UtcNow.AddMinutes(-5);
+            var saved = await dbContext.MessageContents.SingleAsync(c => c.Id == contentId);
+            saved.DownloadStatus = DownloadStatus.Downloading;
+            saved.ClaimedAt = unexpired;
+            saved.ClaimedBy = expectedOwnerId;
+            await dbContext.SaveChangesAsync();
+        }
+
+        // 用不同的 ownerId 查：不該回收
+        var nonMatchingIds = await apiWorkSource.GetPendingIdsAsync(reclaimDownloading: true, isStartup: true, "different-owner", CancellationToken.None);
+        Assert.DoesNotContain(contentId, nonMatchingIds);
+
+        // 用相同的 ownerId 查：應該回收
+        var matchingIds = await apiWorkSource.GetPendingIdsAsync(reclaimDownloading: true, isStartup: true, expectedOwnerId, CancellationToken.None);
+        Assert.Contains(contentId, matchingIds);
+    }
+
+    private sealed class DelegatingTestHttpClientFactory(HttpClient client) : IHttpClientFactory
+    {
+        public HttpClient CreateClient(string name) => client;
+    }
+
     private static IngestEnvelope SampleEnvelope(string webhookEventId = "evt-1") => new(
         WebhookEventId: webhookEventId,
         LineMessageId: "m1",

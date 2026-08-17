@@ -62,6 +62,7 @@ LINE Platform ──POST──▶ LineWebhookController
         完成後寫回 MessageContents）                    7 天 TTL，呼叫 LINE profile API）
 
 RetentionCleanupService（每日固定時間讀取檢視端設定頁存的保留天數，分批刪除逾期訊息，內容檔案靠 CASCADE 一併刪除）
+StickerContentBackfillService（啟動時替既有貼圖訊息補出 Pending 內容列，只在 AllInOne／Core 跑）
 ```
 
 ### 訊息型別處理
@@ -101,7 +102,7 @@ RetentionCleanupService（每日固定時間讀取檢視端設定頁存的保留
 | `ContentDownload:MaxConcurrency` | 並行下載 worker 數（預設 3）——一支等轉檔的影片不會卡住排在後面的圖片/檔案 |
 | `ContentDownload:FailedRetryWindowDays` / `MaxFailedRetries` | Failed 內容只在訊息到達後這麼多天內（預設 7）、且累計失敗次數未達上限（預設 10）才會被重新撿回，避免 LINE 內容過期後每次重啟都無限重跑 |
 | `ContentDownload:RequeueIntervalMinutes` | 週期性重掃待下載內容的間隔（預設 15 分鐘，0 表示只在啟動時掃一次，上限 24 天）。撿回其他主機或回填服務補出的 Pending、仍可重試的 Failed，以及**租約已逾期**的 Downloading。重複入列由認領檢查擋掉，不會重複下載 |
-| `ContentDownload:ClaimLeaseMinutes` | 下載認領的租約分鐘數（預設 60）。認領時寫入 `MessageContents.ClaimedAt`／`ClaimedBy`，只有租約為空或已逾期的 Downloading 才會被回收改回 Pending——別台主機正在下載中的不會被誤收，卡住的下載也不必等重啟。**啟動掃描**額外回收掛在本機名下的認領（那一定是上次行程留下的孤兒），所以崩潰重啟不必等滿租約。完成／失敗時也會確認「認領仍屬於自己」才寫結果，租約被別台接手後本機的寫入結果會被放棄並記 Warning |
+| `ContentDownload:ClaimLeaseMinutes` | 下載認領的租約分鐘數（預設 60）。認領時寫入 `MessageContents.ClaimedAt`／`ClaimedBy`（`ClaimedBy` 是**下載端行程**的身分：機器名＋行程啟動時的隨機字尾，Edge 透過 ingest API 的 `ownerId` 參數帶給 Core），只有租約為空或已逾期的 Downloading 才會被回收改回 Pending——別台主機正在下載中的不會被誤收，卡住的下載也不必等重啟。**啟動掃描**額外回收掛在自己這個行程身分名下的認領（那一定是上次行程留下的孤兒），所以崩潰重啟不必等滿租約。完成／失敗時也會確認「認領仍屬於自己」才寫結果，租約被別台接手後本機的寫入結果會被放棄並記 Warning |
 | `ContentDownload:MaxPendingIdsPerScan` | 單輪掃描最多撈多少待處理內容（預設 5000，Id 小的先處理），其餘留給下一輪。沒有上限時大量積壓會整包進記憶體，SQL Server 端還會撞上 2100 個查詢參數的硬限制 |
 | `Database:SqliteBusyTimeoutMs` | SQLite 寫鎖被別的行程佔用時最多等這麼久（預設 30000 毫秒）。WAL 只讓讀寫不互相阻塞，寫／寫仍是全庫互斥 |
 | `ProfileCache:RefreshAfter` | 群組/成員名稱快取的過期時間（預設 7 天） |
@@ -276,8 +277,10 @@ dotnet user-secrets set "Line:ChannelAccessToken" "<你的 access token>"
 | GroupMessageId | bigint FK | |
 | FileName | nvarchar(max), null | 檔案訊息的原始檔名（加密開啟時同 Text 走 `ENC2:` 整值加密） |
 | ContentType | nvarchar(max), null | 下載完成後的 MIME type |
-| DownloadStatus | nvarchar(20) | Pending / Completed / Failed |
+| DownloadStatus | nvarchar(20) | Pending / Downloading / Completed / Failed |
 | CompletedAt | datetimeoffset, null | 下載完成時間 |
+| ClaimedAt | datetimeoffset, null | 下載認領時間，租約逾期判斷用（`ContentDownload:ClaimLeaseMinutes`） |
+| ClaimedBy | nvarchar(128), null | 認領的下載端行程身分（機器名＋行程隨機字尾；舊版 Edge 沒帶時為 `legacy-edge`）；完成／失敗寫回時校驗認領仍屬於自己，啟動時回收自己名下的孤兒 |
 | FailedAttempts | int | 累計下載失敗次數，`ContentDownload:MaxFailedRetries` 用它判斷是否放棄重試 |
 | LastAttemptAt | datetimeoffset, null | 最後一次嘗試下載的時間 |
 
@@ -340,8 +343,9 @@ Migrations 放在 `MessageService.Data`，**每個 provider 一套獨立的 migr
 多實例（同機多站台，或未來多 worker）同時啟動時，`Database.Migrate()` 前會取一個具名
 mutex，避免兩邊同時建 `__EFMigrationsHistory` 互相打架。**這把鎖只跨行程、不跨機器**：
 多台主機直連同一顆資料庫時（三台拓撲），請只讓 Core 開 `Database:AutoMigrate`、Viewer 設
-`false`。同機兩站台若集區身分不同而拿不到鎖，該站台會跳過 migration 並記 Warning，
-不做無鎖硬跑——詳見 [docs/DEPLOYMENT-GUIDE.md](docs/DEPLOYMENT-GUIDE.md)。
+`false`。同機兩站台若集區身分不同而拿不到鎖，該站台會跳過 migration（不做無鎖硬跑）；
+若此時真有待套用的 migration 會直接啟動失敗，而不是帶著舊 schema 服務——詳見
+[docs/DEPLOYMENT-GUIDE.md](docs/DEPLOYMENT-GUIDE.md)。
 
 > 改了 `MessageDbContext` 的模型之後，要對**兩個 provider 都**跑
 > `dotnet ef migrations add <Name> --context SqliteMessageDbContext` 與

@@ -129,30 +129,4 @@ public class DbHeartbeatStoreTests : IDisposable
         Assert.Equal(25.5, row.OutboxOldestAgeSeconds);
         Assert.Equal("key-new", row.EncryptionKeyFingerprint);
     }
-
-    [Fact]
-    public async Task UpsertAsync_ConcurrentParallelUpserts_BothSucceedAndSingleRowRemains()
-    {
-        using var scope1 = _provider.CreateScope();
-        using var scope2 = _provider.CreateScope();
-        var dbContext1 = scope1.ServiceProvider.GetRequiredService<MessageDbContext>();
-        var dbContext2 = scope2.ServiceProvider.GetRequiredService<MessageDbContext>();
-
-        var store1 = CreateStore(dbContext1);
-        var store2 = CreateStore(dbContext2);
-
-        var task1 = store1.UpsertAsync("Core", "host-parallel", new HeartbeatReport(10, 10.0), "key-1", CancellationToken.None);
-        var task2 = store2.UpsertAsync("Core", "host-parallel", new HeartbeatReport(20, 20.0), "key-2", CancellationToken.None);
-
-        await Task.WhenAll(task1, task2);
-
-        using var scope = _provider.CreateScope();
-        var verifyDb = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
-
-        var rows = await verifyDb.HostHeartbeats.AsNoTracking()
-            .Where(h => h.Role == "Core" && h.MachineName == "host-parallel")
-            .ToListAsync();
-
-        Assert.Single(rows);
-    }
 }

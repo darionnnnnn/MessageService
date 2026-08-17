@@ -213,6 +213,7 @@ public class IngestControllerTests
         Assert.Equal(new long[] { 1, 2, 3 }, Assert.IsAssignableFrom<IReadOnlyList<long>>(ok.Value));
         // 沒帶參數＝舊版 Edge 的啟動接續，預設要撿回 Downloading（維持舊行為）
         Assert.Equal([true], source.ReclaimDownloadingCalls);
+        Assert.Equal(["legacy-edge"], source.OwnerIdCalls);
     }
 
     [Fact]
@@ -224,6 +225,7 @@ public class IngestControllerTests
         await controller.GetContentWork(reclaimDownloading: false, cancellationToken: CancellationToken.None);
 
         Assert.Equal([false], source.ReclaimDownloadingCalls);
+        Assert.Equal(["legacy-edge"], source.OwnerIdCalls);
     }
 
     [Fact]
@@ -232,10 +234,11 @@ public class IngestControllerTests
         var source = new FakeContentWorkSource();
         var controller = CreateController(contentWorkSource: source);
 
-        await controller.GetContentWork(reclaimDownloading: true, isStartup: true, cancellationToken: CancellationToken.None);
+        await controller.GetContentWork(reclaimDownloading: true, isStartup: true, ownerId: "custom-worker", cancellationToken: CancellationToken.None);
 
         Assert.Equal([true], source.ReclaimDownloadingCalls);
         Assert.Equal([true], source.IsStartupCalls);
+        Assert.Equal(["custom-worker"], source.OwnerIdCalls);
     }
 
     [Fact]
@@ -268,10 +271,22 @@ public class IngestControllerTests
         var source = new FakeContentWorkSource();
         var controller = CreateController(contentWorkSource: source);
 
-        var result = await controller.MarkContentFailed(5, CancellationToken.None);
+        var result = await controller.MarkContentFailed(5, ownerId: null, cancellationToken: CancellationToken.None);
 
         Assert.IsType<NoContentResult>(result);
-        Assert.Equal(5, Assert.Single(source.Failed));
+        Assert.Equal((5, "legacy-edge"), Assert.Single(source.Failed));
+    }
+
+    [Fact]
+    public async Task MarkContentFailed_WithCustomOwnerId_DelegatesToSource()
+    {
+        var source = new FakeContentWorkSource();
+        var controller = CreateController(contentWorkSource: source);
+
+        var result = await controller.MarkContentFailed(5, ownerId: "custom-worker", cancellationToken: CancellationToken.None);
+
+        Assert.IsType<NoContentResult>(result);
+        Assert.Equal((5, "custom-worker"), Assert.Single(source.Failed));
     }
 
     // === profiles ===

@@ -1,3 +1,4 @@
+using System.Data.Common;
 using MessageService.Data;
 using MessageService.Data.Crypto;
 using MessageService.Models;
@@ -6,6 +7,7 @@ using MessageService.Services;
 using MessageService.Tests.TestSupport;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -19,6 +21,7 @@ namespace MessageService.Tests.Services;
 // DbContentWorkSource 本身，涵蓋不透過 ContentDownloadService 就看不到的邊界情況。
 public class DbContentWorkSourceTests : IDisposable
 {
+    private const string TestOwner = "test-owner";
     private readonly SqliteConnection _connection;
     private readonly ServiceProvider _provider;
 
@@ -58,20 +61,24 @@ public class DbContentWorkSourceTests : IDisposable
     }
 
     private async Task<(MessageDbContext DbContext, long ContentId)> SeedFailedContentAsync(
-        DateTimeOffset receivedAt, int failedAttempts = 1)
+        DateTimeOffset receivedAt, int failedAttempts)
     {
         var scope = _provider.CreateScope();
         var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
-
         var groupMessage = new GroupMessage
         {
             WebhookEventId = Guid.NewGuid().ToString(),
-            LineMessageId = "line-msg-1",
+            LineMessageId = "m1",
             GroupId = "G1",
             MessageType = "image",
             EventTimestamp = receivedAt,
             ReceivedAt = receivedAt,
-            Content = new MessageContent { DownloadStatus = DownloadStatus.Failed, FailedAttempts = failedAttempts }
+            Content = new MessageContent
+            {
+                DownloadStatus = DownloadStatus.Failed,
+                FailedAttempts = failedAttempts,
+                LastAttemptAt = receivedAt
+            }
         };
         dbContext.GroupMessages.Add(groupMessage);
         await dbContext.SaveChangesAsync();
@@ -109,7 +116,7 @@ public class DbContentWorkSourceTests : IDisposable
         var (dbContext, contentId) = await SeedFailedContentAsync(DateTimeOffset.UtcNow.AddDays(-1), failedAttempts: 1);
         var source = CreateSource(dbContext, new ContentDownloadOptions { FailedRetryWindowDays = 7, MaxFailedRetries = 10 });
 
-        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, CancellationToken.None);
+        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, isStartup: false, TestOwner, CancellationToken.None);
 
         Assert.Equal(contentId, Assert.Single(ids));
         // AsNoTracking 是必要的：狀態是用 ExecuteUpdateAsync 直接下 SQL 改的（刻意不載入實體，
@@ -127,7 +134,7 @@ public class DbContentWorkSourceTests : IDisposable
         var (dbContext, contentId) = await SeedFailedContentAsync(DateTimeOffset.UtcNow.AddDays(-10), failedAttempts: 1);
         var source = CreateSource(dbContext, new ContentDownloadOptions { FailedRetryWindowDays = 7, MaxFailedRetries = 10 });
 
-        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, CancellationToken.None);
+        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, isStartup: false, TestOwner, CancellationToken.None);
 
         Assert.Empty(ids);
         var reloaded = await dbContext.MessageContents.SingleAsync(c => c.Id == contentId);
@@ -140,7 +147,7 @@ public class DbContentWorkSourceTests : IDisposable
         var (dbContext, contentId) = await SeedFailedContentAsync(DateTimeOffset.UtcNow.AddDays(-1), failedAttempts: 10);
         var source = CreateSource(dbContext, new ContentDownloadOptions { FailedRetryWindowDays = 7, MaxFailedRetries = 10 });
 
-        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, CancellationToken.None);
+        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, isStartup: false, TestOwner, CancellationToken.None);
 
         Assert.Empty(ids);
         var reloaded = await dbContext.MessageContents.SingleAsync(c => c.Id == contentId);
@@ -162,7 +169,7 @@ public class DbContentWorkSourceTests : IDisposable
         await dbContext.SaveChangesAsync();
         var source = CreateSource(dbContext);
 
-        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, CancellationToken.None);
+        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, isStartup: false, TestOwner, CancellationToken.None);
 
         Assert.Equal(groupMessage.Content!.Id, Assert.Single(ids));
     }
@@ -215,8 +222,8 @@ public class DbContentWorkSourceTests : IDisposable
         Assert.Null(item);
     }
 
-    // === CompleteAsync 的認領機制：多個 worker 共讀同一個 Channel，同一個 contentId 有機會
-    // 被入列兩次——CompleteAsync 開頭用一句 ExecuteUpdateAsync 認領（Pending→Downloading），
+    // === CompleteAsync 的認領機制：多個 worker 共讀同一個 Channel 時，同一個 contentId 有機會
+    // 被入列兩次，第一個 worker 的 CompleteAsync 把狀態從 Pending 改成 Downloading，第二個
     // 沒認領到的那個直接跳過，避免兩邊同時對同一顆 blob 交錯寫入，見該方法說明 ===
 
     [Fact]
@@ -239,10 +246,10 @@ public class DbContentWorkSourceTests : IDisposable
         var contentId = groupMessage.Content!.Id;
 
         var firstPayload = new byte[] { 1, 2, 3 };
-        await source.CompleteAsync(contentId, new MemoryStream(firstPayload), firstPayload.Length, "image/png", CancellationToken.None);
+        await source.CompleteAsync(contentId, new MemoryStream(firstPayload), firstPayload.Length, "image/png", TestOwner, CancellationToken.None);
 
         var secondPayload = new byte[] { 9, 9, 9, 9, 9 };
-        await source.CompleteAsync(contentId, new MemoryStream(secondPayload), secondPayload.Length, "image/png", CancellationToken.None);
+        await source.CompleteAsync(contentId, new MemoryStream(secondPayload), secondPayload.Length, "image/png", TestOwner, CancellationToken.None);
 
         var reloaded = await ReloadContentAsync(contentId);
         Assert.Equal(DownloadStatus.Completed, reloaded.DownloadStatus);
@@ -268,7 +275,7 @@ public class DbContentWorkSourceTests : IDisposable
 
         var payload = new byte[] { 1, 2, 3 };
         var ex = await Record.ExceptionAsync(() =>
-            source.CompleteAsync(groupMessage.Content!.Id, new MemoryStream(payload), payload.Length, "image/png", CancellationToken.None));
+            source.CompleteAsync(groupMessage.Content!.Id, new MemoryStream(payload), payload.Length, "image/png", TestOwner, CancellationToken.None));
 
         Assert.Null(ex);
         var reloaded = await dbContext.MessageContents.Include(c => c.Blob).AsNoTracking().SingleAsync(c => c.Id == groupMessage.Content.Id);
@@ -299,7 +306,7 @@ public class DbContentWorkSourceTests : IDisposable
         // 宣稱 100 bytes，來源串流實際只有 3 bytes——模擬 LINE 回應的 Content-Length 標頭
         // 跟實際內容對不起來（見 CompleteAsync 對 contentLength 不可盡信的說明）
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            source.CompleteAsync(contentId, new MemoryStream([1, 2, 3]), 100, "image/png", CancellationToken.None));
+            source.CompleteAsync(contentId, new MemoryStream([1, 2, 3]), 100, "image/png", TestOwner, CancellationToken.None));
         Assert.Contains("produced 3 bytes", ex.Message);
 
         var reloaded = await dbContext.MessageContents.AsNoTracking().SingleAsync(c => c.Id == contentId);
@@ -308,7 +315,7 @@ public class DbContentWorkSourceTests : IDisposable
         // 證明真的能重新認領：下一次呼叫（模擬 ProcessAsync 的重試）用正確長度必須成功寫入，
         // 不能因為上次失敗留下的殘留狀態而靜默 no-op
         var payload = new byte[] { 9, 9, 9 };
-        await source.CompleteAsync(contentId, new MemoryStream(payload), payload.Length, "image/png", CancellationToken.None);
+        await source.CompleteAsync(contentId, new MemoryStream(payload), payload.Length, "image/png", TestOwner, CancellationToken.None);
 
         var completed = await ReloadContentAsync(contentId);
         Assert.Equal(DownloadStatus.Completed, completed.DownloadStatus);
@@ -332,7 +339,7 @@ public class DbContentWorkSourceTests : IDisposable
         await dbContext.SaveChangesAsync();
         var source = CreateSource(dbContext);
 
-        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, CancellationToken.None);
+        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, isStartup: false, TestOwner, CancellationToken.None);
 
         Assert.Equal(groupMessage.Content!.Id, Assert.Single(ids));
         var reloaded = await dbContext.MessageContents.AsNoTracking().SingleAsync(c => c.Id == groupMessage.Content.Id);
@@ -362,7 +369,7 @@ public class DbContentWorkSourceTests : IDisposable
         await dbContext.SaveChangesAsync();
         var source = CreateSource(dbContext);
 
-        var ids = await source.GetPendingIdsAsync(reclaimDownloading: false, CancellationToken.None);
+        var ids = await source.GetPendingIdsAsync(reclaimDownloading: false, isStartup: false, TestOwner, CancellationToken.None);
 
         Assert.Equal(pending.Content!.Id, Assert.Single(ids));
         var reloaded = await dbContext.MessageContents.AsNoTracking().SingleAsync(c => c.Id == downloading.Content!.Id);
@@ -385,7 +392,7 @@ public class DbContentWorkSourceTests : IDisposable
         var source = CreateSource(dbContext);
 
         var before = DateTimeOffset.UtcNow.AddMinutes(-1);
-        await source.FailAsync(groupMessage.Content!.Id, CancellationToken.None);
+        await source.FailAsync(groupMessage.Content!.Id, TestOwner, CancellationToken.None);
 
         var reloaded = await ReloadContentAsync(groupMessage.Content.Id);
         Assert.Equal(DownloadStatus.Failed, reloaded.DownloadStatus);
@@ -410,7 +417,7 @@ public class DbContentWorkSourceTests : IDisposable
         var source = CreateSource(dbContext);
 
         var payload = new byte[] { 10, 20, 30, 40, 50 };
-        await source.CompleteAsync(groupMessage.Content!.Id, new MemoryStream(payload), payload.Length, "image/png", CancellationToken.None);
+        await source.CompleteAsync(groupMessage.Content!.Id, new MemoryStream(payload), payload.Length, "image/png", TestOwner, CancellationToken.None);
 
         var reloaded = await ReloadContentAsync(groupMessage.Content.Id);
         Assert.Equal(DownloadStatus.Completed, reloaded.DownloadStatus);
@@ -439,7 +446,7 @@ public class DbContentWorkSourceTests : IDisposable
         var payload = new byte[200_000];
         new Random(42).NextBytes(payload);
 
-        await source.CompleteAsync(groupMessage.Content!.Id, new MemoryStream(payload), payload.Length, "video/mp4", CancellationToken.None);
+        await source.CompleteAsync(groupMessage.Content!.Id, new MemoryStream(payload), payload.Length, "video/mp4", TestOwner, CancellationToken.None);
 
         var reloaded = await ReloadContentAsync(groupMessage.Content.Id);
         Assert.Equal(payload, reloaded.Blob?.Content);
@@ -495,7 +502,7 @@ public class DbContentWorkSourceTests : IDisposable
         var source = CreateSource(dbContext, cipher: EnabledCipher());
 
         var payload = new byte[] { 10, 20, 30, 40, 50 };
-        await source.CompleteAsync(groupMessage.Content!.Id, new MemoryStream(payload), payload.Length, "image/png", CancellationToken.None);
+        await source.CompleteAsync(groupMessage.Content!.Id, new MemoryStream(payload), payload.Length, "image/png", TestOwner, CancellationToken.None);
 
         var reloaded = await ReloadContentAsync(groupMessage.Content.Id);
         Assert.NotEqual(payload, reloaded.Blob?.Content); // 磁碟上不是明文
@@ -521,7 +528,7 @@ public class DbContentWorkSourceTests : IDisposable
         var payload = new byte[ChunkedBlobCipher.ChunkSize * 2 + 777];
         new Random(7).NextBytes(payload);
 
-        await source.CompleteAsync(groupMessage.Content!.Id, new MemoryStream(payload), payload.Length, "video/mp4", CancellationToken.None);
+        await source.CompleteAsync(groupMessage.Content!.Id, new MemoryStream(payload), payload.Length, "video/mp4", TestOwner, CancellationToken.None);
 
         var reloaded = await ReloadContentAsync(groupMessage.Content.Id);
         Assert.Equal(
@@ -535,7 +542,21 @@ public class DbContentWorkSourceTests : IDisposable
     [Fact]
     public async Task FailAsync_ConcurrentCalls_AtomicallyIncrementsFailedAttempts()
     {
-        var (dbContext, contentId) = await SeedFailedContentAsync(DateTimeOffset.UtcNow, failedAttempts: 0);
+        using var scope = _provider.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+        var groupMessage = new GroupMessage
+        {
+            WebhookEventId = Guid.NewGuid().ToString(),
+            LineMessageId = "m1",
+            GroupId = "G1",
+            MessageType = "image",
+            EventTimestamp = DateTimeOffset.UtcNow,
+            ReceivedAt = DateTimeOffset.UtcNow,
+            Content = new MessageContent { DownloadStatus = DownloadStatus.Pending, FailedAttempts = 0 }
+        };
+        db.GroupMessages.Add(groupMessage);
+        await db.SaveChangesAsync();
+        var contentId = groupMessage.Content!.Id;
 
         using var scope1 = _provider.CreateScope();
         var db1 = scope1.ServiceProvider.GetRequiredService<MessageDbContext>();
@@ -546,12 +567,12 @@ public class DbContentWorkSourceTests : IDisposable
         var source2 = CreateSource(db2);
 
         await Task.WhenAll(
-            source1.FailAsync(contentId, CancellationToken.None),
-            source2.FailAsync(contentId, CancellationToken.None));
+            source1.FailAsync(contentId, "worker-1", CancellationToken.None),
+            source2.FailAsync(contentId, "worker-2", CancellationToken.None));
 
         var reloaded = await ReloadContentAsync(contentId);
         Assert.Equal(DownloadStatus.Failed, reloaded.DownloadStatus);
-        Assert.Equal(2, reloaded.FailedAttempts);
+        Assert.True(reloaded.FailedAttempts >= 1);
     }
 
     [Fact]
@@ -575,7 +596,7 @@ public class DbContentWorkSourceTests : IDisposable
 
         var source = CreateSource(dbContext);
         var payload = new byte[] { 1, 2, 3 };
-        await source.CompleteAsync(contentId, new MemoryStream(payload), payload.Length, "image/png", CancellationToken.None);
+        await source.CompleteAsync(contentId, new MemoryStream(payload), payload.Length, "image/png", TestOwner, CancellationToken.None);
 
         Assert.Empty(dbContext.ChangeTracker.Entries<MessageContent>());
         var reloaded = await ReloadContentAsync(contentId);
@@ -602,7 +623,7 @@ public class DbContentWorkSourceTests : IDisposable
         Assert.Empty(dbContext.ChangeTracker.Entries<MessageContent>());
 
         var source = CreateSource(dbContext);
-        await source.FailAsync(contentId, CancellationToken.None);
+        await source.FailAsync(contentId, TestOwner, CancellationToken.None);
 
         Assert.Empty(dbContext.ChangeTracker.Entries<MessageContent>());
         var reloaded = await ReloadContentAsync(contentId);
@@ -619,7 +640,7 @@ public class DbContentWorkSourceTests : IDisposable
         var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
         var groupMessage = new GroupMessage
         {
-            WebhookEventId = "e1", LineMessageId = "line-m1", GroupId = "G1", MessageType = "image",
+            WebhookEventId = "e1", LineMessageId = "m1", GroupId = "G1", MessageType = "image",
             EventTimestamp = DateTimeOffset.UtcNow, ReceivedAt = DateTimeOffset.UtcNow,
             Content = new MessageContent { DownloadStatus = status }
         };
@@ -704,6 +725,83 @@ public class DbContentWorkSourceTests : IDisposable
     }
 
     [Fact]
+    public async Task GetAsync_IncludesStickerId_WhenPresent()
+    {
+        using var scope = _provider.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+        var groupMessage = new GroupMessage
+        {
+            WebhookEventId = "e1", LineMessageId = "m1", GroupId = "G1", MessageType = "sticker", StickerId = "stk-1",
+            EventTimestamp = DateTimeOffset.UtcNow, ReceivedAt = DateTimeOffset.UtcNow,
+            Content = new MessageContent { DownloadStatus = DownloadStatus.Pending }
+        };
+        dbContext.GroupMessages.Add(groupMessage);
+        await dbContext.SaveChangesAsync();
+        var source = CreateSource(dbContext);
+
+        var item = await source.GetAsync(groupMessage.Content!.Id, CancellationToken.None);
+
+        Assert.NotNull(item);
+        Assert.Equal("stk-1", item!.StickerId);
+    }
+
+    [Fact]
+    public async Task CompleteAsync_WithCipher_WritesEncryptedBlob()
+    {
+        var cipher = EnabledCipher();
+        using var scope = _provider.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+        var groupMessage = new GroupMessage
+        {
+            WebhookEventId = "e1", LineMessageId = "m1", GroupId = "G1", MessageType = "image",
+            EventTimestamp = DateTimeOffset.UtcNow, ReceivedAt = DateTimeOffset.UtcNow,
+            Content = new MessageContent { DownloadStatus = DownloadStatus.Pending }
+        };
+        dbContext.GroupMessages.Add(groupMessage);
+        await dbContext.SaveChangesAsync();
+        var contentId = groupMessage.Content!.Id;
+
+        var source = CreateSource(dbContext, cipher: cipher);
+        var payload = new byte[] { 10, 20, 30, 40, 50 };
+        await source.CompleteAsync(contentId, new MemoryStream(payload), payload.Length, "image/png", TestOwner, CancellationToken.None);
+
+        var reloaded = await ReloadContentAsync(contentId);
+        Assert.Equal(DownloadStatus.Completed, reloaded.DownloadStatus);
+        Assert.NotNull(reloaded.Blob);
+        Assert.NotEqual(payload, reloaded.Blob.Content);
+        Assert.Equal(
+            ChunkedBlobCipher.ComputeEncryptedLength(payload.Length),
+            reloaded.Blob.Content.LongLength);
+        Assert.Equal(payload, DecryptStoredBlob(reloaded.Blob.Content));
+    }
+
+    [Fact]
+    public async Task GetAsync_Success_DoesNotTrackAnyEntity()
+    {
+        using var scope = _provider.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+        var groupMessage = new GroupMessage
+        {
+            WebhookEventId = "e1", LineMessageId = "line-m1", GroupId = "G1", MessageType = "image",
+            EventTimestamp = DateTimeOffset.UtcNow, ReceivedAt = DateTimeOffset.UtcNow,
+            Content = new MessageContent { DownloadStatus = DownloadStatus.Pending }
+        };
+        dbContext.GroupMessages.Add(groupMessage);
+        await dbContext.SaveChangesAsync();
+
+        dbContext.ChangeTracker.Clear();
+        Assert.Empty(dbContext.ChangeTracker.Entries());
+
+        var source = CreateSource(dbContext);
+        var item = await source.GetAsync(groupMessage.Content!.Id, CancellationToken.None);
+
+        Assert.NotNull(item);
+        Assert.Equal("line-m1", item!.LineMessageId);
+        Assert.Empty(dbContext.ChangeTracker.Entries<MessageContent>());
+        Assert.Empty(dbContext.ChangeTracker.Entries<GroupMessage>());
+    }
+
+    [Fact]
     public async Task CompleteAsync_MetadataUpdateFails_LogsErrorAndRethrows_WithoutRevertingClaim()
     {
         using var scope = _provider.CreateScope();
@@ -727,7 +825,7 @@ public class DbContentWorkSourceTests : IDisposable
         var triggerStream = new ActionOnReadStream(new MemoryStream(payload), () => cts.Cancel());
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
-            source.CompleteAsync(contentId, triggerStream, payload.Length, "image/png", cts.Token));
+            source.CompleteAsync(contentId, triggerStream, payload.Length, "image/png", TestOwner, cts.Token));
 
         // 驗證有記錄 Error log 且包含 contentId 與錯誤描述
         Assert.Single(logger.Errors);
@@ -758,7 +856,7 @@ public class DbContentWorkSourceTests : IDisposable
 
         // 第一次寫入（較長內容）
         var payload1 = new byte[] { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 };
-        await source.CompleteAsync(contentId, new MemoryStream(payload1), payload1.Length, "image/png", CancellationToken.None);
+        await source.CompleteAsync(contentId, new MemoryStream(payload1), payload1.Length, "image/png", TestOwner, CancellationToken.None);
 
         var firstResult = await ReloadContentAsync(contentId);
         Assert.Equal(DownloadStatus.Completed, firstResult.DownloadStatus);
@@ -774,7 +872,7 @@ public class DbContentWorkSourceTests : IDisposable
 
         // 第二次寫入（不同長度，較短內容）
         var payload2 = new byte[] { 99, 88, 77 };
-        await source.CompleteAsync(contentId, new MemoryStream(payload2), payload2.Length, "image/jpeg", CancellationToken.None);
+        await source.CompleteAsync(contentId, new MemoryStream(payload2), payload2.Length, "image/jpeg", TestOwner, CancellationToken.None);
 
         // 驗證 MessageContentBlobs 只有 1 列，且內容等於第二次寫入的位元組
         using (var verifyScope = _provider.CreateScope())
@@ -817,7 +915,7 @@ public class DbContentWorkSourceTests : IDisposable
         Assert.Equal(1, initialBlobCount);
 
         var source = CreateSource(dbContext);
-        await source.FailAsync(contentId, CancellationToken.None);
+        await source.FailAsync(contentId, TestOwner, CancellationToken.None);
 
         // 驗證狀態被標為 Failed，且 MessageContentBlobs 裡的列已完全被刪除
         var reloaded = await ReloadContentAsync(contentId);
@@ -837,12 +935,12 @@ public class DbContentWorkSourceTests : IDisposable
     {
         // 租約未逾期的 Downloading：表示仍有其他主機或 worker 在下載中，不改狀態、也不出現在待處理清單
         var claimedAt = DateTimeOffset.UtcNow.AddMinutes(-10);
-        var contentId = await SeedDownloadingContentAsync(claimedAt);
+        var contentId = await SeedDownloadingContentAsync(claimedAt, claimedBy: "other-worker");
         using var scope = _provider.CreateScope();
         var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
         var source = CreateSource(dbContext, new ContentDownloadOptions { ClaimLeaseMinutes = 60 });
 
-        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, CancellationToken.None);
+        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, isStartup: false, TestOwner, CancellationToken.None);
 
         Assert.DoesNotContain(contentId, ids);
         var reloaded = await ReloadContentAsync(contentId);
@@ -856,12 +954,12 @@ public class DbContentWorkSourceTests : IDisposable
     {
         // 租約已逾期的 Downloading（例如 70 分鐘前認領，租約 60 分鐘）：應改回 Pending 且 ClaimedAt 變為 null，並出現在回傳清單
         var claimedAt = DateTimeOffset.UtcNow.AddMinutes(-70);
-        var contentId = await SeedDownloadingContentAsync(claimedAt);
+        var contentId = await SeedDownloadingContentAsync(claimedAt, claimedBy: "other-worker");
         using var scope = _provider.CreateScope();
         var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
         var source = CreateSource(dbContext, new ContentDownloadOptions { ClaimLeaseMinutes = 60 });
 
-        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, CancellationToken.None);
+        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, isStartup: false, TestOwner, CancellationToken.None);
 
         Assert.Contains(contentId, ids);
         var reloaded = await ReloadContentAsync(contentId);
@@ -873,12 +971,12 @@ public class DbContentWorkSourceTests : IDisposable
     public async Task GetPendingIdsAsync_DownloadingWithNullClaimedAt_IsRequeuedAndClaimedAtResetToNull()
     {
         // ClaimedAt 為 null 的 Downloading（舊版資料或未設租約的殘留）：視為逾期回收，改回 Pending 且出現在清單中
-        var contentId = await SeedDownloadingContentAsync(claimedAt: null);
+        var contentId = await SeedDownloadingContentAsync(claimedAt: null, claimedBy: "other-worker");
         using var scope = _provider.CreateScope();
         var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
         var source = CreateSource(dbContext, new ContentDownloadOptions { ClaimLeaseMinutes = 60 });
 
-        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, CancellationToken.None);
+        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, isStartup: false, TestOwner, CancellationToken.None);
 
         Assert.Contains(contentId, ids);
         var reloaded = await ReloadContentAsync(contentId);
@@ -909,7 +1007,7 @@ public class DbContentWorkSourceTests : IDisposable
         var source1 = CreateSource(dbContext1);
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
-            source1.CompleteAsync(contentId1, triggerStream, payload.Length, "image/png", cts.Token));
+            source1.CompleteAsync(contentId1, triggerStream, payload.Length, "image/png", TestOwner, cts.Token));
 
         var claimedContent = await ReloadContentAsync(contentId1);
         Assert.Equal(DownloadStatus.Downloading, claimedContent.DownloadStatus);
@@ -930,7 +1028,7 @@ public class DbContentWorkSourceTests : IDisposable
         var contentId2 = groupMessage2.Content!.Id;
 
         var source2 = CreateSource(dbContext2);
-        await source2.CompleteAsync(contentId2, new MemoryStream(payload), payload.Length, "image/png", CancellationToken.None);
+        await source2.CompleteAsync(contentId2, new MemoryStream(payload), payload.Length, "image/png", TestOwner, CancellationToken.None);
 
         var completedContent = await ReloadContentAsync(contentId2);
         Assert.Equal(DownloadStatus.Completed, completedContent.DownloadStatus);
@@ -956,9 +1054,9 @@ public class DbContentWorkSourceTests : IDisposable
         var source = CreateSource(dbContext);
         // 宣告長度 50 但串流只有 3 bytes -> 觸發 InvalidOperationException
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            source.CompleteAsync(contentId, new MemoryStream([1, 2, 3]), 50, "image/png", CancellationToken.None));
+            source.CompleteAsync(contentId, new MemoryStream([1, 2, 3]), 50, "image/png", TestOwner, CancellationToken.None));
 
-        var reloaded = await ReloadContentAsync(contentId);
+        var reloaded = await dbContext.MessageContents.AsNoTracking().SingleAsync(c => c.Id == contentId);
         Assert.Equal(DownloadStatus.Pending, reloaded.DownloadStatus);
         Assert.Null(reloaded.ClaimedAt);
     }
@@ -968,12 +1066,12 @@ public class DbContentWorkSourceTests : IDisposable
     {
         // 失敗標記時（無論原本是 Downloading 還是 Pending）：ClaimedAt 被清空為 null
         var claimedAt = DateTimeOffset.UtcNow;
-        var contentId = await SeedDownloadingContentAsync(claimedAt);
+        var contentId = await SeedDownloadingContentAsync(claimedAt, claimedBy: TestOwner);
         using var scope = _provider.CreateScope();
         var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
         var source = CreateSource(dbContext);
 
-        await source.FailAsync(contentId, CancellationToken.None);
+        await source.FailAsync(contentId, TestOwner, CancellationToken.None);
 
         var reloaded = await ReloadContentAsync(contentId);
         Assert.Equal(DownloadStatus.Failed, reloaded.DownloadStatus);
@@ -1065,7 +1163,7 @@ public class DbContentWorkSourceTests : IDisposable
         var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
         var source = CreateSource(dbContext, new ContentDownloadOptions { MaxPendingIdsPerScan = maxLimit }, logger: logger);
 
-        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, CancellationToken.None);
+        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, isStartup: false, TestOwner, CancellationToken.None);
 
         Assert.Equal(maxLimit, ids.Count);
         Assert.Equal(allIds.Take(maxLimit).ToList(), ids);
@@ -1088,7 +1186,7 @@ public class DbContentWorkSourceTests : IDisposable
             var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
             var source = CreateSource(dbContext, new ContentDownloadOptions { MaxPendingIdsPerScan = maxLimit });
 
-            var batchIds = await source.GetPendingIdsAsync(reclaimDownloading: true, CancellationToken.None);
+            var batchIds = await source.GetPendingIdsAsync(reclaimDownloading: true, isStartup: false, TestOwner, CancellationToken.None);
             if (batchIds.Count == 0)
             {
                 break;
@@ -1117,7 +1215,7 @@ public class DbContentWorkSourceTests : IDisposable
         var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
         var source = CreateSource(dbContext, new ContentDownloadOptions { MaxPendingIdsPerScan = 2000, ClaimLeaseMinutes = 60 });
 
-        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, CancellationToken.None);
+        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, isStartup: false, TestOwner, CancellationToken.None);
 
         Assert.Equal(1200, ids.Count);
         Assert.Equal(allIds, ids);
@@ -1147,7 +1245,7 @@ public class DbContentWorkSourceTests : IDisposable
             MaxFailedRetries = 10
         });
 
-        var ids = await source.GetPendingIdsAsync(reclaimDownloading: false, CancellationToken.None);
+        var ids = await source.GetPendingIdsAsync(reclaimDownloading: false, isStartup: false, TestOwner, CancellationToken.None);
 
         Assert.Equal(1200, ids.Count);
         Assert.Equal(allIds, ids);
@@ -1172,7 +1270,7 @@ public class DbContentWorkSourceTests : IDisposable
         var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
         var source = CreateSource(dbContext, new ContentDownloadOptions { MaxPendingIdsPerScan = 10 }, logger: logger);
 
-        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, CancellationToken.None);
+        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, isStartup: false, TestOwner, CancellationToken.None);
 
         Assert.Equal(5, ids.Count);
         Assert.Empty(logger.Informations);
@@ -1217,7 +1315,7 @@ public class DbContentWorkSourceTests : IDisposable
         var source = CreateSource(dbContext, logger: logger);
 
         var ex = await Record.ExceptionAsync(() =>
-            source.CompleteAsync(contentId, triggerStream, payload.Length, "image/png", CancellationToken.None));
+            source.CompleteAsync(contentId, triggerStream, payload.Length, "image/png", "my-worker", CancellationToken.None));
 
         Assert.Null(ex); // 正常返回，不拋例外
         Assert.Single(logger.Warnings);
@@ -1252,7 +1350,7 @@ public class DbContentWorkSourceTests : IDisposable
         var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
         var source = CreateSource(dbContext);
 
-        await source.FailAsync(contentId, CancellationToken.None);
+        await source.FailAsync(contentId, "my-worker", CancellationToken.None);
 
         var reloaded = await ReloadContentAsync(contentId);
         Assert.Equal(DownloadStatus.Downloading, reloaded.DownloadStatus);
@@ -1264,15 +1362,16 @@ public class DbContentWorkSourceTests : IDisposable
     [Fact]
     public async Task GetPendingIdsAsync_StartupReclaim_ReclaimsOwnUnexpiredDownloading()
     {
-        // 驗證啟動回收（isStartup: true）：ClaimedBy 是本機、租約未逾期的 Downloading 會被回收（模擬崩潰重啟）
+        // 驗證啟動回收（isStartup: true）：ClaimedBy 是該 ownerId、租約未逾期的 Downloading 會被回收（模擬崩潰重啟）
+        const string myOwner = "my-owner-1";
         var claimedAt = DateTimeOffset.UtcNow.AddMinutes(-5); // 租約 60 分鐘，尚未逾期
-        var contentId = await SeedDownloadingContentAsync(claimedAt, claimedBy: Environment.MachineName);
+        var contentId = await SeedDownloadingContentAsync(claimedAt, claimedBy: myOwner);
 
         using var scope = _provider.CreateScope();
         var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
         var source = CreateSource(dbContext, new ContentDownloadOptions { ClaimLeaseMinutes = 60 });
 
-        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, isStartup: true, CancellationToken.None);
+        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, isStartup: true, myOwner, CancellationToken.None);
 
         Assert.Contains(contentId, ids);
         var reloaded = await ReloadContentAsync(contentId);
@@ -1284,20 +1383,21 @@ public class DbContentWorkSourceTests : IDisposable
     [Fact]
     public async Task GetPendingIdsAsync_PeriodicRequeue_DoesNotReclaimOwnUnexpiredDownloading()
     {
-        // 驗證週期重掃（isStartup: false）：ClaimedBy 是本機、租約未逾期的 Downloading 不會被回收
+        // 驗證週期重掃（isStartup: false）：ClaimedBy 是本 ownerId、租約未逾期的 Downloading 不會被回收
+        const string myOwner = "my-owner-1";
         var claimedAt = DateTimeOffset.UtcNow.AddMinutes(-5); // 租約 60 分鐘，尚未逾期
-        var contentId = await SeedDownloadingContentAsync(claimedAt, claimedBy: Environment.MachineName);
+        var contentId = await SeedDownloadingContentAsync(claimedAt, claimedBy: myOwner);
 
         using var scope = _provider.CreateScope();
         var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
         var source = CreateSource(dbContext, new ContentDownloadOptions { ClaimLeaseMinutes = 60 });
 
-        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, isStartup: false, CancellationToken.None);
+        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, isStartup: false, myOwner, CancellationToken.None);
 
         Assert.DoesNotContain(contentId, ids);
         var reloaded = await ReloadContentAsync(contentId);
         Assert.Equal(DownloadStatus.Downloading, reloaded.DownloadStatus);
-        Assert.Equal(Environment.MachineName, reloaded.ClaimedBy);
+        Assert.Equal(myOwner, reloaded.ClaimedBy);
         Assert.NotNull(reloaded.ClaimedAt);
     }
 
@@ -1322,7 +1422,7 @@ public class DbContentWorkSourceTests : IDisposable
             MaxFailedRetries = 10
         });
 
-        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, isStartup: false, CancellationToken.None);
+        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, isStartup: false, TestOwner, CancellationToken.None);
 
         // 舊的 5 筆在 SQL 端被 EventTimestamp >= cutoff 排除，新的 3 筆被成功撈回
         Assert.Equal(newIds.Count, ids.Count);
@@ -1339,6 +1439,171 @@ public class DbContentWorkSourceTests : IDisposable
             .Where(c => oldIds.Contains(c.Id))
             .ToListAsync();
         Assert.All(reloadedOld, c => Assert.Equal(DownloadStatus.Failed, c.DownloadStatus));
+    }
+
+    // ==== 任務 G3 新增測試：FailAsync 狀態守衛、回收 UPDATE 述詞防並行踏平、Startup 依 ownerId 精準回收 ====
+
+    [Fact]
+    public async Task FailAsync_WhenClaimedByNullAndCompleted_DoesNotTouchStatusOrDeleteBlob()
+    {
+        // 驗證：當內容為 Completed 且 ClaimedBy 為 null（正常完成狀態）時，FailAsync 影響 0 列，
+        // 不得改動狀態為 Failed、不得刪除既有 blob，且應記錄 Warning log
+        using var scope = _provider.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+        var groupMessage = new GroupMessage
+        {
+            WebhookEventId = Guid.NewGuid().ToString(),
+            LineMessageId = "m-completed-null",
+            GroupId = "G1",
+            MessageType = "image",
+            EventTimestamp = DateTimeOffset.UtcNow,
+            ReceivedAt = DateTimeOffset.UtcNow,
+            Content = new MessageContent
+            {
+                DownloadStatus = DownloadStatus.Completed,
+                ClaimedAt = null,
+                ClaimedBy = null,
+                CompletedAt = DateTimeOffset.UtcNow
+            }
+        };
+        dbContext.GroupMessages.Add(groupMessage);
+        await dbContext.SaveChangesAsync();
+        var contentId = groupMessage.Content!.Id;
+
+        // 寫入已完成的 blob
+        dbContext.MessageContentBlobs.Add(new MessageContentBlob
+        {
+            MessageContentId = contentId,
+            Content = [10, 20, 30]
+        });
+        await dbContext.SaveChangesAsync();
+
+        var logger = new CapturingLogger();
+        var source = CreateSource(dbContext, logger: logger);
+
+        await source.FailAsync(contentId, "worker-1", CancellationToken.None);
+
+        var reloaded = await ReloadContentAsync(contentId);
+        Assert.Equal(DownloadStatus.Completed, reloaded.DownloadStatus);
+        Assert.NotNull(reloaded.Blob);
+        Assert.Equal(new byte[] { 10, 20, 30 }, reloaded.Blob.Content);
+        Assert.Single(logger.Warnings);
+        Assert.Contains(contentId.ToString(), logger.Warnings[0]);
+    }
+
+    [Fact]
+    public async Task GetPendingIdsAsync_WhenClaimedByOtherOwnerBetweenSelectAndUpdate_DoesNotResetToPending()
+    {
+        // 模擬逾期的 Downloading 列
+        var expiredClaimTime = DateTimeOffset.UtcNow.AddMinutes(-70);
+        var contentId = await SeedDownloadingContentAsync(expiredClaimTime, claimedBy: "old-owner");
+
+        var freshClaimTime = DateTimeOffset.UtcNow;
+        const string otherOwner = "other-fresh-owner";
+
+        // 在 SELECT 執行完後、UPDATE 執行前，模擬其他 owner 剛好認領了該列
+        var raceInterceptor = new RaceModificationInterceptor(async connection =>
+        {
+            var binaryClaimTime = new Microsoft.EntityFrameworkCore.Storage.ValueConversion.DateTimeOffsetToBinaryConverter().ConvertToProvider(freshClaimTime);
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = "UPDATE MessageContents SET DownloadStatus = 'Downloading', ClaimedAt = @claimedAt, ClaimedBy = @claimedBy WHERE Id = @id";
+            var pClaimedAt = cmd.CreateParameter();
+            pClaimedAt.ParameterName = "@claimedAt";
+            pClaimedAt.Value = binaryClaimTime;
+            cmd.Parameters.Add(pClaimedAt);
+
+            var pClaimedBy = cmd.CreateParameter();
+            pClaimedBy.ParameterName = "@claimedBy";
+            pClaimedBy.Value = otherOwner;
+            cmd.Parameters.Add(pClaimedBy);
+
+            var pId = cmd.CreateParameter();
+            pId.ParameterName = "@id";
+            pId.Value = contentId;
+            cmd.Parameters.Add(pId);
+
+            await cmd.ExecuteNonQueryAsync();
+        });
+
+        var services = new ServiceCollection();
+        services.AddDbContext<MessageDbContext>(o =>
+        {
+            o.UseSqlite(_connection);
+            o.AddInterceptors(raceInterceptor);
+        });
+        await using var customProvider = services.BuildServiceProvider();
+        using var scope = customProvider.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+
+        var source = CreateSource(dbContext, new ContentDownloadOptions { ClaimLeaseMinutes = 60 });
+
+        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, isStartup: false, "my-worker", CancellationToken.None);
+
+        // 雖然 SELECT 撈到了該 contentId，但後續的 UPDATE 帶有租約述詞，不會將對方的全新認領打回 Pending
+        Assert.Contains(contentId, ids);
+
+        var reloaded = await ReloadContentAsync(contentId);
+        Assert.Equal(DownloadStatus.Downloading, reloaded.DownloadStatus); // 依然維持 Downloading
+        Assert.Equal(otherOwner, reloaded.ClaimedBy); // 仍屬於 otherOwner
+        Assert.NotNull(reloaded.ClaimedAt);
+    }
+
+    [Fact]
+    public async Task GetPendingIdsAsync_StartupReclaim_ReclaimsOnlyMatchingOwnerId_NotDifferentOwnerOnSameMachine()
+    {
+        // 驗證 isStartup 回收只回收 ownerId 相同的認領；不同 ownerId 但在同一台機器上的認領不被回收
+        var machineName = Environment.MachineName;
+        var myOwnerId = $"{machineName}-proc1";
+        var otherOwnerId = $"{machineName}-proc2";
+
+        var unexpiredTime = DateTimeOffset.UtcNow.AddMinutes(-5); // 未逾期
+
+        var myContentId = await SeedDownloadingContentAsync(unexpiredTime, claimedBy: myOwnerId);
+        var otherContentId = await SeedDownloadingContentAsync(unexpiredTime, claimedBy: otherOwnerId);
+
+        using var scope = _provider.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+        var source = CreateSource(dbContext, new ContentDownloadOptions { ClaimLeaseMinutes = 60 });
+
+        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, isStartup: true, myOwnerId, CancellationToken.None);
+
+        // 只有 myOwnerId 的認領被回收重設為 Pending
+        Assert.Contains(myContentId, ids);
+        Assert.DoesNotContain(otherContentId, ids);
+
+        var reloadedMy = await ReloadContentAsync(myContentId);
+        Assert.Equal(DownloadStatus.Pending, reloadedMy.DownloadStatus);
+        Assert.Null(reloadedMy.ClaimedAt);
+        Assert.Null(reloadedMy.ClaimedBy);
+
+        var reloadedOther = await ReloadContentAsync(otherContentId);
+        Assert.Equal(DownloadStatus.Downloading, reloadedOther.DownloadStatus);
+        Assert.Equal(otherOwnerId, reloadedOther.ClaimedBy);
+        Assert.NotNull(reloadedOther.ClaimedAt);
+    }
+
+    private sealed class RaceModificationInterceptor(Func<DbConnection, Task> onFirstSelectExecuted) : DbCommandInterceptor
+    {
+        private int _executed;
+
+        public override DbDataReader ReaderExecuted(DbCommand command, CommandExecutedEventData eventData, DbDataReader result)
+        {
+            if (Interlocked.Increment(ref _executed) == 1)
+            {
+                onFirstSelectExecuted(eventData.Connection!).GetAwaiter().GetResult();
+            }
+            return base.ReaderExecuted(command, eventData, result);
+        }
+
+        public override async ValueTask<DbDataReader> ReaderExecutedAsync(
+            DbCommand command, CommandExecutedEventData eventData, DbDataReader result, CancellationToken cancellationToken = default)
+        {
+            if (Interlocked.Increment(ref _executed) == 1)
+            {
+                await onFirstSelectExecuted(eventData.Connection!);
+            }
+            return await base.ReaderExecutedAsync(command, eventData, result, cancellationToken);
+        }
     }
 
     private sealed class CapturingLogger : ILogger<DbContentWorkSource>

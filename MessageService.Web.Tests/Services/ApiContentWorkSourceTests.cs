@@ -27,10 +27,10 @@ public class ApiContentWorkSourceTests
             Content = JsonContent.Create(new long[] { 3, 7 })
         });
 
-        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, CancellationToken.None);
+        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, isStartup: false, "test-edge", CancellationToken.None);
 
         Assert.Equal([3, 7], ids);
-        Assert.Equal("https://db-host.example/api/ingest/content-work?reclaimDownloading=true&isStartup=false", handler.LastRequest!.RequestUri!.ToString());
+        Assert.Equal("https://db-host.example/api/ingest/content-work?reclaimDownloading=true&isStartup=false&ownerId=test-edge", handler.LastRequest!.RequestUri!.ToString());
         Assert.Equal("ingest", Assert.Single(factory.RequestedClientNames)); // 小型 JSON 走短 timeout 的 client
     }
 
@@ -42,9 +42,9 @@ public class ApiContentWorkSourceTests
             Content = JsonContent.Create(Array.Empty<long>())
         });
 
-        await source.GetPendingIdsAsync(reclaimDownloading: true, isStartup: true, CancellationToken.None);
+        await source.GetPendingIdsAsync(reclaimDownloading: true, isStartup: true, "test-edge", CancellationToken.None);
 
-        Assert.Equal("https://db-host.example/api/ingest/content-work?reclaimDownloading=true&isStartup=true", handler.LastRequest!.RequestUri!.ToString());
+        Assert.Equal("https://db-host.example/api/ingest/content-work?reclaimDownloading=true&isStartup=true&ownerId=test-edge", handler.LastRequest!.RequestUri!.ToString());
     }
 
     [Fact]
@@ -56,9 +56,9 @@ public class ApiContentWorkSourceTests
             Content = JsonContent.Create(Array.Empty<long>())
         });
 
-        await source.GetPendingIdsAsync(reclaimDownloading: false, CancellationToken.None);
+        await source.GetPendingIdsAsync(reclaimDownloading: false, isStartup: false, "test-edge", CancellationToken.None);
 
-        Assert.EndsWith("content-work?reclaimDownloading=false&isStartup=false", handler.LastRequest!.RequestUri!.ToString());
+        Assert.EndsWith("content-work?reclaimDownloading=false&isStartup=false&ownerId=test-edge", handler.LastRequest!.RequestUri!.ToString());
     }
 
     [Fact]
@@ -100,10 +100,10 @@ public class ApiContentWorkSourceTests
             return new HttpResponseMessage(HttpStatusCode.NoContent);
         });
 
-        await source.CompleteAsync(42, new MemoryStream([1, 2, 3]), 3, "image/jpeg", CancellationToken.None);
+        await source.CompleteAsync(42, new MemoryStream([1, 2, 3]), 3, "image/jpeg", "test-edge", CancellationToken.None);
 
         Assert.Equal(HttpMethod.Put, handler.LastRequest!.Method);
-        Assert.Equal("https://db-host.example/api/ingest/content/42", handler.LastRequest.RequestUri!.ToString());
+        Assert.Equal("https://db-host.example/api/ingest/content/42?ownerId=test-edge", handler.LastRequest.RequestUri!.ToString());
         Assert.Equal([1, 2, 3], sentBody);
         Assert.Equal("image/jpeg", sentContentType);
         Assert.Equal("ingest-content", Assert.Single(factory.RequestedClientNames)); // blob 走長 timeout 的 client
@@ -121,7 +121,7 @@ public class ApiContentWorkSourceTests
             return new HttpResponseMessage(HttpStatusCode.NoContent);
         });
 
-        await source.CompleteAsync(42, new MemoryStream([1, 2, 3, 4, 5]), 5, "image/jpeg", CancellationToken.None);
+        await source.CompleteAsync(42, new MemoryStream([1, 2, 3, 4, 5]), 5, "image/jpeg", "test-edge", CancellationToken.None);
 
         Assert.Equal(5, sentContentLength);
     }
@@ -136,7 +136,7 @@ public class ApiContentWorkSourceTests
             return new HttpResponseMessage(HttpStatusCode.NoContent);
         });
 
-        await source.CompleteAsync(42, new MemoryStream([1]), 1, contentType: null, CancellationToken.None);
+        await source.CompleteAsync(42, new MemoryStream([1]), 1, contentType: null, ownerId: "test-edge", CancellationToken.None);
 
         Assert.Null(sentContentType);
     }
@@ -146,10 +146,10 @@ public class ApiContentWorkSourceTests
     {
         var (source, handler, _) = Create(_ => new HttpResponseMessage(HttpStatusCode.NoContent));
 
-        await source.FailAsync(42, CancellationToken.None);
+        await source.FailAsync(42, "test-edge", CancellationToken.None);
 
         Assert.Equal(HttpMethod.Post, handler.LastRequest!.Method);
-        Assert.Equal("https://db-host.example/api/ingest/content/42/failed", handler.LastRequest.RequestUri!.ToString());
+        Assert.Equal("https://db-host.example/api/ingest/content/42/failed?ownerId=test-edge", handler.LastRequest.RequestUri!.ToString());
     }
 
     [Theory]
@@ -161,7 +161,7 @@ public class ApiContentWorkSourceTests
         // 這裡不自己分辨可否重試（見類別註解——不疊加第二套死信機制）
         var (source, _, _) = Create(_ => new HttpResponseMessage(statusCode));
 
-        await Assert.ThrowsAsync<HttpRequestException>(() => source.CompleteAsync(1, new MemoryStream([1]), 1, "a/b", CancellationToken.None));
-        await Assert.ThrowsAsync<HttpRequestException>(() => source.FailAsync(1, CancellationToken.None));
+        await Assert.ThrowsAsync<HttpRequestException>(() => source.CompleteAsync(1, new MemoryStream([1]), 1, "a/b", "test-edge", CancellationToken.None));
+        await Assert.ThrowsAsync<HttpRequestException>(() => source.FailAsync(1, "test-edge", CancellationToken.None));
     }
 }

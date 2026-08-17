@@ -49,7 +49,7 @@
 ### 作業 A（Claude 自做，不外包）
 1. `web.config` `<aspNetCore>` 加 `startupTimeLimit="3600"`。
 2. 兩份 `SplitBlobTables` migration 的三段 INSERT 加 `WHERE NOT EXISTS`（子表已有同鍵者略過）；`SplitBlobTablesMigrationTests` 補一條「子表預先塞一列後跑 migration 不炸且不重複」。
-3. `MessageServiceDatabaseMigrationExtensions` `onLockUnavailable`：改為 LogWarning 並跳過 migrate，不硬跑。
+3. `MessageServiceDatabaseMigrationExtensions` `onLockUnavailable`：改為 LogWarning 並跳過 migrate，不硬跑（G-2 再加：跳過時若有待套用 migration 就直接啟動失敗）。
 
 ### 作業 B-階段 1：保留期清除補 blob 孤兒清理
 - **背景**：拆表後空間回收依賴兩層 cascade，失效時靜默；migration／寫一半被殺也會留孤兒。
@@ -125,12 +125,13 @@
 | B 孤兒清理 | agy(sonnet) | 完成，721 綠 | 通過 | 無 |
 | C-1 schema | agy→Claude | 完成 `8c47af2`，722 綠 | 通過 | agy 為了不存在的問題自建 EF 內部 API 的 `IMigrationsAssembly`（過度設計），回饋要求還原；重產 migration 由 Claude 用 `dotnet ef` 做掉。**真正的衝突不是 `ClaimedAt` 而是新索引**：`LegacySqliteBaselinerTests` 的「模擬舊檔」是用今日模型 `EnsureCreated` 後再砍後期欄位，新索引要一併列入砍除清單 |
 | C-2 租約 | agy | 完成 `19690b2`，728 綠（+6） | 通過 | 逾時中斷未自驗，由 Claude 重跑。**租約預設改 30→60 分鐘**：轉檔輪詢最長 2 分鐘，但大影片下載可能更久，租約太短會讓還在下載的內容被別台回收重下 |
-| C-3 貼圖回填 | agy | 完成 `d43095a`，733 綠（+5） | 通過 | 撞鍵的處理粒度是**整批跳過**而非規劃寫的逐筆：一次 SaveChanges 撞鍵後該批狀態已不可信，整批交給下一輪重掃比逐筆重試簡單且無資料損失 |
+| C-3 貼圖回填 | agy | 完成 `d43095a`，733 綠（+5） | 通過 | 撞鍵的處理粒度先做成整批跳過（後由 G-2 推翻改回逐筆補完，見終檢段） |
 | C-4 撞鍵重試 | agy | 完成，736 綠（+3） | 通過 | 逾時中斷未自驗 |
 | D busy_timeout | agy | 完成，740 綠（+4） | 通過 | 它在 `appsettings.json` 加了 `//` 註解（該檔其餘無註解），Claude 移除 |
 | E 掃描上限 | agy | 完成，745 綠（+5） | 通過 | 排序改用 **Id 由小到大**而非規劃寫的 `ReceivedAt`：`ReceivedAt` 在 SQLite 上沒有支援範圍比較的轉換（同一個理由讓 Failed 的 cutoff 也只能在記憶體篩），Id 遞增等價於到達順序。outbox `CreatedAt` 索引結案不做——outbox 在各主機本機的獨立 SQLite，表很小 |
 | G-1 體檢修正 | agy | 完成 `724473a`，752 綠（+5+2 我改介面收斂） | 通過 | 見下方終檢段 |
 | G-2 體檢修正 | agy | 完成 `80dfca0`，755 綠（+3） | 通過 | 見下方終檢段 |
+| G-3 體檢修正 | agy | 完成，763 綠（+4，另刪 1 支恆真測試、改 1 支弱斷言） | 通過 | 見終檢段第三輪 |
 | F 文件 | Claude | 完成 | — | `SplitBlobTables` 拉成兩 provider 共通節＋SQLite 離線升級步驟；DEPLOYMENT-MODES 補四個新設定鍵、貼圖回填歸屬、雙 Core 不支援、NLog 說明 |
 
 **推翻原規劃之處**：`HostHeartbeats` 原本判斷「缺唯一索引」是錯的——它的主鍵本來就是複合鍵
@@ -159,9 +160,31 @@ Information 並整批跳過，改成只認唯一鍵違反且逐筆補完該批�
 一次改成整輪一次（每批一次是對 `MessageContentBlobs` 的全表反連結掃描）；拿不到 migration
 鎖而跳過時，若真有待套用的 migration 就直接讓啟動失敗，不要帶著落後的 schema 服務。
 
-**文件審查抓到的**：README 仍寫著被本輪推翻的「不碰 Downloading、孤兒只在啟動接續撿回」、
-缺三個新設定鍵、migration 鎖沒寫「不跨機器」、三處背景服務清單都漏了貼圖回填；
-DEPLOYMENT-GUIDE 的保留期清除節沒說明孤兒 blob 那則 Warning 怎麼解讀。皆已修。
+**文件審查抓到的**（兩輪）：README 仍寫著被本輪推翻的「不碰 Downloading、孤兒只在啟動接續撿回」、
+缺三個新設定鍵、migration 鎖沒寫「不跨機器」、背景服務清單漏貼圖回填；DEPLOYMENT-GUIDE
+的保留期清除節沒說明孤兒 blob 那則 Warning。第二輪再抓到 **G-2 的改動全部沒進文件**
+（fail fast、孤兒清理改整輪一次、貼圖回填改逐筆補、`isStartup` 語意）、README 欄位表缺
+`ClaimedAt`／`ClaimedBy`／`Downloading`、DEPLOYMENT-MODES 違反自己「設定鍵不重複一份」的
+約定。皆已修。教訓：**體檢修正輪的程式碼改動也要回頭跑一次文件對照**，不能只在作業 F 做一次。
+
+**第三輪（併回 dev 後的全案體檢）又抓到三個真 bug，開 G-3 修：**
+
+1. **`ClaimedBy` 用 `Environment.MachineName`，但寫入的行程不是下載的行程**——Edge 的認領／完成／
+   失敗都是打 Core 的 ingest API 後在 Core 行程裡執行，所以全部掛 Core 的名字；Edge 啟動傳
+   `isStartup=true` 會讓 Core 把「所有」認領回收，等於退化回舊行為；同機兩站台也互相誤判。
+   修法：`ProcessOwnerId` 單例（機器名＋行程隨機字尾），`IContentWorkSource` 三個方法都帶
+   `ownerId`，Edge 經查詢字串傳給 Core，舊 Edge 沒帶時記成 `legacy-edge`。
+2. **`FailAsync` 的 `ClaimedBy == null` 分支沒看狀態**：別台回收後完成的終態正是 null＋Completed，
+   本機慢路徑最後失敗會把它改成 Failed 並刪掉剛寫好的 blob。修法：兩個分支各綁狀態。
+3. **回收 UPDATE 缺租約述詞**：SELECT 與 UPDATE 之間被別台認領的列會被打回 Pending。
+4. fail fast 會炸掉 SQLite 救場（救場檔待套用一定是全部）→ 救場觸發時不 throw。
+5. 收斂：刪掉四份 `isStartup` 預設 false 的多載、busy_timeout 常數只留一份、interceptor 加
+   `SqliteConnection` 型別防呆、`MaxPendingIdsPerScan` ≤0 防呆；刪掉一支恆真測試
+   （心跳並行 upsert 斷言 `Single`——複合主鍵下不可能失敗）、把 `EnableWalMode_WithCustomBusyTimeout`
+   改成真的驗 pragma 值。
+
+**教訓**：「本機」在拆機拓撲下不是一個自明的概念——寫入的行程、下載的行程、機器三者可以都不同，
+身分要由真正持有租約的那一端提供。
 
 ### 尚未做的
 

@@ -31,21 +31,21 @@ public class DbContentWorkSource(
     private const string BlobIdColumnName = "MessageContentId";
     private readonly ContentDownloadOptions _options = options.Value;
 
-    public async Task<IReadOnlyList<long>> GetPendingIdsAsync(bool reclaimDownloading, bool isStartup, CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<long>> GetPendingIdsAsync(bool reclaimDownloading, bool isStartup, string ownerId, CancellationToken cancellationToken)
     {
         // Downloading：卡在「已認領但沒做完」的列。當 reclaimDownloading=true 時，回收
         // 逾期（ClaimedAt < UtcNow - ClaimLeaseMinutes）或 ClaimedAt 為 null（舊資料／異常遺留）的列；
-        // 若 isStartup=true，則一併回收本機名下（ClaimedBy == Environment.MachineName）但未逾期的列（上次行程崩潰孤兒），
+        // 若 isStartup=true，則一併回收該 ownerId 名下（ClaimedBy == ownerId）但未逾期的列（上次行程崩潰孤兒），
         // 並將狀態改回 Pending、清空 ClaimedAt 與 ClaimedBy 重新撿回。週期重掃（isStartup=false）時本機與其他主機
         // 租約未逾期的 Downloading 表示 worker 仍在正常下載中，一律不碰也不列入待處理清單。
-        var machineName = Environment.MachineName;
+        var maxPending = Math.Max(1, _options.MaxPendingIdsPerScan);
         var leaseCutoff = DateTimeOffset.UtcNow.AddMinutes(-_options.ClaimLeaseMinutes);
         var pendingIds = await dbContext.MessageContents
             .Where(c => c.DownloadStatus == DownloadStatus.Pending
                 || (reclaimDownloading && c.DownloadStatus == DownloadStatus.Downloading
-                    && (c.ClaimedAt == null || c.ClaimedAt < leaseCutoff || (isStartup && c.ClaimedBy == machineName))))
+                    && (c.ClaimedAt == null || c.ClaimedAt < leaseCutoff || (isStartup && c.ClaimedBy == ownerId))))
             .OrderBy(c => c.Id)
-            .Take(_options.MaxPendingIdsPerScan)
+            .Take(maxPending)
             .Select(c => c.Id)
             .ToListAsync(cancellationToken);
 
@@ -54,7 +54,9 @@ public class DbContentWorkSource(
             foreach (var batch in pendingIds.Chunk(BatchUpdateSize))
             {
                 await dbContext.MessageContents
-                    .Where(c => batch.Contains(c.Id) && c.DownloadStatus == DownloadStatus.Downloading)
+                    .Where(c => batch.Contains(c.Id)
+                        && c.DownloadStatus == DownloadStatus.Downloading
+                        && (c.ClaimedAt == null || c.ClaimedAt < leaseCutoff || (isStartup && c.ClaimedBy == ownerId)))
                     .ExecuteUpdateAsync(s => s
                         .SetProperty(c => c.DownloadStatus, DownloadStatus.Pending)
                         .SetProperty(c => c.ClaimedAt, (DateTimeOffset?)null)
@@ -68,7 +70,7 @@ public class DbContentWorkSource(
         // 在 SQLite 上有轉換器支援範圍比較，ReceivedAt 沒有）；記憶體端再以 ReceivedAt >= cutoff
         // 做精確篩選。
         // Take 上限扣除第一段已取得的筆數，確保單輪回傳總數不超過 MaxPendingIdsPerScan。
-        var remainingLimit = _options.MaxPendingIdsPerScan - pendingIds.Count;
+        var remainingLimit = maxPending - pendingIds.Count;
         var failedCandidatesCount = 0;
         var retryableIds = new List<long>();
 
@@ -106,18 +108,15 @@ public class DbContentWorkSource(
             }
         }
 
-        if (_options.MaxPendingIdsPerScan > 0 && pendingIds.Count + failedCandidatesCount >= _options.MaxPendingIdsPerScan)
+        if (pendingIds.Count + failedCandidatesCount >= maxPending)
         {
             logger.LogInformation(
                 "Pending content scan reached limit of {Limit} items; remaining items will be processed in subsequent scans",
-                _options.MaxPendingIdsPerScan);
+                maxPending);
         }
 
         return pendingIds.Concat(retryableIds).ToList();
     }
-
-    public Task<IReadOnlyList<long>> GetPendingIdsAsync(bool reclaimDownloading, CancellationToken cancellationToken) =>
-        GetPendingIdsAsync(reclaimDownloading, isStartup: false, cancellationToken);
 
     public Task<ContentWorkItem?> GetAsync(long contentId, CancellationToken cancellationToken) =>
         dbContext.MessageContents
@@ -146,16 +145,15 @@ public class DbContentWorkSource(
     /// SQL Server 用 SqlParameter 的串流參數（直接把 Stream 指派給 Value，provider 端會邊讀
     /// 邊送，不整份進記憶體）；SQLite 沒有這個機制，改用 zeroblob() 先配置定長空間，再用
     /// SqliteBlob（Stream 子類別）增量寫入。</summary>
-    public async Task CompleteAsync(long contentId, Stream content, long contentLength, string? contentType, CancellationToken cancellationToken)
+    public async Task CompleteAsync(long contentId, Stream content, long contentLength, string? contentType, string ownerId, CancellationToken cancellationToken)
     {
-        var machineName = Environment.MachineName;
         var claimTime = DateTimeOffset.UtcNow;
         var claimed = await dbContext.MessageContents
             .Where(c => c.Id == contentId && c.DownloadStatus == DownloadStatus.Pending)
             .ExecuteUpdateAsync(s => s
                 .SetProperty(c => c.DownloadStatus, DownloadStatus.Downloading)
                 .SetProperty(c => c.ClaimedAt, claimTime)
-                .SetProperty(c => c.ClaimedBy, machineName), cancellationToken);
+                .SetProperty(c => c.ClaimedBy, ownerId), cancellationToken);
 
         if (claimed == 0)
         {
@@ -216,7 +214,7 @@ public class DbContentWorkSource(
             // 由租約逾期後的掃描當最後防線
             try
             {
-                await RevertClaimAsync(contentId, cancellationToken);
+                await RevertClaimAsync(contentId, ownerId, cancellationToken);
             }
             catch
             {
@@ -266,13 +264,13 @@ public class DbContentWorkSource(
     }
 
     /// <summary>把認領失敗的列改回 Pending 並清空 ClaimedAt 與 ClaimedBy，讓 ProcessAsync 的重試迴圈下一次呼叫 CompleteAsync
-    /// 時能重新認領到（見上面 catch 區塊的說明）。只回退仍屬於本機（ClaimedBy == Environment.MachineName）的認領。
+    /// 時能重新認領到（見上面 catch 區塊的說明）。只回退仍屬於該下載端（ClaimedBy == ownerId）的認領。
     /// 用 ExecuteUpdateAsync 直接下 SQL，不透過 change tracker——這裡不需要、也不該去查詢或建立 change tracker 對這個實體的追蹤。</summary>
-    private Task RevertClaimAsync(long contentId, CancellationToken cancellationToken) =>
+    private Task RevertClaimAsync(long contentId, string ownerId, CancellationToken cancellationToken) =>
         dbContext.MessageContents
             .Where(c => c.Id == contentId
                 && c.DownloadStatus == DownloadStatus.Downloading
-                && c.ClaimedBy == Environment.MachineName)
+                && c.ClaimedBy == ownerId)
             .ExecuteUpdateAsync(s => s
                 .SetProperty(c => c.DownloadStatus, DownloadStatus.Pending)
                 .SetProperty(c => c.ClaimedAt, (DateTimeOffset?)null)
@@ -322,12 +320,13 @@ public class DbContentWorkSource(
         command.Parameters.Add(parameter);
     }
 
-    public async Task FailAsync(long contentId, CancellationToken cancellationToken)
+    public async Task FailAsync(long contentId, string ownerId, CancellationToken cancellationToken)
     {
-        var machineName = Environment.MachineName;
         var now = DateTimeOffset.UtcNow;
         var updated = await dbContext.MessageContents
-            .Where(c => c.Id == contentId && (c.ClaimedBy == machineName || c.ClaimedBy == null))
+            .Where(c => c.Id == contentId
+                && ((c.ClaimedBy == ownerId && c.DownloadStatus == DownloadStatus.Downloading)
+                    || (c.ClaimedBy == null && c.DownloadStatus == DownloadStatus.Pending)))
             .ExecuteUpdateAsync(s => s
                 .SetProperty(c => c.DownloadStatus, DownloadStatus.Failed)
                 .SetProperty(c => c.ClaimedAt, (DateTimeOffset?)null)
@@ -336,12 +335,15 @@ public class DbContentWorkSource(
                 .SetProperty(c => c.LastAttemptAt, now),
                 cancellationToken);
 
-        if (updated > 0)
+        if (updated == 0)
         {
-            await dbContext.MessageContentBlobs
-                .Where(b => b.MessageContentId == contentId)
-                .ExecuteDeleteAsync(cancellationToken);
+            logger.LogWarning("Content {ContentId} claim was reclaimed by another process or host; abandoning failure mark.", contentId);
+            return;
         }
+
+        await dbContext.MessageContentBlobs
+            .Where(b => b.MessageContentId == contentId)
+            .ExecuteDeleteAsync(cancellationToken);
     }
 }
 
