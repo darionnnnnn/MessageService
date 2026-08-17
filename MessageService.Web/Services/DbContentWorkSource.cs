@@ -31,19 +31,23 @@ public class DbContentWorkSource(
     private const string BlobIdColumnName = "MessageContentId";
     private readonly ContentDownloadOptions _options = options.Value;
 
-    public async Task<IReadOnlyList<long>> GetPendingIdsAsync(bool reclaimDownloading, bool isStartup, string ownerId, CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<long>> GetPendingIdsAsync(bool reclaimDownloading, TimeSpan? startupAge, string ownerId, CancellationToken cancellationToken)
     {
         // Downloading：卡在「已認領但沒做完」的列。當 reclaimDownloading=true 時，回收
         // 逾期（ClaimedAt < UtcNow - ClaimLeaseMinutes）或 ClaimedAt 為 null（舊資料／異常遺留）的列；
-        // 若 isStartup=true，則一併回收該 ownerId 名下（ClaimedBy == ownerId）但未逾期的列（上次行程崩潰孤兒），
-        // 並將狀態改回 Pending、清空 ClaimedAt 與 ClaimedBy 重新撿回。週期重掃（isStartup=false）時本機與其他主機
-        // 租約未逾期的 Downloading 表示 worker 仍在正常下載中，一律不碰也不列入待處理清單。
+        // 若 startupAge 有值且非負，則換算為 cutoff = UtcNow - startupAge，一併回收該 ownerId 名下（ClaimedBy == ownerId）
+        // 且 ClaimedAt < cutoff 的未逾期列（上次行程崩潰孤兒），並將狀態改回 Pending、清空 ClaimedAt 與 ClaimedBy 重新撿回。
+        // 晚於呼叫端啟動時刻的認領（模擬 IIS 重疊回收期間兄弟行程正在進行的下載）與其他站台未逾期認領一律不碰。
+        // 週期重掃（startupAge=null）時本站台與其他站台租約未逾期的 Downloading 表示 worker 仍在正常下載中，一律不碰也不列入待處理清單。
         var maxPending = Math.Max(1, _options.MaxPendingIdsPerScan);
-        var leaseCutoff = DateTimeOffset.UtcNow.AddMinutes(-_options.ClaimLeaseMinutes);
+        var now = DateTimeOffset.UtcNow;
+        var leaseCutoff = now.AddMinutes(-_options.ClaimLeaseMinutes);
+        var isStartup = startupAge is { } age && age >= TimeSpan.Zero;
+        var startupCutoff = isStartup ? now - startupAge!.Value : DateTimeOffset.MinValue;
         var pendingIds = await dbContext.MessageContents
             .Where(c => c.DownloadStatus == DownloadStatus.Pending
                 || (reclaimDownloading && c.DownloadStatus == DownloadStatus.Downloading
-                    && (c.ClaimedAt == null || c.ClaimedAt < leaseCutoff || (isStartup && c.ClaimedBy == ownerId))))
+                    && (c.ClaimedAt == null || c.ClaimedAt < leaseCutoff || (isStartup && c.ClaimedBy == ownerId && c.ClaimedAt != null && c.ClaimedAt < startupCutoff))))
             .OrderBy(c => c.Id)
             .Take(maxPending)
             .Select(c => c.Id)
@@ -56,7 +60,7 @@ public class DbContentWorkSource(
                 await dbContext.MessageContents
                     .Where(c => batch.Contains(c.Id)
                         && c.DownloadStatus == DownloadStatus.Downloading
-                        && (c.ClaimedAt == null || c.ClaimedAt < leaseCutoff || (isStartup && c.ClaimedBy == ownerId)))
+                        && (c.ClaimedAt == null || c.ClaimedAt < leaseCutoff || (isStartup && c.ClaimedBy == ownerId && c.ClaimedAt != null && c.ClaimedAt < startupCutoff)))
                     .ExecuteUpdateAsync(s => s
                         .SetProperty(c => c.DownloadStatus, DownloadStatus.Pending)
                         .SetProperty(c => c.ClaimedAt, (DateTimeOffset?)null)
@@ -110,9 +114,22 @@ public class DbContentWorkSource(
 
         if (pendingIds.Count + failedCandidatesCount >= maxPending)
         {
-            logger.LogInformation(
-                "Pending content scan reached limit of {Limit} items; remaining items will be processed in subsequent scans",
-                maxPending);
+            // RequeueIntervalMinutes <= 0 時本站台的 ContentDownloadService 不會啟動週期重掃，
+            // 這一輪掃不完的要等下次啟動才有機會被撿回——不能說「後續掃描會處理」。
+            // 拆機部署時這個掃描可能是 Edge 透過 ingest API 觸發的，決定重掃節奏的是 Edge 那邊的
+            // 設定，所以警告文字只講「這台的設定」，不替呼叫端斷言後續會不會有掃描
+            if (_options.RequeueIntervalMinutes > 0)
+            {
+                logger.LogInformation(
+                    "Pending content scan reached limit of {Limit} items; remaining items will be processed in subsequent scans",
+                    maxPending);
+            }
+            else
+            {
+                logger.LogWarning(
+                    "Pending content scan reached limit of {Limit} items; periodic requeue is disabled on this host (RequeueIntervalMinutes <= 0), so remaining items wait for the next scan the downloader initiates (at its next startup, if it has no periodic requeue either)",
+                    maxPending);
+            }
         }
 
         return pendingIds.Concat(retryableIds).ToList();
@@ -214,7 +231,7 @@ public class DbContentWorkSource(
             // 由租約逾期後的掃描當最後防線
             try
             {
-                await RevertClaimAsync(contentId, ownerId, cancellationToken);
+                await RevertClaimAsync(contentId, claimTime, cancellationToken);
             }
             catch
             {
@@ -264,17 +281,25 @@ public class DbContentWorkSource(
     }
 
     /// <summary>把認領失敗的列改回 Pending 並清空 ClaimedAt 與 ClaimedBy，讓 ProcessAsync 的重試迴圈下一次呼叫 CompleteAsync
-    /// 時能重新認領到（見上面 catch 區塊的說明）。只回退仍屬於該下載端（ClaimedBy == ownerId）的認領。
+    /// 時能重新認領到（見上面 catch 區塊的說明）。以 ClaimedAt == claimTime 作為 fencing，確保只回退自己這次認領的列，
+    /// 避免在重疊回收或並行情況下把其他行程或站台的新認領改回 Pending。
     /// 用 ExecuteUpdateAsync 直接下 SQL，不透過 change tracker——這裡不需要、也不該去查詢或建立 change tracker 對這個實體的追蹤。</summary>
-    private Task RevertClaimAsync(long contentId, string ownerId, CancellationToken cancellationToken) =>
-        dbContext.MessageContents
+    private async Task RevertClaimAsync(long contentId, DateTimeOffset claimTime, CancellationToken cancellationToken)
+    {
+        var updated = await dbContext.MessageContents
             .Where(c => c.Id == contentId
                 && c.DownloadStatus == DownloadStatus.Downloading
-                && c.ClaimedBy == ownerId)
+                && c.ClaimedAt == claimTime)
             .ExecuteUpdateAsync(s => s
                 .SetProperty(c => c.DownloadStatus, DownloadStatus.Pending)
                 .SetProperty(c => c.ClaimedAt, (DateTimeOffset?)null)
                 .SetProperty(c => c.ClaimedBy, (string?)null), cancellationToken);
+
+        if (updated == 0)
+        {
+            logger.LogWarning("Content {ContentId} claim was reclaimed by another process or host; abandoning claim revert.", contentId);
+        }
+    }
 
     private static async Task WriteContentSqlServerAsync(
         DbConnection connection, long contentId, Stream content, CancellationToken cancellationToken)

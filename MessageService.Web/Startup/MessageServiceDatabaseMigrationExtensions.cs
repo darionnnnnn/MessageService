@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using MessageService.Data;
 using MessageService.Outbox;
 using MessageService.Services;
@@ -44,7 +45,7 @@ public static class MessageServiceDatabaseMigrationExtensions
                         // 條件完全一致
                         LegacySqliteBaseliner.EnsureBaseline(registration.SqliteConnectionString!, migrationLogger);
 
-                        dbContext.Database.Migrate();
+                        MigrateWithLogging(dbContext, migrationLogger, "Sqlite");
 
                         // Core+Viewer 同機兩站台、或 IIS 重疊回收過渡期都可能有兩個行程同時開 messages.db——
                         // 跟 outbox.db 同一個理由（見 EnableWalMode 說明），持久屬性設一次即可
@@ -56,7 +57,7 @@ public static class MessageServiceDatabaseMigrationExtensions
                         // 跑過一次 Migrate()，這裡再跑一次是冪等的空操作（確認 schema 版本一致），
                         // 換來的是「DI 註冊要用哪個 provider」跟「migration 到底跑了沒」只有一個
                         // 決定點，不用另外維護一條「探測時已經 migrate 過，這裡跳過」的旁路
-                        dbContext.Database.Migrate();
+                        MigrateWithLogging(dbContext, migrationLogger, "SqlServer");
                     }
                 },
                 onLockUnavailable: () => migrationLogger.LogWarning(
@@ -113,6 +114,39 @@ public static class MessageServiceDatabaseMigrationExtensions
 
             // 死信不會自動消失，只會在 OutboxForwarderService 的 log 被看到（啟動時先報一次、
             // 之後每小時再報一次）——沒有專用的重送介面，量大時要靠那行 log 提醒維運人員去查
+        }
+    }
+
+    private static void MigrateWithLogging(DbContext dbContext, ILogger logger, string provider)
+    {
+        var pendingMigrations = dbContext.Database.GetPendingMigrations().ToList();
+        if (pendingMigrations.Count > 0)
+        {
+            logger.LogInformation(
+                "準備套用 {Provider} 資料庫 migration，共 {Count} 個待套用：{Migrations}。",
+                provider,
+                pendingMigrations.Count,
+                string.Join(", ", pendingMigrations));
+        }
+        else
+        {
+            logger.LogInformation(
+                "{Provider} 資料庫結構已是最新，本次不需套用 migration。",
+                provider);
+        }
+
+        // 沒有待套用時 Migrate() 是冪等的空操作，這裡不分支照樣呼叫——保持「migration 到底跑了沒」
+        // 只有一個決定點（與 SqlServer 探測階段已經 migrate 過時的處理同一個理由）
+        var stopwatch = Stopwatch.StartNew();
+        dbContext.Database.Migrate();
+        stopwatch.Stop();
+
+        if (pendingMigrations.Count > 0)
+        {
+            logger.LogInformation(
+                "{Provider} 資料庫 migration 套用完成，耗時 {ElapsedMilliseconds} ms。",
+                provider,
+                stopwatch.ElapsedMilliseconds);
         }
     }
 }

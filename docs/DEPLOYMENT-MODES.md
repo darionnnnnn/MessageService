@@ -135,9 +135,11 @@ Edge 端排空 outbox 時預設一次 HTTP 請求送整批（`Outbox:BatchSize` 
 不用重啟 Edge 就會自動改用批次），只記一次警告 log 避免過渡期洗版。同一條順序也適用於
 `content-work` 端點的 `reclaimDownloading` 參數：舊版 Core 會忽略它、一律撿回 `Downloading`，
 新版 Edge 的週期重掃打到舊版 Core 就會把正在下載中的項目打回 `Pending`；舊版 Edge 打新版
-Core 則沒有問題（參數預設值就是舊行為）。`isStartup`／`ownerId` 參數同理：舊版 Core 忽略它們，只是少了
-「啟動時立即回收自己孤兒」的優化，等租約逾期仍會回收；舊版 Edge 沒帶 `ownerId` 時新版 Core
-一律記成 `legacy-edge`。
+Core 則沒有問題（參數預設值就是舊行為）。`startupAgeSeconds`（早期版本是 `isStartup`）與
+`ownerId` 參數同理：舊版 Core 忽略它們，只是少了「啟動時立即回收自己孤兒」的優化，等租約
+逾期仍會回收；舊版 Edge 只送得出 `isStartup=true`，新版 Core 收到它但沒有 `startupAgeSeconds`
+時**不做**啟動回收（沒有基準時刻就無法分辨孤兒與兄弟行程正在進行的下載，寧可等租約逾期）；
+舊版 Edge 沒帶 `ownerId` 時新版 Core 一律記成 `legacy-edge`。
 
 ## 設定
 
@@ -166,11 +168,19 @@ Core 則沒有問題（參數預設值就是舊行為）。`isStartup`／`ownerI
   仍可重試的 `Failed`。Core 端補出但由 Edge 端下載的 `Pending` 項目最壞要等一個週期才會被撿回。
   `Downloading` 走**認領租約**（`ClaimedAt`／`ClaimedBy`，語意見 README 設定表的
   `ContentDownload:ClaimLeaseMinutes`）：週期重掃只回收租約已逾期的；啟動掃描額外回收掛在
-  本機名下的（一定是上次行程的孤兒）。別台主機正在下載中的內容不會被誤收——這正是舊版
+  **本站台**名下的（一定是上次行程的孤兒）。別台主機正在下載中的內容不會被誤收——這正是舊版
   「啟動時無條件把所有 `Downloading` 打回 `Pending`」在多主機下的 bug。
   把間隔設為 0 會退回「只在啟動時掃一次」。
+  ownerId 的粒度是站台而非行程（組成見 README 設定表），這帶來兩個部署前提：**不可啟用
+  ASP.NET Core Module 的 shadow copy**（BaseDirectory 每次啟動都變，ownerId 會退回每行程一個，
+  啟動掃描就認不出自己的孤兒），**同機兩個站台不可共用同一個實體目錄**（會拿到相同 ownerId）。
+  IIS 重疊回收過渡期或 Web Garden 下同一站台的新舊行程共用同一個 ownerId，所以啟動掃描
+  另外要求「認領時間早於本行程啟動時刻」才回收——孤兒必定早於，兄弟行程進行中的下載必定
+  晚於。這個判準不比對絕對時間戳（拆機時 `ClaimedAt` 是 Core 的時鐘寫的、掃描由 Edge 發動），
+  呼叫端送的是「自己已啟動多久」，由查詢端用自己的時鐘換算。
 - **單輪掃描有上限**：`ContentDownload:MaxPendingIdsPerScan`（預設 5000）限制一輪最多撈多少
-  待處理內容，Id 小的先處理，其餘留給下一輪（被截斷時會記一筆 log）。沒有上限時，
+  待處理內容，Id 小的先處理，其餘留給下一輪（被截斷時會記一筆 log，等級依
+  `RequeueIntervalMinutes` 而定，見 README 設定表）。沒有上限時，
   積壓幾十萬筆會整包載入記憶體，而且 SQL Server 端會撞到 2100 個查詢參數的硬上限——
   積壓越嚴重越跑不動。
 - **同一個角色不支援部署兩台**（例如為了 HA 開兩台 Core）：維護類背景工作靠「每個角色恰好

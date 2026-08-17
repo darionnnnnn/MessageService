@@ -23,8 +23,8 @@ public class ContentDownloadOptions
     /// <summary>週期性重掃的間隔分鐘數；設為 0 表示停用週期重掃，只保留啟動時那一次。</summary>
     public int RequeueIntervalMinutes { get; set; } = 15;
 
-    /// <summary>認領租約的分鐘數；超過這個時間還停在 Downloading 就視為那台主機已經死了，可被回收重跑。</summary>
-    public int ClaimLeaseMinutes { get; set; } = 60;
+    /// <summary>認領租約的分鐘數；超過這個時間還停在 Downloading 就視為那個站台已經死了，可被回收重跑。</summary>
+    public int ClaimLeaseMinutes { get; set; } = 15;
 
     /// <summary>單次掃描最多撈這麼多筆待處理內容，其餘留給下一輪；避免大量積壓時一次全載入記憶體。</summary>
     public int MaxPendingIdsPerScan { get; set; } = 5000;

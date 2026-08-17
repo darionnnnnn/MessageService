@@ -27,24 +27,24 @@ public class ApiContentWorkSourceTests
             Content = JsonContent.Create(new long[] { 3, 7 })
         });
 
-        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, isStartup: false, "test-edge", CancellationToken.None);
+        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, startupAge: null, "test-edge", CancellationToken.None);
 
         Assert.Equal([3, 7], ids);
-        Assert.Equal("https://db-host.example/api/ingest/content-work?reclaimDownloading=true&isStartup=false&ownerId=test-edge", handler.LastRequest!.RequestUri!.ToString());
+        Assert.Equal("https://db-host.example/api/ingest/content-work?reclaimDownloading=true&ownerId=test-edge", handler.LastRequest!.RequestUri!.ToString());
         Assert.Equal("ingest", Assert.Single(factory.RequestedClientNames)); // 小型 JSON 走短 timeout 的 client
     }
 
     [Fact]
-    public async Task GetPendingIdsAsync_StartupRequeue_SendsIsStartupTrue()
+    public async Task GetPendingIdsAsync_StartupRequeue_SendsStartupAgeSeconds()
     {
         var (source, handler, _) = Create(_ => new HttpResponseMessage(HttpStatusCode.OK)
         {
             Content = JsonContent.Create(Array.Empty<long>())
         });
 
-        await source.GetPendingIdsAsync(reclaimDownloading: true, isStartup: true, "test-edge", CancellationToken.None);
+        await source.GetPendingIdsAsync(reclaimDownloading: true, startupAge: TimeSpan.FromSeconds(12.5), "test-edge", CancellationToken.None);
 
-        Assert.Equal("https://db-host.example/api/ingest/content-work?reclaimDownloading=true&isStartup=true&ownerId=test-edge", handler.LastRequest!.RequestUri!.ToString());
+        Assert.Equal("https://db-host.example/api/ingest/content-work?reclaimDownloading=true&startupAgeSeconds=12.5&ownerId=test-edge", handler.LastRequest!.RequestUri!.ToString());
     }
 
     [Fact]
@@ -56,9 +56,9 @@ public class ApiContentWorkSourceTests
             Content = JsonContent.Create(Array.Empty<long>())
         });
 
-        await source.GetPendingIdsAsync(reclaimDownloading: false, isStartup: false, "test-edge", CancellationToken.None);
+        await source.GetPendingIdsAsync(reclaimDownloading: false, startupAge: null, "test-edge", CancellationToken.None);
 
-        Assert.EndsWith("content-work?reclaimDownloading=false&isStartup=false&ownerId=test-edge", handler.LastRequest!.RequestUri!.ToString());
+        Assert.EndsWith("content-work?reclaimDownloading=false&ownerId=test-edge", handler.LastRequest!.RequestUri!.ToString());
     }
 
     [Fact]

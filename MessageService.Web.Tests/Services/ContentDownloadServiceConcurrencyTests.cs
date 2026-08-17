@@ -19,7 +19,7 @@ public class ContentDownloadServiceConcurrencyTests
         public int MaxObservedConcurrency { get; private set; }
         public TaskCompletionSource Gate { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        public Task<IReadOnlyList<long>> GetPendingIdsAsync(bool reclaimDownloading, bool isStartup, string ownerId, CancellationToken cancellationToken) =>
+        public Task<IReadOnlyList<long>> GetPendingIdsAsync(bool reclaimDownloading, TimeSpan? startupAge, string ownerId, CancellationToken cancellationToken) =>
             Task.FromResult<IReadOnlyList<long>>([]);
 
         public async Task<ContentWorkItem?> GetAsync(long contentId, CancellationToken cancellationToken)
@@ -92,7 +92,7 @@ public class ContentDownloadServiceConcurrencyTests
     {
         public HashSet<long> CompletedIds { get; } = [];
 
-        public Task<IReadOnlyList<long>> GetPendingIdsAsync(bool reclaimDownloading, bool isStartup, string ownerId, CancellationToken cancellationToken) =>
+        public Task<IReadOnlyList<long>> GetPendingIdsAsync(bool reclaimDownloading, TimeSpan? startupAge, string ownerId, CancellationToken cancellationToken) =>
             Task.FromResult<IReadOnlyList<long>>([]);
 
         public Task<ContentWorkItem?> GetAsync(long contentId, CancellationToken cancellationToken) =>

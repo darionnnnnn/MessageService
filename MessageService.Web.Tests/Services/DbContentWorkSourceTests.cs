@@ -116,7 +116,7 @@ public class DbContentWorkSourceTests : IDisposable
         var (dbContext, contentId) = await SeedFailedContentAsync(DateTimeOffset.UtcNow.AddDays(-1), failedAttempts: 1);
         var source = CreateSource(dbContext, new ContentDownloadOptions { FailedRetryWindowDays = 7, MaxFailedRetries = 10 });
 
-        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, isStartup: false, TestOwner, CancellationToken.None);
+        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, startupAge: null, TestOwner, CancellationToken.None);
 
         Assert.Equal(contentId, Assert.Single(ids));
         // AsNoTracking 是必要的：狀態是用 ExecuteUpdateAsync 直接下 SQL 改的（刻意不載入實體，
@@ -134,7 +134,7 @@ public class DbContentWorkSourceTests : IDisposable
         var (dbContext, contentId) = await SeedFailedContentAsync(DateTimeOffset.UtcNow.AddDays(-10), failedAttempts: 1);
         var source = CreateSource(dbContext, new ContentDownloadOptions { FailedRetryWindowDays = 7, MaxFailedRetries = 10 });
 
-        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, isStartup: false, TestOwner, CancellationToken.None);
+        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, startupAge: null, TestOwner, CancellationToken.None);
 
         Assert.Empty(ids);
         var reloaded = await dbContext.MessageContents.SingleAsync(c => c.Id == contentId);
@@ -147,7 +147,7 @@ public class DbContentWorkSourceTests : IDisposable
         var (dbContext, contentId) = await SeedFailedContentAsync(DateTimeOffset.UtcNow.AddDays(-1), failedAttempts: 10);
         var source = CreateSource(dbContext, new ContentDownloadOptions { FailedRetryWindowDays = 7, MaxFailedRetries = 10 });
 
-        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, isStartup: false, TestOwner, CancellationToken.None);
+        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, startupAge: null, TestOwner, CancellationToken.None);
 
         Assert.Empty(ids);
         var reloaded = await dbContext.MessageContents.SingleAsync(c => c.Id == contentId);
@@ -169,7 +169,7 @@ public class DbContentWorkSourceTests : IDisposable
         await dbContext.SaveChangesAsync();
         var source = CreateSource(dbContext);
 
-        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, isStartup: false, TestOwner, CancellationToken.None);
+        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, startupAge: null, TestOwner, CancellationToken.None);
 
         Assert.Equal(groupMessage.Content!.Id, Assert.Single(ids));
     }
@@ -339,7 +339,7 @@ public class DbContentWorkSourceTests : IDisposable
         await dbContext.SaveChangesAsync();
         var source = CreateSource(dbContext);
 
-        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, isStartup: false, TestOwner, CancellationToken.None);
+        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, startupAge: null, TestOwner, CancellationToken.None);
 
         Assert.Equal(groupMessage.Content!.Id, Assert.Single(ids));
         var reloaded = await dbContext.MessageContents.AsNoTracking().SingleAsync(c => c.Id == groupMessage.Content.Id);
@@ -369,7 +369,7 @@ public class DbContentWorkSourceTests : IDisposable
         await dbContext.SaveChangesAsync();
         var source = CreateSource(dbContext);
 
-        var ids = await source.GetPendingIdsAsync(reclaimDownloading: false, isStartup: false, TestOwner, CancellationToken.None);
+        var ids = await source.GetPendingIdsAsync(reclaimDownloading: false, startupAge: null, TestOwner, CancellationToken.None);
 
         Assert.Equal(pending.Content!.Id, Assert.Single(ids));
         var reloaded = await dbContext.MessageContents.AsNoTracking().SingleAsync(c => c.Id == downloading.Content!.Id);
@@ -940,7 +940,7 @@ public class DbContentWorkSourceTests : IDisposable
         var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
         var source = CreateSource(dbContext, new ContentDownloadOptions { ClaimLeaseMinutes = 60 });
 
-        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, isStartup: false, TestOwner, CancellationToken.None);
+        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, startupAge: null, TestOwner, CancellationToken.None);
 
         Assert.DoesNotContain(contentId, ids);
         var reloaded = await ReloadContentAsync(contentId);
@@ -959,7 +959,7 @@ public class DbContentWorkSourceTests : IDisposable
         var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
         var source = CreateSource(dbContext, new ContentDownloadOptions { ClaimLeaseMinutes = 60 });
 
-        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, isStartup: false, TestOwner, CancellationToken.None);
+        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, startupAge: null, TestOwner, CancellationToken.None);
 
         Assert.Contains(contentId, ids);
         var reloaded = await ReloadContentAsync(contentId);
@@ -976,7 +976,7 @@ public class DbContentWorkSourceTests : IDisposable
         var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
         var source = CreateSource(dbContext, new ContentDownloadOptions { ClaimLeaseMinutes = 60 });
 
-        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, isStartup: false, TestOwner, CancellationToken.None);
+        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, startupAge: null, TestOwner, CancellationToken.None);
 
         Assert.Contains(contentId, ids);
         var reloaded = await ReloadContentAsync(contentId);
@@ -1163,12 +1163,37 @@ public class DbContentWorkSourceTests : IDisposable
         var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
         var source = CreateSource(dbContext, new ContentDownloadOptions { MaxPendingIdsPerScan = maxLimit }, logger: logger);
 
-        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, isStartup: false, TestOwner, CancellationToken.None);
+        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, startupAge: null, TestOwner, CancellationToken.None);
 
         Assert.Equal(maxLimit, ids.Count);
         Assert.Equal(allIds.Take(maxLimit).ToList(), ids);
         Assert.Single(logger.Informations);
         Assert.Contains(maxLimit.ToString(), logger.Informations[0]);
+    }
+
+    [Fact]
+    public async Task GetPendingIdsAsync_LimitReached_WhenPeriodicRequeueDisabled_LogsWarning()
+    {
+        // 驗證：RequeueIntervalMinutes <= 0（週期重掃停用）時，掃描達上限記的是警告而不是
+        // 「後續掃描會處理」——那句話在沒有後續掃描的情況下不成立
+        await SeedPendingContentsAsync(25);
+        var maxLimit = 10;
+        var logger = new CapturingLogger();
+
+        using var scope = _provider.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+        var source = CreateSource(
+            dbContext,
+            new ContentDownloadOptions { MaxPendingIdsPerScan = maxLimit, RequeueIntervalMinutes = 0 },
+            logger: logger);
+
+        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, startupAge: TimeSpan.FromMinutes(1), TestOwner, CancellationToken.None);
+
+        Assert.Equal(maxLimit, ids.Count);
+        Assert.Empty(logger.Informations);
+        Assert.Single(logger.Warnings);
+        Assert.Contains(maxLimit.ToString(), logger.Warnings[0]);
+        Assert.Contains("periodic requeue is disabled", logger.Warnings[0]);
     }
 
     [Fact]
@@ -1186,7 +1211,7 @@ public class DbContentWorkSourceTests : IDisposable
             var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
             var source = CreateSource(dbContext, new ContentDownloadOptions { MaxPendingIdsPerScan = maxLimit });
 
-            var batchIds = await source.GetPendingIdsAsync(reclaimDownloading: true, isStartup: false, TestOwner, CancellationToken.None);
+            var batchIds = await source.GetPendingIdsAsync(reclaimDownloading: true, startupAge: null, TestOwner, CancellationToken.None);
             if (batchIds.Count == 0)
             {
                 break;
@@ -1215,7 +1240,7 @@ public class DbContentWorkSourceTests : IDisposable
         var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
         var source = CreateSource(dbContext, new ContentDownloadOptions { MaxPendingIdsPerScan = 2000, ClaimLeaseMinutes = 60 });
 
-        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, isStartup: false, TestOwner, CancellationToken.None);
+        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, startupAge: null, TestOwner, CancellationToken.None);
 
         Assert.Equal(1200, ids.Count);
         Assert.Equal(allIds, ids);
@@ -1245,7 +1270,7 @@ public class DbContentWorkSourceTests : IDisposable
             MaxFailedRetries = 10
         });
 
-        var ids = await source.GetPendingIdsAsync(reclaimDownloading: false, isStartup: false, TestOwner, CancellationToken.None);
+        var ids = await source.GetPendingIdsAsync(reclaimDownloading: false, startupAge: null, TestOwner, CancellationToken.None);
 
         Assert.Equal(1200, ids.Count);
         Assert.Equal(allIds, ids);
@@ -1270,7 +1295,7 @@ public class DbContentWorkSourceTests : IDisposable
         var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
         var source = CreateSource(dbContext, new ContentDownloadOptions { MaxPendingIdsPerScan = 10 }, logger: logger);
 
-        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, isStartup: false, TestOwner, CancellationToken.None);
+        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, startupAge: null, TestOwner, CancellationToken.None);
 
         Assert.Equal(5, ids.Count);
         Assert.Empty(logger.Informations);
@@ -1362,7 +1387,7 @@ public class DbContentWorkSourceTests : IDisposable
     [Fact]
     public async Task GetPendingIdsAsync_StartupReclaim_ReclaimsOwnUnexpiredDownloading()
     {
-        // 驗證啟動回收（isStartup: true）：ClaimedBy 是該 ownerId、租約未逾期的 Downloading 會被回收（模擬崩潰重啟）
+        // 驗證啟動回收（startupAge 有值）：ClaimedBy 是該 ownerId、ClaimedAt 早於啟動時刻且租約未逾期的 Downloading 會被回收（模擬崩潰重啟）
         const string myOwner = "my-owner-1";
         var claimedAt = DateTimeOffset.UtcNow.AddMinutes(-5); // 租約 60 分鐘，尚未逾期
         var contentId = await SeedDownloadingContentAsync(claimedAt, claimedBy: myOwner);
@@ -1371,7 +1396,7 @@ public class DbContentWorkSourceTests : IDisposable
         var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
         var source = CreateSource(dbContext, new ContentDownloadOptions { ClaimLeaseMinutes = 60 });
 
-        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, isStartup: true, myOwner, CancellationToken.None);
+        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, startupAge: TimeSpan.FromMinutes(1), myOwner, CancellationToken.None);
 
         Assert.Contains(contentId, ids);
         var reloaded = await ReloadContentAsync(contentId);
@@ -1383,7 +1408,7 @@ public class DbContentWorkSourceTests : IDisposable
     [Fact]
     public async Task GetPendingIdsAsync_PeriodicRequeue_DoesNotReclaimOwnUnexpiredDownloading()
     {
-        // 驗證週期重掃（isStartup: false）：ClaimedBy 是本 ownerId、租約未逾期的 Downloading 不會被回收
+        // 驗證週期重掃（startupAge: null）：ClaimedBy 是本 ownerId、租約未逾期的 Downloading 不會被回收
         const string myOwner = "my-owner-1";
         var claimedAt = DateTimeOffset.UtcNow.AddMinutes(-5); // 租約 60 分鐘，尚未逾期
         var contentId = await SeedDownloadingContentAsync(claimedAt, claimedBy: myOwner);
@@ -1392,7 +1417,7 @@ public class DbContentWorkSourceTests : IDisposable
         var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
         var source = CreateSource(dbContext, new ContentDownloadOptions { ClaimLeaseMinutes = 60 });
 
-        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, isStartup: false, myOwner, CancellationToken.None);
+        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, startupAge: null, myOwner, CancellationToken.None);
 
         Assert.DoesNotContain(contentId, ids);
         var reloaded = await ReloadContentAsync(contentId);
@@ -1422,7 +1447,7 @@ public class DbContentWorkSourceTests : IDisposable
             MaxFailedRetries = 10
         });
 
-        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, isStartup: false, TestOwner, CancellationToken.None);
+        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, startupAge: null, TestOwner, CancellationToken.None);
 
         // 舊的 5 筆在 SQL 端被 EventTimestamp >= cutoff 排除，新的 3 筆被成功撈回
         Assert.Equal(newIds.Count, ids.Count);
@@ -1537,7 +1562,7 @@ public class DbContentWorkSourceTests : IDisposable
 
         var source = CreateSource(dbContext, new ContentDownloadOptions { ClaimLeaseMinutes = 60 });
 
-        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, isStartup: false, "my-worker", CancellationToken.None);
+        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, startupAge: null, "my-worker", CancellationToken.None);
 
         // 雖然 SELECT 撈到了該 contentId，但後續的 UPDATE 帶有租約述詞，不會將對方的全新認領打回 Pending
         Assert.Contains(contentId, ids);
@@ -1549,12 +1574,11 @@ public class DbContentWorkSourceTests : IDisposable
     }
 
     [Fact]
-    public async Task GetPendingIdsAsync_StartupReclaim_ReclaimsOnlyMatchingOwnerId_NotDifferentOwnerOnSameMachine()
+    public async Task GetPendingIdsAsync_StartupReclaim_ReclaimsOnlyMatchingOwnerId_NotDifferentSiteOnSameMachine()
     {
-        // 驗證 isStartup 回收只回收 ownerId 相同的認領；不同 ownerId 但在同一台機器上的認領不被回收
-        var machineName = Environment.MachineName;
-        var myOwnerId = $"{machineName}-proc1";
-        var otherOwnerId = $"{machineName}-proc2";
+        // 驗證啟動回收只回收相同站台（ownerId 相同）的認領；同一台機器上的不同站台（ownerId 不同）認領不被回收
+        var myOwnerId = new ProcessOwnerId("site-1").Value;
+        var otherOwnerId = new ProcessOwnerId("site-2").Value;
 
         var unexpiredTime = DateTimeOffset.UtcNow.AddMinutes(-5); // 未逾期
 
@@ -1565,7 +1589,7 @@ public class DbContentWorkSourceTests : IDisposable
         var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
         var source = CreateSource(dbContext, new ContentDownloadOptions { ClaimLeaseMinutes = 60 });
 
-        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, isStartup: true, myOwnerId, CancellationToken.None);
+        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, startupAge: TimeSpan.FromMinutes(1), myOwnerId, CancellationToken.None);
 
         // 只有 myOwnerId 的認領被回收重設為 Pending
         Assert.Contains(myContentId, ids);
@@ -1580,6 +1604,127 @@ public class DbContentWorkSourceTests : IDisposable
         Assert.Equal(DownloadStatus.Downloading, reloadedOther.DownloadStatus);
         Assert.Equal(otherOwnerId, reloadedOther.ClaimedBy);
         Assert.NotNull(reloadedOther.ClaimedAt);
+    }
+
+    [Fact]
+    public async Task GetPendingIdsAsync_StartupReclaim_ReclaimsOrphansLeftByPreviousProcessWithSameOwnerId()
+    {
+        // 模擬同一站台前一個行程崩潰留下的孤兒列：DownloadStatus = Downloading、ClaimedBy 等於本次 ownerId、
+        // ClaimedAt 尚未逾期。以 startupAge 掃描時應將其回收為 Pending 且清空 ClaimedAt 與 ClaimedBy。
+        var ownerId = new ProcessOwnerId().Value;
+        var unexpiredTime = DateTimeOffset.UtcNow.AddMinutes(-5); // 租約 15 分鐘，尚未逾期
+
+        var orphanContentId = await SeedDownloadingContentAsync(unexpiredTime, claimedBy: ownerId);
+
+        using var scope = _provider.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+        var source = CreateSource(dbContext, new ContentDownloadOptions { ClaimLeaseMinutes = 15 });
+
+        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, startupAge: TimeSpan.FromMinutes(1), ownerId, CancellationToken.None);
+
+        Assert.Contains(orphanContentId, ids);
+
+        var reloaded = await ReloadContentAsync(orphanContentId);
+        Assert.Equal(DownloadStatus.Pending, reloaded.DownloadStatus);
+        Assert.Null(reloaded.ClaimedAt);
+        Assert.Null(reloaded.ClaimedBy);
+    }
+
+    [Fact]
+    public async Task GetPendingIdsAsync_StartupScan_ReclaimsClaimedBeforeStartupWithMatchingOwnerId()
+    {
+        // 驗證啟動掃描會回收「ClaimedAt 早於呼叫端啟動時刻」且同 ownerId、租約未逾期的列
+        const string myOwner = "my-owner-site-1";
+        // 租約 60 分鐘；5 分鐘前認領（早於 2 分鐘前的啟動時刻）
+        var claimedAt = DateTimeOffset.UtcNow.AddMinutes(-5);
+        var contentId = await SeedDownloadingContentAsync(claimedAt, claimedBy: myOwner);
+
+        using var scope = _provider.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+        var source = CreateSource(dbContext, new ContentDownloadOptions { ClaimLeaseMinutes = 60 });
+
+        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, startupAge: TimeSpan.FromMinutes(2), myOwner, CancellationToken.None);
+
+        Assert.Contains(contentId, ids);
+        var reloaded = await ReloadContentAsync(contentId);
+        Assert.Equal(DownloadStatus.Pending, reloaded.DownloadStatus);
+        Assert.Null(reloaded.ClaimedAt);
+        Assert.Null(reloaded.ClaimedBy);
+    }
+
+    [Fact]
+    public async Task GetPendingIdsAsync_StartupScan_DoesNotReclaimClaimedAfterStartupWithSameOwnerId()
+    {
+        // 驗證啟動掃描不會回收「ClaimedAt 晚於呼叫端啟動時刻」的同 ownerId 列（模擬重疊回收期間兄弟行程正在下載的認領）
+        const string myOwner = "my-owner-site-1";
+        // 租約 60 分鐘；1 分鐘前認領（晚於 2 分鐘前的啟動時刻）
+        var claimedAt = DateTimeOffset.UtcNow.AddMinutes(-1);
+        var contentId = await SeedDownloadingContentAsync(claimedAt, claimedBy: myOwner);
+
+        using var scope = _provider.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+        var source = CreateSource(dbContext, new ContentDownloadOptions { ClaimLeaseMinutes = 60 });
+
+        var ids = await source.GetPendingIdsAsync(reclaimDownloading: true, startupAge: TimeSpan.FromMinutes(2), myOwner, CancellationToken.None);
+
+        Assert.DoesNotContain(contentId, ids);
+        var reloaded = await ReloadContentAsync(contentId);
+        Assert.Equal(DownloadStatus.Downloading, reloaded.DownloadStatus);
+        Assert.Equal(myOwner, reloaded.ClaimedBy);
+        Assert.NotNull(reloaded.ClaimedAt);
+    }
+
+    [Fact]
+    public async Task CompleteAsync_Failure_WhenClaimTimeChangedByAnotherProcess_DoesNotRevertClaimToPending()
+    {
+        // 驗證 RevertClaimAsync（透過 CompleteAsync 失敗路徑觸發）在該列已被別人以新的 claimTime 重新認領時，不把那一列改回 Pending
+        using var scope = _provider.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+        var groupMessage = new GroupMessage
+        {
+            WebhookEventId = "e1", LineMessageId = "m1", GroupId = "G1", MessageType = "image",
+            EventTimestamp = DateTimeOffset.UtcNow, ReceivedAt = DateTimeOffset.UtcNow,
+            Content = new MessageContent { DownloadStatus = DownloadStatus.Pending }
+        };
+        dbContext.GroupMessages.Add(groupMessage);
+        await dbContext.SaveChangesAsync();
+        var source = CreateSource(dbContext);
+        var contentId = groupMessage.Content!.Id;
+
+        var newClaimTime = DateTimeOffset.UtcNow.AddMinutes(5);
+        const string otherOwner = "other-process";
+
+        var mutatingStream = new MutatingFailingStream(() =>
+        {
+            var binaryClaimTime = new Microsoft.EntityFrameworkCore.Storage.ValueConversion.DateTimeOffsetToBinaryConverter().ConvertToProvider(newClaimTime);
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = "UPDATE MessageContents SET ClaimedAt = @claimedAt, ClaimedBy = @claimedBy WHERE Id = @id";
+            var pClaimedAt = cmd.CreateParameter();
+            pClaimedAt.ParameterName = "@claimedAt";
+            pClaimedAt.Value = binaryClaimTime;
+            cmd.Parameters.Add(pClaimedAt);
+
+            var pClaimedBy = cmd.CreateParameter();
+            pClaimedBy.ParameterName = "@claimedBy";
+            pClaimedBy.Value = otherOwner;
+            cmd.Parameters.Add(pClaimedBy);
+
+            var pId = cmd.CreateParameter();
+            pId.ParameterName = "@id";
+            pId.Value = contentId;
+            cmd.Parameters.Add(pId);
+
+            cmd.ExecuteNonQuery();
+        });
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            source.CompleteAsync(contentId, mutatingStream, 100, "image/png", TestOwner, CancellationToken.None));
+
+        var reloaded = await dbContext.MessageContents.AsNoTracking().SingleAsync(c => c.Id == contentId);
+        Assert.Equal(DownloadStatus.Downloading, reloaded.DownloadStatus);
+        Assert.NotNull(reloaded.ClaimedAt);
+        Assert.True(Math.Abs((reloaded.ClaimedAt.Value - newClaimTime).TotalSeconds) < 1);
+        Assert.Equal(otherOwner, reloaded.ClaimedBy);
     }
 
     private sealed class RaceModificationInterceptor(Func<DbConnection, Task> onFirstSelectExecuted) : DbCommandInterceptor
@@ -1659,5 +1804,33 @@ public class DbContentWorkSourceTests : IDisposable
         public override long Seek(long offset, SeekOrigin origin) => inner.Seek(offset, origin);
         public override void SetLength(long value) => inner.SetLength(value);
         public override void Write(byte[] buffer, int offset, int count) => inner.Write(buffer, offset, count);
+    }
+
+    private sealed class MutatingFailingStream(Action onRead) : Stream
+    {
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            onRead();
+            throw new InvalidOperationException("Simulated stream read failure");
+        }
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            onRead();
+            throw new InvalidOperationException("Simulated stream read failure");
+        }
+        public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
+        {
+            onRead();
+            throw new InvalidOperationException("Simulated stream read failure");
+        }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
     }
 }

@@ -16,6 +16,7 @@ public class ContentDownloadService(
 {
     private readonly ContentDownloadOptions _options = options.Value;
     private readonly string _ownerId = (processOwnerId ?? ProcessOwnerId.Instance).Value;
+    private readonly DateTimeOffset _startedAt = DateTimeOffset.UtcNow;
 
     /// <summary>週期重掃間隔的封頂值（24 天），略低於 Task.Delay 能接受的最大值。</summary>
     private const int MaxRequeueIntervalMinutes = 24 * 24 * 60;
@@ -32,8 +33,13 @@ public class ContentDownloadService(
         // 漏掉的 Pending 會在下次服務重啟或週期重掃時再被撈回
         try
         {
-            // 啟動時回收逾期租約（以及本機留下的孤兒認領）的 Downloading 與待處理項目並重新入列
-            await RequeuePendingAsync(reclaimDownloading: true, isStartup: true, stoppingToken);
+            // 啟動時回收逾期租約（以及本行程啟動前留下的孤兒認領）的 Downloading 與待處理項目並重新入列
+            var startupAge = DateTimeOffset.UtcNow - _startedAt;
+            if (startupAge < TimeSpan.Zero)
+            {
+                startupAge = TimeSpan.Zero;
+            }
+            await RequeuePendingAsync(reclaimDownloading: true, startupAge: startupAge, stoppingToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -100,14 +106,14 @@ public class ContentDownloadService(
         }
     }
 
-    /// <summary>把工作來源裡待處理的內容重新入列。<paramref name="reclaimDownloading"/> 與 <paramref name="isStartup"/>
-    /// 的語意見 IContentWorkSource.GetPendingIdsAsync：是否回收逾期（或 ClaimedAt 為 null）的認領、是否回收本機未逾期認領。</summary>
-    public async Task RequeuePendingAsync(bool reclaimDownloading, bool isStartup, CancellationToken cancellationToken)
+    /// <summary>把工作來源裡待處理的內容重新入列。<paramref name="reclaimDownloading"/> 與 <paramref name="startupAge"/>
+    /// 的語意見 IContentWorkSource.GetPendingIdsAsync：是否回收逾期（或 ClaimedAt 為 null）的認領、呼叫端行程已啟動多久（null 表不回收本機未逾期認領）。</summary>
+    public async Task RequeuePendingAsync(bool reclaimDownloading, TimeSpan? startupAge, CancellationToken cancellationToken)
     {
         using var scope = scopeFactory.CreateScope();
         var workSource = scope.ServiceProvider.GetRequiredService<IContentWorkSource>();
 
-        var pendingIds = await workSource.GetPendingIdsAsync(reclaimDownloading, isStartup, _ownerId, cancellationToken);
+        var pendingIds = await workSource.GetPendingIdsAsync(reclaimDownloading, startupAge, _ownerId, cancellationToken);
         foreach (var contentId in pendingIds)
         {
             queue.Enqueue(contentId);
@@ -144,8 +150,8 @@ public class ContentDownloadService(
 
             try
             {
-                // 週期重掃同樣回收逾期的認領（reclaimDownloading: true, isStartup: false），本機與他機租約未逾期的 Downloading 仍受保護不被碰觸
-                await RequeuePendingAsync(reclaimDownloading: true, isStartup: false, cancellationToken);
+                // 週期重掃同樣回收逾期的認領（reclaimDownloading: true, startupAge: null），本機兄弟行程與他機租約未逾期的 Downloading 仍受保護不被碰觸
+                await RequeuePendingAsync(reclaimDownloading: true, startupAge: null, cancellationToken);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {

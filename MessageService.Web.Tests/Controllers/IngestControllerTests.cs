@@ -211,8 +211,8 @@ public class IngestControllerTests
 
         var ok = Assert.IsType<OkObjectResult>(result.Result);
         Assert.Equal(new long[] { 1, 2, 3 }, Assert.IsAssignableFrom<IReadOnlyList<long>>(ok.Value));
-        // 沒帶參數＝舊版 Edge 的啟動接續，預設要撿回 Downloading（維持舊行為）
         Assert.Equal([true], source.ReclaimDownloadingCalls);
+        Assert.Equal([null], source.StartupAgeCalls);
         Assert.Equal(["legacy-edge"], source.OwnerIdCalls);
     }
 
@@ -225,20 +225,53 @@ public class IngestControllerTests
         await controller.GetContentWork(reclaimDownloading: false, cancellationToken: CancellationToken.None);
 
         Assert.Equal([false], source.ReclaimDownloadingCalls);
+        Assert.Equal([null], source.StartupAgeCalls);
         Assert.Equal(["legacy-edge"], source.OwnerIdCalls);
     }
 
     [Fact]
-    public async Task GetContentWork_PassesIsStartupFlagThrough()
+    public async Task GetContentWork_PassesStartupAgeSecondsThrough()
     {
         var source = new FakeContentWorkSource();
         var controller = CreateController(contentWorkSource: source);
 
-        await controller.GetContentWork(reclaimDownloading: true, isStartup: true, ownerId: "custom-worker", cancellationToken: CancellationToken.None);
+        await controller.GetContentWork(reclaimDownloading: true, isStartup: false, startupAgeSeconds: 15.5, ownerId: "custom-worker", cancellationToken: CancellationToken.None);
 
         Assert.Equal([true], source.ReclaimDownloadingCalls);
-        Assert.Equal([true], source.IsStartupCalls);
+        Assert.Equal([TimeSpan.FromSeconds(15.5)], source.StartupAgeCalls);
         Assert.Equal(["custom-worker"], source.OwnerIdCalls);
+    }
+
+    [Fact]
+    public async Task GetContentWork_LegacyEdgeWithIsStartupTrue_PassesNullStartupAge()
+    {
+        // 舊版 Edge 只送 isStartup=true、不送 startupAgeSeconds 時，Core 一律不做啟動回收（傳遞 null startupAge）
+        var source = new FakeContentWorkSource();
+        var controller = CreateController(contentWorkSource: source);
+
+        await controller.GetContentWork(reclaimDownloading: true, isStartup: true, startupAgeSeconds: null, ownerId: "legacy-worker", cancellationToken: CancellationToken.None);
+
+        Assert.Equal([true], source.ReclaimDownloadingCalls);
+        Assert.Equal([null], source.StartupAgeCalls);
+        Assert.Equal(["legacy-worker"], source.OwnerIdCalls);
+    }
+
+    [Theory]
+    [InlineData(-1.0)]
+    [InlineData(-100.5)]
+    [InlineData(double.NaN)]
+    [InlineData(double.PositiveInfinity)]
+    public async Task GetContentWork_NegativeOrInvalidStartupAgeSeconds_PassesNullStartupAge(double invalidAgeSeconds)
+    {
+        // 負值或非有限數視同沒送（傳遞 null startupAge）
+        var source = new FakeContentWorkSource();
+        var controller = CreateController(contentWorkSource: source);
+
+        await controller.GetContentWork(reclaimDownloading: true, startupAgeSeconds: invalidAgeSeconds, ownerId: "worker-1", cancellationToken: CancellationToken.None);
+
+        Assert.Equal([true], source.ReclaimDownloadingCalls);
+        Assert.Equal([null], source.StartupAgeCalls);
+        Assert.Equal(["worker-1"], source.OwnerIdCalls);
     }
 
     [Fact]
