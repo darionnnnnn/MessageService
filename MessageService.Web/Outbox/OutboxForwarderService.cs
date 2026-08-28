@@ -114,13 +114,6 @@ public class OutboxForwarderService(
     /// 方便測試直接呼叫而不必跑計時迴圈（比照 ContentDownloadService 的既有測試慣例）。</summary>
     public async Task<bool> ProcessBatchAsync(CancellationToken cancellationToken)
     {
-        // edge→core 這個方向不通時（Auto 模式推送失敗後）不空試——Core 端會改用輪詢把
-        // 資料取走，這裡只要每隔一個探測週期放行一次，通了就自動恢復推送。見 EdgeChannelState
-        if (!channelState.ShouldAttemptPush())
-        {
-            return false;
-        }
-
         using var scope = scopeFactory.CreateScope();
         var dbContext = scope.ServiceProvider.GetRequiredService<OutboxDbContext>();
         var sink = scope.ServiceProvider.GetRequiredService<IIngestSink>();
@@ -133,6 +126,14 @@ public class OutboxForwarderService(
             .ToListAsync(cancellationToken);
 
         if (batch.Count == 0)
+        {
+            return false;
+        }
+
+        // edge→core 這個方向不通時（Auto 模式推送失敗後）不空試——Core 端會改用輪詢把
+        // 資料取走，這裡只要每隔一個探測週期放行一次，通了就自動恢復推送。見 EdgeChannelState。
+        // 閘門放在取完 batch 之後：空批次送不出任何東西，拿它當探測會讓計時白白重置
+        if (!channelState.ShouldAttemptPush(hasWorkToSend: true))
         {
             return false;
         }

@@ -512,4 +512,15 @@ public class DeploymentValidatorTests
 
         Assert.Empty(logger.Errors);
     }
+
+    [Fact]
+    public void Core_WithEdgeBaseUrlButNoApiKey_Throws()
+    {
+        // 沒有金鑰的輪詢每一輪都會被 Edge 回 401，表現成「一直退避」很難查
+        var ex = Assert.Throws<InvalidOperationException>(() => Validate(
+            mode: DeploymentMode.Core,
+            ingest: new IngestOptions { EdgeBaseUrl = "https://edge.example/", ApiKey = "" }));
+
+        Assert.Contains("Ingest:ApiKey", ex.Message);
+    }
 }

@@ -82,7 +82,8 @@ Edge 與 Core 之間的四條資料流（訊息、心跳、媒體、名稱／頭
 | `Push` | 只主動推送，不開放 `/api/edge`。 |
 | `Pull` | 從不主動連 Core（`OutboxForwarderService` 不註冊），只開放 `/api/edge`。`Ingest:BaseUrl` 可留空。 |
 
-Core 端只有在設定 `Ingest:EdgeBaseUrl` 時才啟動輪詢器；留空（預設）就完全不輪詢。
+Core 端的輪詢器只在有資料庫存取權且設定了 `Ingest:EdgeBaseUrl` 時才註冊；留空（預設）
+就完全不輪詢。
 啟動後，距離最後一次**推送**心跳超過 `Ingest:PullActivationSeconds`（預設 180 秒）
 就開始每 `Ingest:PullIntervalSeconds`（預設 1 秒）輪詢一次；收到推送心跳就停止。
 判斷只看推送通道的心跳——輪詢自己拉回來的心跳不算，否則輪詢會把自己停掉。
@@ -103,15 +104,23 @@ Core ──▶ GET  /api/edge/content/{id}      取回 blob，長逾時 client�
 Core ──▶ POST /api/edge/content/{id}/ack  完整落地後才送，Edge 收到才釋放記憶體暫存
 ```
 
-四條流的語意與推送方向等價：訊息 at-least-once（去重靠 `GroupMessages.WebhookEventId`
-唯一索引）；媒體的認領、租約、重試次數仍由 Core 端的 `DbContentWorkSource` 負責，
-Edge 只是換一個地方下載；名稱／頭貼的 TTL 判斷在 Core（Edge 沒有資料庫），
-四類（群組名稱、成員名稱、群組圖片、成員頭貼）都會回傳。
+訊息是 at-least-once：Core 落地成功才送 ack，Edge 收到 ack 才刪 outbox，重複投遞靠
+`GroupMessages.WebhookEventId` 唯一索引去重。
 
-Edge 端下載完成的媒體放在記憶體（`Ingest:PullStagingMaxBytes`，預設 600MB），
-收到 ack 前不釋放，所以取回中斷可以原樣重取；暫存滿時拒收新派工，那些工作留在 Core 端
-維持 Pending 下一輪再派，不會遺失。Edge 重啟遺失暫存時，Core 端的租約
-（`ContentDownload:ClaimLeaseMinutes`）逾期後會重新派工。
+媒體的重試次數與保留視窗仍由 Core 端的 `DbContentWorkSource` 判斷（`MaxRetries`、
+`FailedRetryWindowDays`），Edge 只是換一個地方下載。派工不做認領，那些內容在 Core 端
+一路維持 `Pending` 直到取回落地為止；`ContentDownload:ClaimLeaseMinutes` 的租約回收
+只在推送方向的下載路徑上有作用。Core 每輪把新落地的媒體立刻派出去，另外每
+`ContentDownload:RequeueIntervalMinutes` 做一次全表掃描撿回漏網的。
+
+名稱／頭貼的 TTL 判斷在 Core（Edge 沒有資料庫），四類（群組名稱、成員名稱、群組圖片、
+成員頭貼）都會回傳。圖片位元組隨 poll 回應一起帶回，單輪有總量預算，超出的下一輪再回。
+這條流沒有 ack：回應在傳輸中遺失時該筆結果會消失，等 TTL 再次過期時重新刷新。
+
+Edge 端下載完成的媒體放在記憶體（`Ingest:PullStagingMaxBytes`，預設 600MB，生效值不小於
+`Ingest:MaxContentBytes`），收到 ack 前不釋放，所以取回中斷可以原樣重取；暫存滿時拒收新派工，
+那些工作留在 Core 端維持 `Pending` 下一輪再派。Edge 重啟遺失暫存時，那幾筆同樣還是 `Pending`，
+下一輪 poll 就會重新派工。
 
 ### 啟用拉取方向要設定什麼
 
@@ -120,9 +129,9 @@ Edge 端的 `/api/edge` 由既有的 `Ingest:ApiKey` 與 `Ingest:AllowedClientIp
 （見 `IpAllowlistMiddleware`），所以啟用拉取方向時 Edge 必須把 Core 的 IP 加進去，
 否則輪詢一律 403。
 
-既有部署升級後不改任何設定就維持原本行為：`Ingest:Channel` 預設 `Auto`，
-Core 端 `Ingest:EdgeBaseUrl` 預設空、輪詢器不註冊。Edge 上會多出 `/api/edge` 路由，
-但沒設白名單時它對所有來源回 403。
+不改任何設定時 Edge 主動推送、Core 不輪詢：`Ingest:Channel` 預設 `Auto`，
+Core 端 `Ingest:EdgeBaseUrl` 預設空、輪詢器不註冊。Edge 上有 `/api/edge` 路由，
+沒設白名單時它對所有來源回 403。
 
 ## 架構：outbox 是唯一的落地路徑
 
@@ -212,8 +221,11 @@ Core 則沒有問題（參數預設值就是舊行為）。`startupAgeSeconds`�
   逾期告警發現。設定 `Pull` 時務必同時設好 Core 端的 `Ingest:EdgeBaseUrl`。
 - **`Pull` 模式下防火牆重新開通不會自動升級回推送**：`Pull` 是「明知這個方向封死」的
   宣告，Edge 不做任何探測。要自動升級請用預設的 `Auto`。
-- **拉取方向的媒體暫存在記憶體**：Edge 重啟會遺失暫存中的內容，那幾筆要等 Core 端租約
-  （`ContentDownload:ClaimLeaseMinutes`，預設 15 分）逾期後重新派工才會補回。
+- **拉取方向的媒體暫存在記憶體**：Edge 重啟會遺失暫存中的內容，那幾筆會在下一輪 poll
+  被重新派工、重新從 LINE 下載一次（LINE 內容 API 不冪等計費）。
+- **拉取方向的名稱／頭貼結果沒有 ack**：poll 回應在傳輸中遺失時該筆結果會消失，
+  要等 TTL（`ProfileCache:RefreshAfter`）再次過期才會重新刷新。訊息與媒體不受影響，
+  那兩條流都有 ack。
 - **outbox 死信沒有專用的重送介面**：收到 `PermanentIngestException` 的項目會被標記
   `DeadLetteredAt`、停止自動重試（暫時性失敗則永遠退避重試、不會死信），但資料留在
   `outbox.db` 裡不會自動消失，只能手動查 `LastError` 欄位後決定怎麼處理。

@@ -33,13 +33,33 @@ public static class DeploymentValidator
             }
         }
 
-        // 暫存區比單一檔案的上限還小的話，最大的那種檔案永遠塞不進去、只會一直重派——
-        // 這種設定組合跑起來才會發現，寧可啟動就講清楚
+        // 暫存區比單一檔案的上限還小的話，最大的那種檔案永遠塞不進去。不擋啟動：
+        // MaxContentBytes 是既有可調鍵，調得比暫存預設值大的部署升級時不該啟動失敗——
+        // 實際生效的上限會夾到至少等於 MaxContentBytes（見 EdgeContentStaging），這裡只提醒
         if (capabilities.EdgePullApiEnabled && ingest.PullStagingMaxBytes < ingest.MaxContentBytes)
         {
+            logger.LogWarning(
+                "Ingest:PullStagingMaxBytes（{Staging}）小於 Ingest:MaxContentBytes（{MaxContent}）：" +
+                "實際生效的暫存上限會自動提高到 {Effective}，否則最大的單一檔案永遠無法暫存。" +
+                "請確認這台主機的記憶體足以容納。",
+                ingest.PullStagingMaxBytes, ingest.MaxContentBytes, ingest.MaxContentBytes);
+        }
+
+        // Ingest:Channel 只對 Edge 有意義。其他模式設了不會有作用，但看起來像有——
+        // 尤其 AllInOne 設成 Pull 會讓人以為「這台改成被動接收」，實際上什麼都沒變
+        if (mode is not DeploymentMode.Edge && ingest.Channel is not IngestChannel.Auto)
+        {
+            logger.LogWarning(
+                "Ingest:Channel={Channel} 只在 Deployment:Mode=Edge 時有作用，這台主機（{Mode}）的設定" +
+                "不會有任何效果。", ingest.Channel, mode);
+        }
+
+        // 設了 Edge 位址卻沒有金鑰：輪詢每一輪都會被 Edge 回 401，表現成「一直退避」很難查
+        if (!string.IsNullOrWhiteSpace(ingest.EdgeBaseUrl) && string.IsNullOrWhiteSpace(ingest.ApiKey))
+        {
             throw new InvalidOperationException(
-                $"Ingest:PullStagingMaxBytes（{ingest.PullStagingMaxBytes}）不可小於 Ingest:MaxContentBytes" +
-                $"（{ingest.MaxContentBytes}），否則最大的單一檔案永遠無法暫存，會不斷重新派工。");
+                "設定了 Ingest:EdgeBaseUrl（要主動輪詢 Edge）就必須同時設定 Ingest:ApiKey，" +
+                "否則每一輪輪詢都會被 Edge 端的金鑰驗證擋成 401。");
         }
 
         if (mode is DeploymentMode.Core && string.IsNullOrWhiteSpace(ingest.ApiKey))

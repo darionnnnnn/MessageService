@@ -112,6 +112,7 @@ public class EdgePullServiceTests
                 EdgeBaseUrl = "https://edge.example/",
                 ApiKey = "k",
             }),
+            OptionsFactory.Create(new ContentDownloadOptions()),
             logger);
 
         return new Harness(
@@ -453,6 +454,9 @@ public class EdgePullServiceTests
             }, workSource: workSource);
 
         await harness.Service.PollOnceAsync(CancellationToken.None);
+        // poll 只把 Id 排進取回佇列，實際取回在獨立迴圈——大檔不能卡住每秒一次的心跳與訊息
+        Assert.Empty(workSource.Completed);
+        Assert.True(await harness.Service.ProcessContentQueueOnceAsync(CancellationToken.None));
 
         var completed = Assert.Single(workSource.Completed);
         Assert.Equal(9L, completed.ContentId);
@@ -484,6 +488,7 @@ public class EdgePullServiceTests
         }, workSource: workSource);
 
         await harness.Service.PollOnceAsync(CancellationToken.None);
+        await harness.Service.ProcessContentQueueOnceAsync(CancellationToken.None);
 
         Assert.Empty(workSource.Completed);
         Assert.DoesNotContain(harness.Requests, r => r.RequestUri!.AbsolutePath.EndsWith("/ack"));
@@ -510,47 +515,54 @@ public class EdgePullServiceTests
         }, workSource: workSource);
 
         await harness.Service.PollOnceAsync(CancellationToken.None);
+        await harness.Service.ProcessContentQueueOnceAsync(CancellationToken.None);
         Assert.Empty(workSource.Completed);
 
-        // 取回失敗不 ack，Edge 保留暫存，下一輪重取就會成功
+        // 取回失敗不 ack，Edge 保留暫存，下一輪 poll 會再把它列進 ReadyContentIds 重取
         fail = false;
         await harness.Service.PollOnceAsync(CancellationToken.None);
+        await harness.Service.ProcessContentQueueOnceAsync(CancellationToken.None);
         Assert.Single(workSource.Completed);
     }
 
     [Fact]
-    public async Task PollOnceAsync_SlowFetch_IsNotRequestedTwiceConcurrently()
+    public async Task PollOnceAsync_ContentStillInFlight_IsNotQueuedAgain()
     {
-        var gate = new TaskCompletionSource();
-        var fetchCount = 0;
         var workSource = new FakeContentWorkSource();
         var harness = CreateHarness(request =>
-        {
-            if (request.RequestUri!.AbsolutePath.EndsWith("/poll"))
-            {
-                return PollResponse(readyContentIds: [9L]);
-            }
-            if (request.RequestUri.AbsolutePath.EndsWith("/content/9"))
-            {
-                Interlocked.Increment(ref fetchCount);
-                gate.Task.GetAwaiter().GetResult();
-                return ContentResponse([1, 2, 3]);
-            }
-            return new HttpResponseMessage(HttpStatusCode.NoContent);
-        }, workSource: workSource);
+            request.RequestUri!.AbsolutePath.EndsWith("/poll")
+                ? PollResponse(readyContentIds: [9L])
+                : new HttpResponseMessage(HttpStatusCode.NoContent), workSource: workSource);
 
-        // 取回耗時超過輪詢間隔時，第二輪不得對同一筆再發一次 GET
-        var first = Task.Run(() => harness.Service.PollOnceAsync(CancellationToken.None));
-        while (Volatile.Read(ref fetchCount) == 0)
-        {
-            await Task.Yield();
-        }
-
+        // 大檔傳到一半時，接下來每一輪 poll 都還會把它列在 ReadyContentIds 裡——
+        // 不能因此重複排隊，否則同一份內容會被傳好幾次
         await harness.Service.PollOnceAsync(CancellationToken.None);
-        gate.SetResult();
-        await first;
+        await harness.Service.PollOnceAsync(CancellationToken.None);
+        await harness.Service.PollOnceAsync(CancellationToken.None);
 
-        Assert.Equal(1, Volatile.Read(ref fetchCount));
+        Assert.True(await harness.Service.ProcessContentQueueOnceAsync(CancellationToken.None));
+        Assert.False(await harness.Service.ProcessContentQueueOnceAsync(CancellationToken.None));
+        Assert.Equal(1, harness.Requests.Count(r => r.RequestUri!.AbsolutePath.EndsWith("/content/9")));
+    }
+
+    [Fact]
+    public async Task PollOnceAsync_ContentInFlight_IsNotDispatchedAgain()
+    {
+        var workSource = new FakeContentWorkSource { PendingIds = [9L] };
+        workSource.Items[9L] = new ContentWorkItem(9L, "msg-9", "image");
+        var harness = CreateHarness(request =>
+            request.RequestUri!.AbsolutePath.EndsWith("/poll")
+                ? PollResponse(readyContentIds: [9L])
+                : new HttpResponseMessage(HttpStatusCode.NoContent), workSource: workSource);
+
+        // 第一輪把 9 排進取回佇列（尚未處理），第二輪不該再把它當成待下載派出去——
+        // 內容 Edge 已經下載好了，正在傳回來的路上
+        await harness.Service.PollOnceAsync(CancellationToken.None);
+        await harness.Service.PollOnceAsync(CancellationToken.None);
+
+        var pollBodies = harness.RequestBodies
+            .Where(b => b.Contains("contentWork", StringComparison.OrdinalIgnoreCase)).ToList();
+        Assert.DoesNotContain("\"contentId\":9", pollBodies[^1], StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -565,40 +577,6 @@ public class EdgePullServiceTests
         Assert.Equal(5L, Assert.Single(workSource.Failed).ContentId);
     }
 
-    [Fact]
-    public async Task PollOnceAsync_InFlightContent_IsNotDispatchedAgain()
-    {
-        var gate = new TaskCompletionSource();
-        var workSource = new FakeContentWorkSource { PendingIds = [9L] };
-        workSource.Items[9L] = new ContentWorkItem(9L, "msg-9", "image");
-        var harness = CreateHarness(request =>
-        {
-            if (request.RequestUri!.AbsolutePath.EndsWith("/poll"))
-            {
-                return PollResponse(readyContentIds: [9L]);
-            }
-            if (request.RequestUri.AbsolutePath.EndsWith("/content/9"))
-            {
-                gate.Task.GetAwaiter().GetResult();
-                return ContentResponse([1, 2, 3]);
-            }
-            return new HttpResponseMessage(HttpStatusCode.NoContent);
-        }, workSource: workSource);
-
-        var first = Task.Run(() => harness.Service.PollOnceAsync(CancellationToken.None));
-        while (harness.Requests.Count < 2)
-        {
-            await Task.Yield();
-        }
-
-        await harness.Service.PollOnceAsync(CancellationToken.None);
-        gate.SetResult();
-        await first;
-
-        // 正在取回中的那筆不該被重新派工——內容已經在傳回來的路上
-        var secondPollBody = harness.RequestBodies.Last(b => b.Contains("contentWork", StringComparison.OrdinalIgnoreCase));
-        Assert.DoesNotContain("\"contentId\":9", secondPollBody, StringComparison.OrdinalIgnoreCase);
-    }
 
     // === 名稱／頭貼反向化（作業D） ===
 
@@ -716,7 +694,9 @@ public class EdgePullServiceTests
         // 背壓不是錯誤但不能靜默，也不能每秒刷一次
         Assert.Equal(1, harness.Logger.Records.Count(r => r.Level == LogLevel.Warning && r.Message.Contains("暫存區已滿")));
 
-        harness.Time.Now = harness.Time.Now.AddMinutes(11);
+        // 跨過全表掃描的節流間隔（ContentDownload:RequeueIntervalMinutes，預設 15 分）
+        // 才會再派一次工，那時告警的十分鐘節流也已經過了
+        harness.Time.Now = harness.Time.Now.AddMinutes(16);
         await harness.Service.PollOnceAsync(CancellationToken.None);
         Assert.Equal(2, harness.Logger.Records.Count(r => r.Level == LogLevel.Warning && r.Message.Contains("暫存區已滿")));
     }

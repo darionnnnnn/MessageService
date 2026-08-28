@@ -46,7 +46,9 @@ public class OutboxForwarderServiceTests : IDisposable
             new FakeOutboxSignal(),
             _downloadQueue,
             _profileRefreshQueue,
-            channelState ?? new EdgeChannelState(OptionsFactory.Create(new IngestOptions()), TimeProvider.System),
+            channelState ?? new EdgeChannelState(
+                OptionsFactory.Create(new DeploymentOptions()), OptionsFactory.Create(new IngestOptions()),
+                TimeProvider.System),
             OptionsFactory.Create(options ?? new OutboxOptions
             {
                 BatchSize = 50,

@@ -6,8 +6,14 @@ namespace MessageService.Tests.Services;
 
 public class EdgeContentStagingTests
 {
+    // MaxContentBytes 一併調小：生效的上限會夾到至少等於它（見 EdgeContentStaging），
+    // 只設 PullStagingMaxBytes 的話這些容量測試會被 300MB 的預設值架空
     private static EdgeContentStaging Create(long maxBytes = 1024) =>
-        new(OptionsFactory.Create(new IngestOptions { PullStagingMaxBytes = maxBytes }));
+        new(OptionsFactory.Create(new IngestOptions
+        {
+            PullStagingMaxBytes = maxBytes,
+            MaxContentBytes = maxBytes,
+        }));
 
     private static ContentWorkItem Work(long id) => new(id, $"msg-{id}", "image");
 
@@ -58,6 +64,9 @@ public class EdgeContentStagingTests
         Assert.False(staging.TryStage(1, new byte[101], "image/png"));
         Assert.Equal(0, staging.StagedBytes);
         Assert.Empty(staging.GetReadyIds());
+        // 收不下時派工必須留著，否則這筆永遠沒人再下載，還會一路走到 FailAsync
+        // 去消耗 Core 端的正式重試次數
+        Assert.Equal([1L], staging.GetPendingIds());
     }
 
     [Fact]
@@ -129,5 +138,19 @@ public class EdgeContentStagingTests
 
         staging.Release(1);
         Assert.Equal(200, staging.StagedBytes);
+    }
+
+    [Fact]
+    public void MaxBytes_IsClampedToAtLeastMaxContentBytes()
+    {
+        // 設得比單一檔案上限還小時，最大的那種檔案永遠塞不進去、只會不斷重新派工
+        var staging = new EdgeContentStaging(OptionsFactory.Create(new IngestOptions
+        {
+            PullStagingMaxBytes = 10,
+            MaxContentBytes = 500,
+        }));
+        staging.AcceptDispatch([Work(1)]);
+
+        Assert.True(staging.TryStage(1, new byte[500], null));
     }
 }

@@ -6,14 +6,16 @@ namespace MessageService.Services;
 /// <summary>拉取模式下，Edge 端已下載完成、等 Core 來取走的媒體暫存區。
 ///
 /// 走記憶體不落磁碟：Core 每秒輪詢一次，暫存的生命週期通常只有幾秒。代價是 Edge 重啟會遺失，
-/// 但那不會掉資料——Core 端的認領租約（ContentDownload:ClaimLeaseMinutes）逾期後會把那筆
-/// 重新派工，Edge 下次再下載一遍。
+/// 但那不會掉資料——那些內容在 Core 端一路維持 Pending（派工不認領），下一輪 poll 就會
+/// 重新派工，Edge 再下載一遍。
 ///
 /// 總量上限由 Ingest:PullStagingMaxBytes 控制，滿了就拒收新派工（背壓）：讓工作留在 Core 端
 /// 等下一輪，而不是把記憶體吃爆或丟掉已下載的內容。</summary>
 public class EdgeContentStaging(IOptions<IngestOptions> options)
 {
-    private readonly long _maxBytes = options.Value.PullStagingMaxBytes;
+    /// <summary>實際生效的上限。夾到至少等於單一檔案上限——設得比 MaxContentBytes 還小時，
+    /// 最大的那種檔案永遠塞不進去、只會不斷重新派工，那比多用一點記憶體糟得多。</summary>
+    private readonly long _maxBytes = Math.Max(options.Value.PullStagingMaxBytes, options.Value.MaxContentBytes);
     private readonly object _syncLock = new();
 
     /// <summary>Core 已派工、還沒下載完的項目。key 是 MessageContent.Id。</summary>
@@ -95,26 +97,29 @@ public class EdgeContentStaging(IOptions<IngestOptions> options)
     {
         lock (_syncLock)
         {
-            if (!_dispatched.Remove(contentId) && !_ready.ContainsKey(contentId))
+            if (!_dispatched.ContainsKey(contentId) && !_ready.ContainsKey(contentId))
             {
                 // 沒派工過的內容不收——正常流程不會發生，防止未預期的來源塞爆記憶體
                 return false;
             }
 
+            var occupied = _stagedBytes;
             if (_ready.TryGetValue(contentId, out var existing))
             {
                 // 重複下載同一筆（例如重派後又完成一次）：以新的取代，先扣掉舊的佔用量
-                _stagedBytes -= existing.Content.LongLength;
-                _ready.Remove(contentId);
+                occupied -= existing.Content.LongLength;
             }
 
-            if (_stagedBytes + content.LongLength > _maxBytes)
+            if (occupied + content.LongLength > _maxBytes)
             {
+                // 收不下：**派工要留在 _dispatched**，否則這筆永遠不會有人再下載它，
+                // 而且會一路走到 FailAsync 去消耗 Core 端的正式重試次數
                 return false;
             }
 
+            _dispatched.Remove(contentId);
             _ready[contentId] = new StagedContent(content, contentType);
-            _stagedBytes += content.LongLength;
+            _stagedBytes = occupied + content.LongLength;
             return true;
         }
     }

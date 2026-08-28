@@ -174,4 +174,41 @@ HostHeartbeats 新欄位前端消費點）、兩個獨立 Explore 審全 diff（
 
 | 作業-階段 | 執行者 | 結果 | 驗收 | 落差與處置 |
 |---|---|---|---|---|
-| （待實作輪填寫） | | | | |
+| A-step1 閘門與設定 | agy | 通過 | 809 綠（門檻 795）；突變測試（掛載路徑改錯）4 測試紅 | 新欄位帶了預設值 `= false`（為讓既有呼叫點免改），拿掉後編譯即揪出漏改的第三個呼叫點；順手移除未使用 using |
+| A-step2 訊息與 ack | agy | 通過 | 821 綠（門檻 820）；兩處突變（移除死信過濾、ack 不刪除）皆紅 | 無落差。agy 依「反方向禁止複製」抽出 `WherePending` 共用 |
+| B 輪詢器與通道狀態 | Claude | 通過 | 857 綠；自我震盪突變 3 測試紅 | agy Gemini 額度用罄（五小時 0%）中斷於前兩項，使用者決定改由 Claude 自做；規劃裡的「通道狀態機」原列在作業B，agy 中斷前未做到，補做 |
+| C 媒體反向化 | Claude | 通過 | 874 綠；兩處突變（in-flight、長度驗證）皆紅 | 無 |
+| D 名稱與頭貼 | Claude | 通過 | 886 綠 | **推翻定案14**：查證發現 `GroupSummary`／`MemberProfile` 本來就內含 `PictureBytes`，推送路徑早就把圖片走同一個 JSON；改用「單輪位元組預算＋第一筆必收」而非另開 blob 通道。代價是這條流沒有 ack（見下方修訂） |
+| E 通道可觀測性 | Claude | 通過 | 888 綠；migration 兩 provider 各一份，Sqlite 實測 | 無 |
+| F 文件與樣板 | Claude | 通過 | JSON 樣板語法驗證 | 自行發現 `AcceptedContentWork` 只有定義沒有消費點（背壓靜默），補十分鐘節流告警與 2 測試 |
+| 終檢修正 | Claude | 通過 | 907 綠、零警告 | 見下方「終檢發現與處置」 |
+
+## 終檢發現與處置
+
+兩個獨立 Explore 各審程式碼與文件，逐項查證後處置：
+
+| 發現 | 查證 | 處置 |
+|---|---|---|
+| Auto 模式下媒體與 Profile 沒有真的反向（只有訊息與心跳） | 成立，且是我設計作業C 時識別出卻延後的缺口 | 新增 `ChannelAwareContentWorkSource`／`ChannelAwareProfileStore`，依 `EdgeChannelState.UsePullResources` 二選一；補 5 個測試 |
+| 一次暫時性失敗就停推 60 分鐘（違反定案5） | 成立 | 通道狀態加寬限期：失敗持續超過 `PullActivationSeconds` 才暫停，寬限期內沿用 outbox 秒級退避 |
+| 通道閘門誤套到 AllInOne | 成立 | 閘門限縮到 `Mode == Edge` |
+| 探測機會被空批次吃掉 | 成立 | 閘門移到取完 batch 之後，並加 `hasWorkToSend` 參數 |
+| 暫存滿時把派工弄丟並燒掉重試額度 | 成立 | `TryStage` 收不下時不移除派工；容量檢查提前 |
+| 派工掃描每秒一次會燒光 `MaxFailedRetries` | 成立（`Failed→Pending` 重設不受 `reclaimDownloading` 控制） | 改為「落地即派」＋全表掃描按 `RequeueIntervalMinutes` 節流 |
+| blob 取回卡住每秒一次的 poll | 成立 | 拆成獨立的取回迴圈，`_inFlightContent` 因此才真正有作用 |
+| Profile 工作在 poll 失敗時永久遺失 | 成立 | 失敗時放回累積集合 |
+| 壞 payload 每秒一則 Error | 成立 | 十分鐘節流 |
+| Pull 模式仍推心跳、空 BaseUrl 會炸 | 成立 | Pull 下不註冊 `HeartbeatService` 與兩支具名 client |
+| `PullStagingMaxBytes` 驗證會擋既有部署啟動 | 成立 | 改為執行期夾到至少等於 `MaxContentBytes` ＋ 警告 |
+| 非 Edge 設 `Channel`、設 `EdgeBaseUrl` 卻無 `ApiKey` 無提示 | 成立 | 前者警告、後者擋啟動 |
+| 文件把租約寫成媒體重派的機制 | 成立（派工不認領，租約在這條路徑上沒作用） | 三處敘述改寫（文件兩處、程式碼註解兩處） |
+| `EdgePullService.cs` 被當成二進位檔 | 成立 | 檔案裡有實體 NUL 位元組，是我寫註解時用 ` ` 逸出造成的，已移除 |
+
+## 定案修訂
+
+- **定案14 推翻**：圖片走 poll 回應而非獨立 blob 通道，理由見上表作業D。代價已寫進
+  `DEPLOYMENT-MODES.md` 的已知限制：這條流沒有 ack，回應遺失時等 TTL 再次過期。
+- **定案3 修訂**：Edge 重啟遺失暫存後靠「下一輪 poll 重新派工」補回，不是靠租約逾期——
+  派工不做認領，租約只在推送方向的下載路徑上有作用。
+- **定案2 修訂**：`Auto` 的暫停加了寬限期（`PullActivationSeconds`），與 Core 端接手輪詢的
+  門檻同一個時點，避免短暫失敗就停推一小時。

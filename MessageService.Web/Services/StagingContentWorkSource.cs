@@ -30,10 +30,11 @@ public class StagingContentWorkSource(EdgeContentStaging staging) : IContentWork
 
         if (!staging.TryStage(contentId, buffer.ToArray(), contentType))
         {
-            // 暫存滿了：這筆沒收下，讓 Core 端的租約逾期後重新派工。丟例外而不是靜默返回，
-            // ContentDownloadService 才會知道這次沒完成
+            // 暫存滿了：內容沒收下，但派工留著（見 EdgeContentStaging.TryStage）。
+            // 丟例外而不是靜默返回，ContentDownloadService 才會知道這次沒完成
             throw new InvalidOperationException(
-                $"媒體暫存區已達上限（Ingest:PullStagingMaxBytes），內容 {contentId} 這次無法暫存，等 Core 端重新派工。");
+                $"媒體暫存區已達上限（Ingest:PullStagingMaxBytes），內容 {contentId} 這次無法暫存。" +
+                "派工仍保留著，等暫存騰出空間後由既有的下載重試接手。");
         }
     }
 

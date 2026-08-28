@@ -177,16 +177,17 @@ public static class MessageServiceCoreServiceCollectionExtensions
         {
             // 拉取模式下 Edge 不能主動連 Core：待辦由 Core 每次 poll 派下來、下載完放記憶體
             // 暫存等 Core 來取（見 StagingContentWorkSource／EdgeContentStaging）
-            if (ingestOptionsRaw.Channel is IngestChannel.Pull)
+            // 兩組實作都註冊為具體型別，由 ChannelAware* 依目前通道方向二選一——推送不通時
+            // 媒體與名稱／頭貼要跟著反向，不能只有訊息與心跳反轉（見 EdgeChannelState.UsePullResources）
+            builder.Services.AddScoped<StagingContentWorkSource>();
+            builder.Services.AddScoped<StagingProfileStore>();
+            if (ingestOptionsRaw.Channel is not IngestChannel.Pull)
             {
-                builder.Services.AddScoped<IContentWorkSource, StagingContentWorkSource>();
-                builder.Services.AddScoped<IProfileStore, StagingProfileStore>();
+                builder.Services.AddScoped<ApiContentWorkSource>();
+                builder.Services.AddScoped<ApiProfileStore>();
             }
-            else
-            {
-                builder.Services.AddScoped<IContentWorkSource, ApiContentWorkSource>();
-                builder.Services.AddScoped<IProfileStore, ApiProfileStore>();
-            }
+            builder.Services.AddScoped<IContentWorkSource, ChannelAwareContentWorkSource>();
+            builder.Services.AddScoped<IProfileStore, ChannelAwareProfileStore>();
 
             // 只有 Edge（沒有本機資料庫）才需要打這兩支具名 HttpClient；Core 端就算日後
             // Core:OutboundHere=true，走的也是上面的 DbContentWorkSource，不會用到它們。
@@ -194,6 +195,10 @@ public static class MessageServiceCoreServiceCollectionExtensions
             // 每個方法自己記得加——這是端到端演練實際踩到的 bug：一開始沒設，兩個類別的
             // 所有請求都被 IngestApiKeyMiddleware 擋成 401，只有真的起兩個行程互打才測得出來
             var ingestApiKeyForClient = ingestOptionsRaw.ApiKey ?? "";
+            // Pull 模式下 Ingest:BaseUrl 允許留空，這兩支 client 也不會被用到——註冊了反而會在
+            // 第一次 CreateClient 時 new Uri("") 炸掉（ChannelAware* 會避開，但心跳等路徑不保證）
+            if (ingestOptionsRaw.Channel is not IngestChannel.Pull)
+            {
             builder.Services.AddHttpClient("ingest", client =>
             {
                 var baseUrl = ingestOptionsRaw.BaseUrl
@@ -211,6 +216,7 @@ public static class MessageServiceCoreServiceCollectionExtensions
                 client.Timeout = TimeSpan.FromMinutes(10);
                 client.DefaultRequestHeaders.Add("X-Ingest-Key", ingestApiKeyForClient);
             });
+            }
         }
 
         // 需求4：Web 端要能看到另外幾台服務是否正常運作——有資料庫就直接寫 HostHeartbeats，
@@ -231,7 +237,10 @@ public static class MessageServiceCoreServiceCollectionExtensions
             builder.Services.AddScoped<IHeartbeatReporter, HttpHeartbeatReporter>();
         }
         // 測試主機（WebAppFactoryFixture）會把這個關掉，見 HeartbeatOptions.Enabled 說明
-        if (builder.Configuration.GetValue("Heartbeat:Enabled", true))
+        // Pull 模式下 Edge 從不主動連 Core，心跳改由 poll 回應即時計算（見 EdgeController.Poll），
+        // 不註冊這個背景服務——註冊了只會每個週期對打不通的 Core 送一次、留下無意義的失敗 log
+        var pushesHeartbeat = capabilities.HasDatabaseAccess || ingestOptionsRaw.Channel is not IngestChannel.Pull;
+        if (builder.Configuration.GetValue("Heartbeat:Enabled", true) && pushesHeartbeat)
         {
             builder.Services.AddHostedService<HeartbeatService>();
         }
