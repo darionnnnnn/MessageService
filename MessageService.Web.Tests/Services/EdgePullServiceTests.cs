@@ -46,6 +46,7 @@ public class EdgePullServiceTests
         FakeHeartbeatStore HeartbeatStore,
         FakeIngestSink Sink,
         FakeContentDownloadQueue DownloadQueue,
+        FakeContentWorkSource WorkSource,
         List<HttpRequestMessage> Requests,
         List<string> RequestBodies,
         RecordingLogger Logger);
@@ -67,7 +68,8 @@ public class EdgePullServiceTests
     private static Harness CreateHarness(
         Func<HttpRequestMessage, HttpResponseMessage> responder,
         IngestOptions? options = null,
-        FakeIngestSink? sink = null)
+        FakeIngestSink? sink = null,
+        FakeContentWorkSource? workSource = null)
     {
         var requests = new List<HttpRequestMessage>();
         var bodies = new List<string>();
@@ -83,8 +85,11 @@ public class EdgePullServiceTests
         var heartbeatStore = new FakeHeartbeatStore();
         var actualSink = sink ?? new FakeIngestSink();
         var downloadQueue = new FakeContentDownloadQueue();
+        var actualWorkSource = workSource ?? new FakeContentWorkSource();
 
         var services = new ServiceCollection();
+        services.AddSingleton(ProcessOwnerId.Instance);
+        services.AddScoped<IContentWorkSource>(_ => actualWorkSource);
         services.AddScoped<IHeartbeatStore>(_ => heartbeatStore);
         services.AddScoped<IIngestSink>(_ => actualSink);
         services.AddScoped<IContentDownloadQueue>(_ => downloadQueue);
@@ -104,17 +109,22 @@ public class EdgePullServiceTests
             }),
             logger);
 
-        return new Harness(service, time, tracker, heartbeatStore, actualSink, downloadQueue, requests, bodies, logger);
+        return new Harness(
+            service, time, tracker, heartbeatStore, actualSink, downloadQueue, actualWorkSource, requests, bodies, logger);
     }
 
     private static HttpResponseMessage PollResponse(
         string role = "Edge", string machineName = "EDGE01",
         long? outboxPending = 0, double? oldestAge = null,
-        IReadOnlyList<EdgeOutboxItem>? messages = null) =>
+        IReadOnlyList<EdgeOutboxItem>? messages = null,
+        IReadOnlyList<long>? readyContentIds = null,
+        IReadOnlyList<long>? failedContentIds = null,
+        IReadOnlyList<long>? acceptedContentWork = null) =>
         new(HttpStatusCode.OK)
         {
             Content = JsonContent.Create(new EdgePollResponse(
-                role, machineName, outboxPending, oldestAge, messages ?? [])),
+                role, machineName, outboxPending, oldestAge, messages ?? [],
+                acceptedContentWork ?? [], readyContentIds ?? [], failedContentIds ?? [])),
         };
 
     // === 啟停判斷 ===
@@ -392,5 +402,193 @@ public class EdgePullServiceTests
 
         // 開始輪詢 1 則 + 停止輪詢 1 則，第三次不再重複記
         Assert.Equal(2, harness.Logger.Records.Count);
+    }
+
+    // === 媒體 blob 取回（作業C） ===
+
+    private static HttpResponseMessage ContentResponse(byte[] bytes, string contentType = "image/png")
+    {
+        var response = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(bytes),
+        };
+        response.Content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue(contentType);
+        response.Content.Headers.ContentLength = bytes.LongLength;
+        return response;
+    }
+
+    [Fact]
+    public async Task PollOnceAsync_DispatchesPendingContentWork()
+    {
+        var workSource = new FakeContentWorkSource { PendingIds = [7L] };
+        workSource.Items[7L] = new ContentWorkItem(7L, "msg-7", "image");
+        var harness = CreateHarness(_ => PollResponse(), workSource: workSource);
+
+        await harness.Service.PollOnceAsync(CancellationToken.None);
+
+        // 派工隨 poll request 一起送出，Core 端的認領／租約仍由既有 work source 負責
+        Assert.Contains("\"contentId\":7", harness.RequestBodies[0], StringComparison.OrdinalIgnoreCase);
+        Assert.Contains(true, workSource.ReclaimDownloadingCalls);
+    }
+
+    [Fact]
+    public async Task PollOnceAsync_ReadyContent_IsFetchedLandedAndAcked()
+    {
+        var payload = new byte[] { 1, 2, 3, 4, 5 };
+        var workSource = new FakeContentWorkSource();
+        var harness = CreateHarness(request =>
+            request.RequestUri!.AbsolutePath switch
+            {
+                var p when p.EndsWith("/poll") => PollResponse(readyContentIds: [9L]),
+                var p when p.EndsWith("/content/9") => ContentResponse(payload),
+                _ => new HttpResponseMessage(HttpStatusCode.NoContent),
+            }, workSource: workSource);
+
+        await harness.Service.PollOnceAsync(CancellationToken.None);
+
+        var completed = Assert.Single(workSource.Completed);
+        Assert.Equal(9L, completed.ContentId);
+        Assert.Equal(payload, completed.Content);
+        Assert.Equal("image/png", completed.ContentType);
+
+        // 完整落地之後才 ack，Edge 這時才釋放暫存
+        Assert.EndsWith("/api/edge/content/9/ack", harness.Requests[^1].RequestUri!.AbsolutePath);
+    }
+
+    [Fact]
+    public async Task PollOnceAsync_TruncatedContent_IsNotLandedAndNotAcked()
+    {
+        var workSource = new FakeContentWorkSource();
+        var harness = CreateHarness(request =>
+        {
+            if (request.RequestUri!.AbsolutePath.EndsWith("/poll"))
+            {
+                return PollResponse(readyContentIds: [9L]);
+            }
+
+            // 宣告 100 位元組卻只給 5 個：模擬傳輸被截斷
+            var response = new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new ByteArrayContent(new byte[5]),
+            };
+            response.Content.Headers.ContentLength = 100;
+            return response;
+        }, workSource: workSource);
+
+        await harness.Service.PollOnceAsync(CancellationToken.None);
+
+        Assert.Empty(workSource.Completed);
+        Assert.DoesNotContain(harness.Requests, r => r.RequestUri!.AbsolutePath.EndsWith("/ack"));
+    }
+
+    [Fact]
+    public async Task PollOnceAsync_ContentFetchFails_RetriesOnNextRound()
+    {
+        var fail = true;
+        var workSource = new FakeContentWorkSource();
+        var harness = CreateHarness(request =>
+        {
+            if (request.RequestUri!.AbsolutePath.EndsWith("/poll"))
+            {
+                return PollResponse(readyContentIds: [9L]);
+            }
+            if (request.RequestUri.AbsolutePath.EndsWith("/content/9"))
+            {
+                return fail
+                    ? new HttpResponseMessage(HttpStatusCode.InternalServerError)
+                    : ContentResponse([1, 2, 3]);
+            }
+            return new HttpResponseMessage(HttpStatusCode.NoContent);
+        }, workSource: workSource);
+
+        await harness.Service.PollOnceAsync(CancellationToken.None);
+        Assert.Empty(workSource.Completed);
+
+        // 取回失敗不 ack，Edge 保留暫存，下一輪重取就會成功
+        fail = false;
+        await harness.Service.PollOnceAsync(CancellationToken.None);
+        Assert.Single(workSource.Completed);
+    }
+
+    [Fact]
+    public async Task PollOnceAsync_SlowFetch_IsNotRequestedTwiceConcurrently()
+    {
+        var gate = new TaskCompletionSource();
+        var fetchCount = 0;
+        var workSource = new FakeContentWorkSource();
+        var harness = CreateHarness(request =>
+        {
+            if (request.RequestUri!.AbsolutePath.EndsWith("/poll"))
+            {
+                return PollResponse(readyContentIds: [9L]);
+            }
+            if (request.RequestUri.AbsolutePath.EndsWith("/content/9"))
+            {
+                Interlocked.Increment(ref fetchCount);
+                gate.Task.GetAwaiter().GetResult();
+                return ContentResponse([1, 2, 3]);
+            }
+            return new HttpResponseMessage(HttpStatusCode.NoContent);
+        }, workSource: workSource);
+
+        // 取回耗時超過輪詢間隔時，第二輪不得對同一筆再發一次 GET
+        var first = Task.Run(() => harness.Service.PollOnceAsync(CancellationToken.None));
+        while (Volatile.Read(ref fetchCount) == 0)
+        {
+            await Task.Yield();
+        }
+
+        await harness.Service.PollOnceAsync(CancellationToken.None);
+        gate.SetResult();
+        await first;
+
+        Assert.Equal(1, Volatile.Read(ref fetchCount));
+    }
+
+    [Fact]
+    public async Task PollOnceAsync_FailedContentIds_GoThroughExistingRetryStateMachine()
+    {
+        var workSource = new FakeContentWorkSource();
+        var harness = CreateHarness(_ => PollResponse(failedContentIds: [5L]), workSource: workSource);
+
+        await harness.Service.PollOnceAsync(CancellationToken.None);
+
+        // 不疊第二套死信：交回既有的 MaxRetries／Failed 狀態機
+        Assert.Equal(5L, Assert.Single(workSource.Failed).ContentId);
+    }
+
+    [Fact]
+    public async Task PollOnceAsync_InFlightContent_IsNotDispatchedAgain()
+    {
+        var gate = new TaskCompletionSource();
+        var workSource = new FakeContentWorkSource { PendingIds = [9L] };
+        workSource.Items[9L] = new ContentWorkItem(9L, "msg-9", "image");
+        var harness = CreateHarness(request =>
+        {
+            if (request.RequestUri!.AbsolutePath.EndsWith("/poll"))
+            {
+                return PollResponse(readyContentIds: [9L]);
+            }
+            if (request.RequestUri.AbsolutePath.EndsWith("/content/9"))
+            {
+                gate.Task.GetAwaiter().GetResult();
+                return ContentResponse([1, 2, 3]);
+            }
+            return new HttpResponseMessage(HttpStatusCode.NoContent);
+        }, workSource: workSource);
+
+        var first = Task.Run(() => harness.Service.PollOnceAsync(CancellationToken.None));
+        while (harness.Requests.Count < 2)
+        {
+            await Task.Yield();
+        }
+
+        await harness.Service.PollOnceAsync(CancellationToken.None);
+        gate.SetResult();
+        await first;
+
+        // 正在取回中的那筆不該被重新派工——內容已經在傳回來的路上
+        var secondPollBody = harness.RequestBodies.Last(b => b.Contains("contentWork", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain("\"contentId\":9", secondPollBody, StringComparison.OrdinalIgnoreCase);
     }
 }

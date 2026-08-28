@@ -33,6 +33,15 @@ public static class DeploymentValidator
             }
         }
 
+        // 暫存區比單一檔案的上限還小的話，最大的那種檔案永遠塞不進去、只會一直重派——
+        // 這種設定組合跑起來才會發現，寧可啟動就講清楚
+        if (capabilities.EdgePullApiEnabled && ingest.PullStagingMaxBytes < ingest.MaxContentBytes)
+        {
+            throw new InvalidOperationException(
+                $"Ingest:PullStagingMaxBytes（{ingest.PullStagingMaxBytes}）不可小於 Ingest:MaxContentBytes" +
+                $"（{ingest.MaxContentBytes}），否則最大的單一檔案永遠無法暫存，會不斷重新派工。");
+        }
+
         if (mode is DeploymentMode.Core && string.IsNullOrWhiteSpace(ingest.ApiKey))
         {
             throw new InvalidOperationException(

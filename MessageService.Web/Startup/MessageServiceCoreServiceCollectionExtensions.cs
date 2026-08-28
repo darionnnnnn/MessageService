@@ -175,7 +175,16 @@ public static class MessageServiceCoreServiceCollectionExtensions
         }
         else
         {
-            builder.Services.AddScoped<IContentWorkSource, ApiContentWorkSource>();
+            // 拉取模式下 Edge 不能主動連 Core：待辦由 Core 每次 poll 派下來、下載完放記憶體
+            // 暫存等 Core 來取（見 StagingContentWorkSource／EdgeContentStaging）
+            if (ingestOptionsRaw.Channel is IngestChannel.Pull)
+            {
+                builder.Services.AddScoped<IContentWorkSource, StagingContentWorkSource>();
+            }
+            else
+            {
+                builder.Services.AddScoped<IContentWorkSource, ApiContentWorkSource>();
+            }
             builder.Services.AddScoped<IProfileStore, ApiProfileStore>();
 
             // 只有 Edge（沒有本機資料庫）才需要打這兩支具名 HttpClient；Core 端就算日後
@@ -235,6 +244,13 @@ public static class MessageServiceCoreServiceCollectionExtensions
                 client.BaseAddress = new Uri(ingestOptionsRaw.EdgeBaseUrl!);
                 // poll／ack 都是小 JSON 往返，逾時要短——blob 取回另有長逾時的 client，不可共用
                 client.Timeout = TimeSpan.FromSeconds(5);
+                client.DefaultRequestHeaders.Add("X-Ingest-Key", ingestOptionsRaw.ApiKey ?? "");
+            });
+            builder.Services.AddHttpClient(EdgePullService.ContentHttpClientName, client =>
+            {
+                client.BaseAddress = new Uri(ingestOptionsRaw.EdgeBaseUrl!);
+                // blob 可達數百 MB，比照既有 "ingest-content" 對大檔放寬 timeout 的理由
+                client.Timeout = TimeSpan.FromMinutes(10);
                 client.DefaultRequestHeaders.Add("X-Ingest-Key", ingestOptionsRaw.ApiKey ?? "");
             });
             builder.Services.AddHostedService<EdgePullService>();
@@ -309,6 +325,9 @@ public static class MessageServiceCoreServiceCollectionExtensions
 
             // 通道狀態：Auto 模式下推送失敗要暫停轉發、每隔一個探測週期再試（見 EdgeChannelState）
             builder.Services.AddSingleton<EdgeChannelState>();
+
+            // 拉取模式的媒體暫存區：Core 派工進來、下載完成的 blob 等 Core 取走
+            builder.Services.AddSingleton<EdgeContentStaging>();
 
             // Pull 模式下 Edge 從不主動連 Core，轉發器整個不註冊——webhook 照收、寫進 outbox，
             // 由 Core 端輪詢取走

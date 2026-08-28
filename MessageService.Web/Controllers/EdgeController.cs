@@ -16,11 +16,13 @@ namespace MessageService.Controllers;
 public class EdgeController(
     OutboxDbContext outboxDbContext,
     DeploymentCapabilities capabilities,
+    EdgeContentStaging staging,
     IOptions<DeploymentOptions> deploymentOptions,
     IOptions<OutboxOptions> outboxOptions) : ControllerBase
 {
     [HttpPost("poll")]
-    public async Task<ActionResult<EdgePollResponse>> Poll(CancellationToken cancellationToken = default)
+    public async Task<ActionResult<EdgePollResponse>> Poll(
+        [FromBody] EdgePollRequest? request = null, CancellationToken cancellationToken = default)
     {
         long? pending = null;
         double? oldestAgeSeconds = null;
@@ -42,12 +44,19 @@ public class EdgeController(
                 .ToListAsync(cancellationToken);
         }
 
+        // 收下 Core 這一輪派的媒體工作。暫存滿時只收下一部分，沒收下的留在 Core 端維持
+        // Pending 下一輪再派（背壓）——回傳實際收下的清單讓 Core 知道哪些才真的認領出去了
+        var acceptedWork = staging.AcceptDispatch(request?.ContentWork ?? []);
+
         var response = new EdgePollResponse(
             Role: deploymentOptions.Value.Mode.ToString(),
             MachineName: Environment.MachineName,
             OutboxPending: pending,
             OutboxOldestAgeSeconds: oldestAgeSeconds,
-            Messages: messages);
+            Messages: messages,
+            AcceptedContentWork: acceptedWork,
+            ReadyContentIds: staging.GetReadyIds(),
+            FailedContentIds: staging.DrainFailedIds());
 
         return Ok(response);
     }
@@ -73,14 +82,49 @@ public class EdgeController(
 
         return NoContent();
     }
+
+    /// <summary>Core 取回已下載完成的媒體內容。走獨立端點而不是塞進 poll 回應：
+    /// 附檔可達數百 MB，poll 用的是短逾時的小 JSON 通道。</summary>
+    [HttpGet("content/{id:long}")]
+    public IActionResult GetContent(long id)
+    {
+        var staged = staging.Get(id);
+        if (staged is null)
+        {
+            return NotFound();
+        }
+
+        // 明確帶 Content-Length（FileContentResult 會自動帶）——Core 端靠位元組數驗證
+        // 這次取回是否完整，不完整就下一輪重取
+        return File(staged.Content, staged.ContentType ?? "application/octet-stream");
+    }
+
+    /// <summary>Core 已經完整落地這筆內容，釋放記憶體暫存。
+    /// 收到這個 ack 之前 Edge 不會釋放，取回中途斷掉可以原樣重取。</summary>
+    [HttpPost("content/{id:long}/ack")]
+    public IActionResult AckContent(long id)
+    {
+        staging.Release(id);
+        return NoContent();
+    }
 }
+
+public record EdgePollRequest(
+    /// <summary>Core 這一輪要派給 Edge 下載的媒體工作。</summary>
+    IReadOnlyList<ContentWorkItem> ContentWork);
 
 public record EdgePollResponse(
     string Role,
     string MachineName,
     long? OutboxPending,
     double? OutboxOldestAgeSeconds,
-    IReadOnlyList<EdgeOutboxItem> Messages);
+    IReadOnlyList<EdgeOutboxItem> Messages,
+    /// <summary>本輪實際收下的媒體工作 Id——沒列在裡面的代表暫存已滿，Core 要保留為 Pending。</summary>
+    IReadOnlyList<long> AcceptedContentWork,
+    /// <summary>已下載完成、等 Core 用 GET content/{id} 取回的 Id。</summary>
+    IReadOnlyList<long> ReadyContentIds,
+    /// <summary>下載失敗、要 Core 依既有重試狀態機處理的 Id。</summary>
+    IReadOnlyList<long> FailedContentIds);
 
 public record EdgeOutboxItem(
     string WebhookEventId,

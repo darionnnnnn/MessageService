@@ -26,6 +26,14 @@ public class EdgePullService(
     /// blob 取回（作業C）另有長逾時的 client，兩者不可共用。</summary>
     public const string HttpClientName = "edge-pull";
 
+    /// <summary>具名 HttpClient：長逾時，只用於取回 blob（可達數百 MB）。
+    /// 與 poll／ack 的短逾時 client 分開，慢的大檔不能拖垮每秒一次的輪詢節奏。</summary>
+    public const string ContentHttpClientName = "edge-pull-content";
+
+    /// <summary>正在取回中的內容 Id。取回時間超過輪詢間隔時，後續幾輪不得重複發 GET——
+    /// 大檔傳到一半再送一次同樣的請求只是白白多傳一份。</summary>
+    private readonly HashSet<long> _inFlightContent = [];
+
     private readonly IngestOptions _options = ingestOptions.Value;
 
     /// <summary>連續失敗次數，決定退避倍率；成功歸零。</summary>
@@ -120,11 +128,15 @@ public class EdgePullService(
                 _options.PullActivationSeconds, _options.EdgeBaseUrl);
         }
 
+        using var scope = scopeFactory.CreateScope();
+
         EdgePollResponse? response;
         var client = httpClientFactory.CreateClient(HttpClientName);
         try
         {
-            using var pollResponse = await client.PostAsync("api/edge/poll", content: null, cancellationToken);
+            var dispatch = await BuildDispatchAsync(scope.ServiceProvider, cancellationToken);
+            using var pollResponse = await client.PostAsJsonAsync(
+                "api/edge/poll", new EdgePollRequest(dispatch), cancellationToken);
             pollResponse.EnsureSuccessStatusCode();
             response = await pollResponse.Content.ReadFromJsonAsync<EdgePollResponse>(cancellationToken);
         }
@@ -140,9 +152,9 @@ public class EdgePullService(
             return true;
         }
 
-        using var scope = scopeFactory.CreateScope();
         await WriteHeartbeatAsync(scope.ServiceProvider, response, cancellationToken);
         var acknowledged = await LandMessagesAsync(scope.ServiceProvider, response, cancellationToken);
+        await HandleContentAsync(scope.ServiceProvider, response, cancellationToken);
 
         if (acknowledged.Count > 0)
         {
@@ -163,6 +175,113 @@ public class EdgePullService(
 
         RecordSuccess();
         return true;
+    }
+
+    /// <summary>組出這一輪要派給 Edge 的媒體工作。沿用 Core 端既有的 DbContentWorkSource：
+    /// 認領、租約回收、重試次數全部維持原本那一套，這裡只是把「誰去下載」換成 Edge。</summary>
+    private async Task<IReadOnlyList<ContentWorkItem>> BuildDispatchAsync(
+        IServiceProvider scopedProvider, CancellationToken cancellationToken)
+    {
+        var workSource = scopedProvider.GetRequiredService<IContentWorkSource>();
+        var ownerId = scopedProvider.GetRequiredService<ProcessOwnerId>().Value;
+
+        var pendingIds = await workSource.GetPendingIdsAsync(
+            reclaimDownloading: true, startupAge: null, ownerId, cancellationToken);
+
+        var dispatch = new List<ContentWorkItem>();
+        foreach (var id in pendingIds)
+        {
+            // 已經在取回中的不重派——那筆的內容 Edge 已經下載好了，正在傳回來的路上
+            lock (_inFlightContent)
+            {
+                if (_inFlightContent.Contains(id))
+                {
+                    continue;
+                }
+            }
+
+            if (await workSource.GetAsync(id, cancellationToken) is { } item)
+            {
+                dispatch.Add(item);
+            }
+        }
+
+        return dispatch;
+    }
+
+    /// <summary>處理 Edge 回報的媒體結果：完成的取回來落地、失敗的走既有重試狀態機。</summary>
+    private async Task HandleContentAsync(
+        IServiceProvider scopedProvider, EdgePollResponse response, CancellationToken cancellationToken)
+    {
+        var workSource = scopedProvider.GetRequiredService<IContentWorkSource>();
+        var ownerId = scopedProvider.GetRequiredService<ProcessOwnerId>().Value;
+
+        foreach (var id in response.FailedContentIds)
+        {
+            // 不疊第二套死信：交回既有的 MaxRetries／Failed 狀態機處理
+            await workSource.FailAsync(id, ownerId, cancellationToken);
+        }
+
+        foreach (var id in response.ReadyContentIds)
+        {
+            lock (_inFlightContent)
+            {
+                if (!_inFlightContent.Add(id))
+                {
+                    continue;
+                }
+            }
+
+            try
+            {
+                await FetchAndLandContentAsync(workSource, id, ownerId, cancellationToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                // 取回失敗（斷線、截斷、長度不符）不 ack：Edge 保留著暫存，下一輪重取。
+                // in-flight 標記在 finally 清掉，所以下一輪會重新發 GET
+                logger.LogWarning(ex, "從 Edge 取回內容 {ContentId} 失敗，下一輪重試。", id);
+            }
+            finally
+            {
+                lock (_inFlightContent)
+                {
+                    _inFlightContent.Remove(id);
+                }
+            }
+        }
+    }
+
+    private async Task FetchAndLandContentAsync(
+        IContentWorkSource workSource, long contentId, string ownerId, CancellationToken cancellationToken)
+    {
+        var contentClient = httpClientFactory.CreateClient(ContentHttpClientName);
+
+        using var httpResponse = await contentClient.GetAsync(
+            $"api/edge/content/{contentId}", HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+        httpResponse.EnsureSuccessStatusCode();
+
+        var declaredLength = httpResponse.Content.Headers.ContentLength
+            ?? throw new InvalidOperationException($"Edge 取回內容 {contentId} 沒有帶 Content-Length，無法驗證完整性。");
+
+        var bytes = await httpResponse.Content.ReadAsByteArrayAsync(cancellationToken);
+        if (bytes.LongLength != declaredLength)
+        {
+            // 傳輸被截斷：這次不落地也不 ack，下一輪整份重取
+            throw new InvalidOperationException(
+                $"Edge 取回內容 {contentId} 不完整（宣告 {declaredLength} 位元組、實收 {bytes.LongLength} 位元組）。");
+        }
+
+        using var buffer = new MemoryStream(bytes, writable: false);
+        await workSource.CompleteAsync(
+            contentId, buffer, bytes.LongLength,
+            httpResponse.Content.Headers.ContentType?.ToString(), ownerId, cancellationToken);
+
+        // 完整落地之後才 ack，Edge 這時才釋放記憶體暫存
+        var client = httpClientFactory.CreateClient(HttpClientName);
+        using var ackResponse = await client.PostAsync(
+            $"api/edge/content/{contentId}/ack", content: null, cancellationToken);
+        ackResponse.EnsureSuccessStatusCode();
     }
 
     private async Task WriteHeartbeatAsync(

@@ -54,6 +54,10 @@ public class IngestOptions
     /// <summary>poll 連續失敗時的退避上限（秒）。預設 60 秒。</summary>
     public int PullFailureMaxBackoffSeconds { get; set; } = 60;
 
+    /// <summary>拉取模式下 Edge 端媒體暫存區的總量上限（位元組）。預設 600MB。
+    /// 必須不小於 MaxContentBytes，否則最大的單一檔案永遠塞不進去（啟動時驗證）。</summary>
+    public long PullStagingMaxBytes { get; set; } = 600L * 1024 * 1024;
+
     /// <summary>Edge 端 Auto 模式專用：推送失敗後，每隔多久放行一次推送當作探測（分鐘）。
     /// 預設 60 分。探測期間 Core 端輪詢照常取走資料，這個週期只影響「防火牆重新開通後
     /// 多久自動升級回推送」，調短不會提升可靠度。</summary>
