@@ -1,6 +1,6 @@
 # BIDIR-1：Edge↔Core 通道方向彈性化規劃
 
-日期：2026-08-28。狀態：規劃定案，未實作。
+日期：2026-08-28。狀態：全案完成（實作＋終檢＋換模型體檢），測試 909 綠、零警告。
 
 ## 背景與目標
 
@@ -202,7 +202,7 @@ HostHeartbeats 新欄位前端消費點）、兩個獨立 Explore 審全 diff（
 | `PullStagingMaxBytes` 驗證會擋既有部署啟動 | 成立 | 改為執行期夾到至少等於 `MaxContentBytes` ＋ 警告 |
 | 非 Edge 設 `Channel`、設 `EdgeBaseUrl` 卻無 `ApiKey` 無提示 | 成立 | 前者警告、後者擋啟動 |
 | 文件把租約寫成媒體重派的機制 | 成立（派工不認領，租約在這條路徑上沒作用） | 三處敘述改寫（文件兩處、程式碼註解兩處） |
-| `EdgePullService.cs` 被當成二進位檔 | 成立 | 檔案裡有實體 NUL 位元組，是我寫註解時用 ` ` 逸出造成的，已移除 |
+| `EdgePullService.cs` 被當成二進位檔 | 成立 | 檔案裡有實體 NUL 位元組，是我寫註解時用 `U+0000 逸出序列` 逸出造成的，已移除 |
 
 ## 定案修訂
 
@@ -212,3 +212,39 @@ HostHeartbeats 新欄位前端消費點）、兩個獨立 Explore 審全 diff（
   派工不做認領，租約只在推送方向的下載路徑上有作用。
 - **定案2 修訂**：`Auto` 的暫停加了寬限期（`PullActivationSeconds`），與 Core 端接手輪詢的
   門檻同一個時點，避免短暫失敗就停推一小時。
+
+## 體檢交接
+
+- 實作模型：Opus 5（作業A 由 agy/gemini-3.7-flash-high 完成 step1、step2；B~F 與終檢修正由 Opus 5 親做）。
+- 體檢模型：Fable 5。
+- 實作方測試數：907 綠、零警告。
+- 實作方自認最沒把握處：終檢修正 commit `291d0c2` 是一次性大改（ChannelAware* 切換、
+  寬限期、blob 取回拆獨立迴圈、派工節流），改完只跑了全量測試，沒有被任何獨立視角看過。
+
+## 體檢輪修正（Fable 5）
+
+對 `dev..feature/bidir-edge-core-channel` 全 diff 體檢，重點掃終檢後手改 commit `291d0c2`
+（實作方自認最沒把握處）。抓到四項，皆已修並補迴歸測試：
+
+| 哪裡 | 症狀 | 修法 | 迴歸測試 |
+|---|---|---|---|
+| `HttpHeartbeatReporter` | **雙盲窗口**：心跳不經通道閘門、每分鐘照打，防火牆恢復後心跳一成功 Core 就停輪詢，但 Edge 轉送仍在暫停期等保底探測（最長 60 分）——兩邊都不動，訊息卡住最長一個探測週期 | 心跳成功即 `MarkPushSucceeded()`（失敗側刻意不通知，避免偶發失敗拖入暫停）；恢復時間從最長 60 分縮到最長 60 秒，`ChannelProbeIntervalMinutes` 降為純保底 | `HttpHeartbeatReporterTests` 2 測試 |
+| `EdgePullService.PollOnceAsync` | poll 失敗時只放回 profile 派工，媒體派工候選（`_freshContentIds` 取走的）沒放回——「落地即派」斷掉，要等最長 `RequeueIntervalMinutes` 的全表掃描兜底 | `RestoreProfileWork` 擴為 `RestoreDispatch`，兩批一起放回 | `PollOnceAsync_PollFails_FreshContentDispatchIsRestored` |
+| `ProcessContentQueueOnceAsync` | 取回失敗的 Warning 無節流——失敗的 id 下一輪 poll 就重新入列，持續失敗每秒一則，違反本輪自己立的日誌紀律 | 比照壞 payload 的十分鐘節流 | （日誌路徑，靠既有測試維持行為） |
+| `EdgeChannelState.ShouldAttemptPush` | `hasWorkToSend` 參數是死碼：唯一正式呼叫點恆傳 true（閘門已移到非空批次之後），false 分支只有測試自己在用 | 移除參數與分支、刪對應測試（消除「測試自己造出來的物件測死分支」） | — |
+
+另發現 PLAN 本身又混入一個實體 NUL 位元組——實作方在**描述**前一個 NUL 錯誤時，寫下的
+逸出序列再次被 Python 解成實體位元組（同型錯誤二犯），已修。
+
+體檢後測試：見文末測試數。
+
+## 明確不做（本輪定案）
+
+- **Edge 端多台部署**：`EdgeBaseUrl` 為單一位址，沿用「同一角色不部署兩台」的既有限制。
+- **名稱／頭貼結果的 ack**：這條流維持 at-most-once（遺失等 TTL 再刷新），已寫進已知限制。
+- **`GetContent` 的速率限制**：終檢觀察到的不對稱（有效金鑰可反覆拉取暫存 blob），
+  攻擊面需先持有共用金鑰＋通過 IP 白名單，暫不處理；若日後開放更廣的來源再議。
+- **Pull 模式下 outbox 死信積壓告警**：`OutboxForwarderService` 不註冊連帶失去每小時的
+  死信計數 log；Pull 模式的死信只能由 Core 端 poll 不到（OutboxPending 持續增加）間接觀察。
+  觸發條件：實際部署 Pull 拓撲且需要死信可見性時再補。
+- **`AllInOne`＋`Channel=Pull` 的組合**：只記 Warning 不擋啟動（`Channel` 對非 Edge 無作用）。

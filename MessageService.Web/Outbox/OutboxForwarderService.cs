@@ -133,7 +133,7 @@ public class OutboxForwarderService(
         // edge→core 這個方向不通時（Auto 模式推送失敗後）不空試——Core 端會改用輪詢把
         // 資料取走，這裡只要每隔一個探測週期放行一次，通了就自動恢復推送。見 EdgeChannelState。
         // 閘門放在取完 batch 之後：空批次送不出任何東西，拿它當探測會讓計時白白重置
-        if (!channelState.ShouldAttemptPush(hasWorkToSend: true))
+        if (!channelState.ShouldAttemptPush())
         {
             return false;
         }

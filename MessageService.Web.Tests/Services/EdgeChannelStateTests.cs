@@ -118,18 +118,6 @@ public class EdgeChannelStateTests
         Assert.False(state.UsePullResources);
     }
 
-    [Fact]
-    public void ShouldAttemptPush_ProbeWithNoWork_DoesNotConsumeTheProbe()
-    {
-        var (state, time) = Create(probeMinutes: 60);
-        FailPastGrace(state, time);
-        time.Now = time.Now.AddMinutes(61);
-
-        // 空批次送不出任何東西，拿它當探測會讓計時白白重置
-        Assert.True(state.ShouldAttemptPush(hasWorkToSend: false));
-        Assert.True(state.ShouldAttemptPush(hasWorkToSend: true));
-    }
-
     [Theory]
     [InlineData(IngestChannel.Pull, DeploymentMode.Edge, true)]
     [InlineData(IngestChannel.Auto, DeploymentMode.Edge, false)]

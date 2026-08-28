@@ -78,7 +78,7 @@ Edge 與 Core 之間的四條資料流（訊息、心跳、媒體、名稱／頭
 
 | `Ingest:Channel`（Edge） | 行為 |
 |---|---|
-| `Auto`（預設） | 推送優先。推送失敗就暫停主動連線，改由 Core 輪詢接手；之後每隔 `Ingest:ChannelProbeIntervalMinutes`（預設 60 分）放行一次推送當探測，通了就自動恢復。同時開放 `/api/edge` 供 Core 輪詢。 |
+| `Auto`（預設） | 推送優先。推送持續失敗超過 `Ingest:PullActivationSeconds` 才暫停主動轉送（短暫失敗沿用 outbox 秒級退避），改由 Core 輪詢接手。恢復有兩條路：心跳每 `Heartbeat:IntervalSeconds`（預設 60 秒）照打、成功即恢復推送；轉送另每隔 `Ingest:ChannelProbeIntervalMinutes`（預設 60 分）放行一次當保底探測。同時開放 `/api/edge` 供 Core 輪詢。 |
 | `Push` | 只主動推送，不開放 `/api/edge`。 |
 | `Pull` | 從不主動連 Core（`OutboxForwarderService` 不註冊），只開放 `/api/edge`。`Ingest:BaseUrl` 可留空。 |
 

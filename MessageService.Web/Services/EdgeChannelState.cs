@@ -63,9 +63,9 @@ public class EdgeChannelState(
     }
 
     /// <summary>現在可不可以送一批出去：健康時永遠可以；暫停中只有探測週期到了才放行一次。</summary>
-    /// <summary><paramref name="hasWorkToSend"/> 為 false 時不消耗探測機會：空批次送不出任何東西，
-    /// 拿它當探測會讓計時白白重置，下一則真訊息要再等一個完整週期。</summary>
-    public bool ShouldAttemptPush(bool hasWorkToSend = true)
+    /// <summary>呼叫端保證這時手上有一批要送的東西（閘門在取完非空批次之後才問）——
+    /// 暫停中放行即視為消耗一次探測。</summary>
+    public bool ShouldAttemptPush()
     {
         if (!PushConfigured)
         {
@@ -87,12 +87,6 @@ public class EdgeChannelState(
             if (timeProvider.GetUtcNow() - pausedSince < _probeInterval)
             {
                 return false;
-            }
-
-            if (!hasWorkToSend)
-            {
-                // 探測時機到了但沒東西可送：放行但不重置計時，等真的有批次時才算一次探測
-                return true;
             }
 
             // 放行這一次當探測：先把計時往後推，避免探測失敗時同一個週期內被連續放行

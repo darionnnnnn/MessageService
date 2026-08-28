@@ -71,6 +71,10 @@ public class EdgePullService(
     /// 完全不出聲的話「圖片一直抓不到」會查不出原因。</summary>
     private DateTimeOffset? _lastBackpressureWarningAt;
 
+    /// <summary>取回失敗的告警節流時點：失敗的內容下一輪 poll 就會重新入列，
+    /// 持續失敗時每秒都會再試一次，不節流的話一樣刷爆 log。</summary>
+    private DateTimeOffset? _lastFetchFailureWarningAt;
+
     protected override Task ExecuteAsync(CancellationToken stoppingToken) =>
         Task.WhenAll(RunPollLoopAsync(stoppingToken), RunContentLoopAsync(stoppingToken));
 
@@ -143,8 +147,14 @@ public class EdgePullService(
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             // 取回失敗（斷線、截斷、長度不符）不 ack：Edge 保留著暫存，下一輪 poll
-            // 會再把它列進 ReadyContentIds，那時重新入列重取
-            logger.LogWarning(ex, "從 Edge 取回內容 {ContentId} 失敗，等下一輪重試。", contentId);
+            // 會再把它列進 ReadyContentIds，那時重新入列重取。持續失敗每秒都會再試，告警要節流
+            var now = timeProvider.GetUtcNow();
+            if (_lastFetchFailureWarningAt is not { } last || now - last >= TimeSpan.FromMinutes(10))
+            {
+                _lastFetchFailureWarningAt = now;
+                logger.LogWarning(ex,
+                    "從 Edge 取回內容 {ContentId} 失敗，會持續重試；這則告警每 10 分鐘最多記一次。", contentId);
+            }
         }
         finally
         {
@@ -227,16 +237,17 @@ public class EdgePullService(
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            // 這批刷新對象在組請求時就從累積集合裡取走了，沒送出去就得放回去——
-            // 不放回的話，那些群組／成員要等到下一則新訊息才會再被觸發刷新
-            RestoreProfileWork(profileDispatch);
+            // 這兩批派工在組請求時就從累積集合裡取走了，沒送出去就得放回去——
+            // profile 不放回要等下一則新訊息才會再被觸發；媒體不放回要等下一次全表掃描
+            // （最長 RequeueIntervalMinutes）才被撿回，「落地即派」的意圖就斷了
+            RestoreDispatch(dispatch, profileDispatch);
             RecordFailure(ex);
             return true;
         }
 
         if (response is null)
         {
-            RestoreProfileWork(profileDispatch);
+            RestoreDispatch(dispatch, profileDispatch);
             RecordFailure(new InvalidOperationException("Edge 的 poll 回應無法反序列化。"));
             return true;
         }
@@ -404,8 +415,20 @@ public class EdgePullService(
         ackResponse.EnsureSuccessStatusCode();
     }
 
-    private void RestoreProfileWork(IReadOnlyList<EdgeProfileWorkItem> profileDispatch)
+    private void RestoreDispatch(
+        IReadOnlyList<ContentWorkItem> dispatch, IReadOnlyList<EdgeProfileWorkItem> profileDispatch)
     {
+        if (dispatch.Count > 0)
+        {
+            lock (_freshContentIds)
+            {
+                foreach (var item in dispatch)
+                {
+                    _freshContentIds.Add(item.ContentId);
+                }
+            }
+        }
+
         if (profileDispatch.Count == 0)
         {
             return;

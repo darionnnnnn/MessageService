@@ -712,4 +712,38 @@ public class EdgePullServiceTests
 
         Assert.DoesNotContain(harness.Logger.Records, r => r.Message.Contains("暫存區已滿"));
     }
+
+    [Fact]
+    public async Task PollOnceAsync_PollFails_FreshContentDispatchIsRestored()
+    {
+        var fail = false;
+        var workSource = new FakeContentWorkSource();
+        workSource.Items[42L] = new ContentWorkItem(42L, "msg-42", "image");
+        var sink = new FakeIngestSink { NextContentId = 42L };
+        var item = new EdgeOutboxItem("evt-1", JsonSerializer.Serialize(SampleEnvelope));
+        var harness = CreateHarness(request =>
+        {
+            if (fail)
+            {
+                return new HttpResponseMessage(HttpStatusCode.ServiceUnavailable);
+            }
+            return request.RequestUri!.AbsolutePath.EndsWith("/poll")
+                ? PollResponse(messages: [item])
+                : new HttpResponseMessage(HttpStatusCode.NoContent);
+        }, workSource: workSource, sink: sink);
+
+        // 第一輪落地一筆帶媒體的訊息（ContentId=42 進了待派集合）
+        await harness.Service.PollOnceAsync(CancellationToken.None);
+
+        // 第二輪 poll 失敗：42 已在組請求時被取走，必須放回，否則要等最長
+        // RequeueIntervalMinutes 的全表掃描才會被撿回
+        fail = true;
+        await harness.Service.PollOnceAsync(CancellationToken.None);
+
+        // 第三輪恢復：42 要再次出現在派工裡
+        fail = false;
+        await harness.Service.PollOnceAsync(CancellationToken.None);
+        var lastPoll = harness.RequestBodies.Last(b => b.Contains("contentWork", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains("\"contentId\":42", lastPoll, StringComparison.OrdinalIgnoreCase);
+    }
 }
