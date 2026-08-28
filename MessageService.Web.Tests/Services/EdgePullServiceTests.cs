@@ -700,4 +700,36 @@ public class EdgePullServiceTests
         // 拉回來的心跳要標成 Pull，設定頁才看得出目前走哪個方向
         Assert.Equal(HeartbeatChannel.Pull, Assert.Single(harness.HeartbeatStore.Upserted).Channel);
     }
+
+    [Fact]
+    public async Task PollOnceAsync_StagingFull_LogsBackpressureOncePerTenMinutes()
+    {
+        var workSource = new FakeContentWorkSource { PendingIds = [1L, 2L] };
+        workSource.Items[1L] = new ContentWorkItem(1L, "msg-1", "image");
+        workSource.Items[2L] = new ContentWorkItem(2L, "msg-2", "image");
+        // Edge 只收下一筆，另一筆被暫存上限擋下
+        var harness = CreateHarness(_ => PollResponse(acceptedContentWork: [1L]), workSource: workSource);
+
+        await harness.Service.PollOnceAsync(CancellationToken.None);
+        await harness.Service.PollOnceAsync(CancellationToken.None);
+
+        // 背壓不是錯誤但不能靜默，也不能每秒刷一次
+        Assert.Equal(1, harness.Logger.Records.Count(r => r.Level == LogLevel.Warning && r.Message.Contains("暫存區已滿")));
+
+        harness.Time.Now = harness.Time.Now.AddMinutes(11);
+        await harness.Service.PollOnceAsync(CancellationToken.None);
+        Assert.Equal(2, harness.Logger.Records.Count(r => r.Level == LogLevel.Warning && r.Message.Contains("暫存區已滿")));
+    }
+
+    [Fact]
+    public async Task PollOnceAsync_AllWorkAccepted_LogsNoBackpressureWarning()
+    {
+        var workSource = new FakeContentWorkSource { PendingIds = [1L] };
+        workSource.Items[1L] = new ContentWorkItem(1L, "msg-1", "image");
+        var harness = CreateHarness(_ => PollResponse(acceptedContentWork: [1L]), workSource: workSource);
+
+        await harness.Service.PollOnceAsync(CancellationToken.None);
+
+        Assert.DoesNotContain(harness.Logger.Records, r => r.Message.Contains("暫存區已滿"));
+    }
 }
