@@ -687,4 +687,17 @@ public class EdgePullServiceTests
             throw new InvalidOperationException("資料庫寫入失敗");
         }
     }
+
+    // === 通道可觀測性（作業E） ===
+
+    [Fact]
+    public async Task PollOnceAsync_MarksHeartbeatAsPullChannel()
+    {
+        var harness = CreateHarness(_ => PollResponse());
+
+        await harness.Service.PollOnceAsync(CancellationToken.None);
+
+        // 拉回來的心跳要標成 Pull，設定頁才看得出目前走哪個方向
+        Assert.Equal(HeartbeatChannel.Pull, Assert.Single(harness.HeartbeatStore.Upserted).Channel);
+    }
 }

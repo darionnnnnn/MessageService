@@ -386,7 +386,9 @@ public class IngestControllerTests
         var result = await controller.ReportHeartbeat(request, CancellationToken.None);
 
         Assert.IsType<NoContentResult>(result);
-        var (role, machineName, report, fingerprint) = Assert.Single(store.Upserted);
+        var (role, machineName, report, fingerprint, channel) = Assert.Single(store.Upserted);
+        // 推送通道進來的心跳要標成 Push（拉取的由 EdgePullService 標成 Pull）
+        Assert.Equal(HeartbeatChannel.Push, channel);
         Assert.Equal("Edge", role);
         Assert.Equal("edge-host-1", machineName);
         Assert.Equal(3, report.OutboxPending);

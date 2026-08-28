@@ -224,7 +224,7 @@ public class IngestController(
         await heartbeatStore.UpsertAsync(
             request.Role, request.MachineName,
             new HeartbeatReport(request.OutboxPending, request.OutboxOldestAgeSeconds),
-            encryptionKeyFingerprint: null, cancellationToken);
+            encryptionKeyFingerprint: null, channel: HeartbeatChannel.Push, cancellationToken);
 
         // 標記「推送通道還活著」——EdgePullService 靠這個決定要不要接手輪詢。
         // 只有這條推送路徑可以呼叫；輪詢自己拉回來的心跳呼叫它會把輪詢停掉（自我震盪）

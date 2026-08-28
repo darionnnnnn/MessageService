@@ -431,6 +431,22 @@
         return badge;
     }
 
+    // 這一列的心跳是怎麼進來的：Push＝那台主機自己送來（或自己直寫），
+    // Pull＝本機主動輪詢 Edge 取回來的。舊資料沒有這個欄位，顯示為未知
+    function renderHostChannelBadge(channel) {
+        if (!channel) {
+            return document.createTextNode('—');
+        }
+        const badge = document.createElement('span');
+        const isPull = channel === 'Pull';
+        badge.className = `badge ${isPull ? 'text-bg-info' : 'text-bg-secondary'}`;
+        badge.textContent = isPull ? '輪詢' : '推送';
+        badge.title = isPull
+            ? '本機主動輪詢 Edge 取回（防火牆只開通 core→edge 時的方向）'
+            : '該主機主動送來';
+        return badge;
+    }
+
     function renderHostOutboxCell(pending, oldestAgeSeconds) {
         // null＝這台主機不收 webhook（Core／Viewer），沒有 outbox 可言，不是「查不到資料」
         if (pending === null || pending === undefined) {
@@ -463,6 +479,10 @@
         lastSeenTd.textContent = formatRelativeTime(row.lastSeenAt);
         lastSeenTd.title = new Date(row.lastSeenAt).toLocaleString('zh-TW');
         tr.appendChild(lastSeenTd);
+
+        const channelTd = document.createElement('td');
+        channelTd.appendChild(renderHostChannelBadge(row.channel));
+        tr.appendChild(channelTd);
 
         const outboxTd = document.createElement('td');
         outboxTd.appendChild(renderHostOutboxCell(row.outboxPending, row.outboxOldestAgeSeconds));

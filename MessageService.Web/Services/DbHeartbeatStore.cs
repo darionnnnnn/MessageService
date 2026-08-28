@@ -8,11 +8,11 @@ public class DbHeartbeatStore(MessageDbContext dbContext) : IHeartbeatStore
 {
     public async Task UpsertAsync(
         string role, string machineName, HeartbeatReport report, string? encryptionKeyFingerprint,
-        CancellationToken cancellationToken)
+        string channel, CancellationToken cancellationToken)
     {
         try
         {
-            await ApplyUpsertAsync(role, machineName, report, encryptionKeyFingerprint, cancellationToken);
+            await ApplyUpsertAsync(role, machineName, report, encryptionKeyFingerprint, channel, cancellationToken);
         }
         catch (DbUpdateException)
         {
@@ -20,13 +20,13 @@ public class DbHeartbeatStore(MessageDbContext dbContext) : IHeartbeatStore
             // 期間有多個行程同時回報心跳時，雙方可能同時判定列不存在而嘗試 INSERT，較慢的一方會在 SaveChangesAsync 遭遇主鍵衝突 (DbUpdateException)。
             // 此處清空 ChangeTracker 後重新查詢並改為 UPDATE 重試一次；若第二次仍失敗則往外拋出例外。其他型別例外原樣拋出。
             dbContext.ChangeTracker.Clear();
-            await ApplyUpsertAsync(role, machineName, report, encryptionKeyFingerprint, cancellationToken);
+            await ApplyUpsertAsync(role, machineName, report, encryptionKeyFingerprint, channel, cancellationToken);
         }
     }
 
     private async Task ApplyUpsertAsync(
         string role, string machineName, HeartbeatReport report, string? encryptionKeyFingerprint,
-        CancellationToken cancellationToken)
+        string channel, CancellationToken cancellationToken)
     {
         var entity = await dbContext.HostHeartbeats
             .FirstOrDefaultAsync(h => h.Role == role && h.MachineName == machineName, cancellationToken);
@@ -41,6 +41,7 @@ public class DbHeartbeatStore(MessageDbContext dbContext) : IHeartbeatStore
         entity.OutboxPending = report.OutboxPending;
         entity.OutboxOldestAgeSeconds = report.OutboxOldestAgeSeconds;
         entity.EncryptionKeyFingerprint = encryptionKeyFingerprint;
+        entity.Channel = channel;
 
         await dbContext.SaveChangesAsync(cancellationToken);
     }
