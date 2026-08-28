@@ -306,7 +306,16 @@ public static class MessageServiceCoreServiceCollectionExtensions
             });
             builder.Services.AddSingleton<IOutboxSignal, OutboxSignal>();
             builder.Services.AddScoped<IOutboxWriter, SqliteOutboxWriter>();
-            builder.Services.AddHostedService<OutboxForwarderService>();
+
+            // 通道狀態：Auto 模式下推送失敗要暫停轉發、每隔一個探測週期再試（見 EdgeChannelState）
+            builder.Services.AddSingleton<EdgeChannelState>();
+
+            // Pull 模式下 Edge 從不主動連 Core，轉發器整個不註冊——webhook 照收、寫進 outbox，
+            // 由 Core 端輪詢取走
+            if (ingestOptionsRaw.Channel is not IngestChannel.Pull)
+            {
+                builder.Services.AddHostedService<OutboxForwarderService>();
+            }
         }
 
         return new MessageServiceCoreRegistration(

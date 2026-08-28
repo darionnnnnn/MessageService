@@ -54,6 +54,33 @@ public class EdgePullServiceRegistrationTests : IDisposable
         Assert.False(HasEdgePullService(factory));
     }
 
+    [Theory]
+    [InlineData("Push", true)]
+    [InlineData("Auto", true)]
+    [InlineData("Pull", false)]
+    public void EdgeMode_OutboxForwarderRegistration_DependsOnChannel(string channel, bool expected)
+    {
+        using var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
+        {
+            builder.UseEnvironment("Testing");
+            builder.UseSetting("Line:OutboundHere", "false");
+            builder.UseSetting("Database:Provider", "Sqlite");
+            builder.UseSetting("Deployment:Mode", "Edge");
+            builder.UseSetting("Line:ChannelSecret", "secret");
+            builder.UseSetting("Ingest:BaseUrl", "https://core.example/");
+            builder.UseSetting("Ingest:ApiKey", "test-key");
+            builder.UseSetting("Ingest:Channel", channel);
+            builder.UseSetting("Heartbeat:Enabled", "false");
+            builder.UseSetting("ConnectionStrings:Outbox", $"Data Source={_dbPath}");
+        });
+
+        var registered = factory.Services.GetServices<IHostedService>()
+            .Any(s => s is MessageService.Outbox.OutboxForwarderService);
+
+        // Pull 模式下 Edge 從不主動連 Core，轉發器整個不該存在
+        Assert.Equal(expected, registered);
+    }
+
     public void Dispose()
     {
         GC.SuppressFinalize(this);

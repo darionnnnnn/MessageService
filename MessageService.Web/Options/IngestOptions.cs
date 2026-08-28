@@ -53,4 +53,9 @@ public class IngestOptions
 
     /// <summary>poll 連續失敗時的退避上限（秒）。預設 60 秒。</summary>
     public int PullFailureMaxBackoffSeconds { get; set; } = 60;
+
+    /// <summary>Edge 端 Auto 模式專用：推送失敗後，每隔多久放行一次推送當作探測（分鐘）。
+    /// 預設 60 分。探測期間 Core 端輪詢照常取走資料，這個週期只影響「防火牆重新開通後
+    /// 多久自動升級回推送」，調短不會提升可靠度。</summary>
+    public int ChannelProbeIntervalMinutes { get; set; } = 60;
 }
