@@ -27,3 +27,14 @@ public class OutboxDbContext(DbContextOptions<OutboxDbContext> options) : DbCont
         });
     }
 }
+
+public static class OutboxQueryExtensions
+{
+    /// <summary>
+    /// 挑選待送（未死信、且重試時間已到或無需等待）的 outbox 項目。
+    /// </summary>
+    public static IQueryable<OutboxEntry> WherePending(this IQueryable<OutboxEntry> query, DateTimeOffset now) =>
+        query
+            .Where(e => e.DeadLetteredAt == null)
+            .Where(e => e.NextAttemptAt == null || e.NextAttemptAt <= now);
+}

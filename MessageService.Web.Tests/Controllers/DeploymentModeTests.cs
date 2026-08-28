@@ -5,6 +5,7 @@ using MessageService.Controllers;
 using MessageService.Data;
 using MessageService.Models;
 using MessageService.Options;
+using MessageService.Outbox;
 using MessageService.Services;
 using MessageService.Tests.TestSupport;
 using Microsoft.AspNetCore.Hosting;
@@ -743,4 +744,285 @@ public class DeploymentModeTests : IDisposable
             response.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.MethodNotAllowed,
             $"預期 404 或 405（EdgeController 在 {mode} 模式下不該存在），實際是 {response.StatusCode}");
     }
+
+    // === 作業A-step2：poll 回傳待送訊息批次與 outbox ack ===
+
+    private WebApplicationFactory<Program> CreateEdgePullFactory(Action<IWebHostBuilder>? configure = null) =>
+        CreateFactory(builder =>
+        {
+            builder.UseSetting("Deployment:Mode", "Edge");
+            builder.UseSetting("Line:ChannelSecret", "secret");
+            builder.UseSetting("Ingest:ApiKey", "test-key");
+            builder.UseSetting("Ingest:Channel", "Pull");
+            builder.UseSetting("ConnectionStrings:Outbox", $"Data Source={_outboxPath}");
+            builder.UseSetting("Outbox:PollIntervalSeconds", "3600");
+            configure?.Invoke(builder);
+        });
+
+    private async Task<OutboxEntry> SeedOutboxEntryAsync(
+        WebApplicationFactory<Program> factory,
+        string webhookEventId,
+        string payloadJson,
+        DateTimeOffset? nextAttemptAt = null,
+        DateTimeOffset? deadLetteredAt = null,
+        int attempts = 0)
+    {
+        using var scope = factory.Services.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<OutboxDbContext>();
+        var entry = new OutboxEntry
+        {
+            WebhookEventId = webhookEventId,
+            PayloadJson = payloadJson,
+            CreatedAt = DateTimeOffset.UtcNow,
+            NextAttemptAt = nextAttemptAt,
+            DeadLetteredAt = deadLetteredAt,
+            Attempts = attempts
+        };
+        dbContext.Entries.Add(entry);
+        await dbContext.SaveChangesAsync();
+        return entry;
+    }
+
+    [Fact]
+    public async Task EdgeMode_Poll_EmptyOutbox_ReturnsEmptyMessagesList()
+    {
+        using var factory = CreateEdgePullFactory();
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Ingest-Key", "test-key");
+
+        var response = await client.PostAsync("/api/edge/poll", null);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<EdgePollResponse>();
+        Assert.NotNull(body);
+        Assert.NotNull(body.Messages);
+        Assert.Empty(body.Messages);
+    }
+
+    [Fact]
+    public async Task EdgeMode_Poll_WithThreeEntries_ReturnsThreeEntriesInIdAscendingOrder()
+    {
+        using var factory = CreateEdgePullFactory();
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Ingest-Key", "test-key");
+
+        await SeedOutboxEntryAsync(factory, "evt-1", "{\"msg\":1}");
+        await SeedOutboxEntryAsync(factory, "evt-2", "{\"msg\":2}");
+        await SeedOutboxEntryAsync(factory, "evt-3", "{\"msg\":3}");
+
+        var response = await client.PostAsync("/api/edge/poll", null);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<EdgePollResponse>();
+        Assert.NotNull(body);
+        Assert.Equal(3, body.Messages.Count);
+
+        Assert.Equal("evt-1", body.Messages[0].WebhookEventId);
+        Assert.Equal("{\"msg\":1}", body.Messages[0].PayloadJson);
+
+        Assert.Equal("evt-2", body.Messages[1].WebhookEventId);
+        Assert.Equal("{\"msg\":2}", body.Messages[1].PayloadJson);
+
+        Assert.Equal("evt-3", body.Messages[2].WebhookEventId);
+        Assert.Equal("{\"msg\":3}", body.Messages[2].PayloadJson);
+    }
+
+    [Fact]
+    public async Task EdgeMode_Poll_WithoutAck_RepeatedPollReturnsSameBatch()
+    {
+        using var factory = CreateEdgePullFactory();
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Ingest-Key", "test-key");
+
+        await SeedOutboxEntryAsync(factory, "evt-a", "{\"msg\":\"a\"}");
+        await SeedOutboxEntryAsync(factory, "evt-b", "{\"msg\":\"b\"}");
+
+        var response1 = await client.PostAsync("/api/edge/poll", null);
+        var body1 = await response1.Content.ReadFromJsonAsync<EdgePollResponse>();
+        Assert.NotNull(body1);
+        Assert.Equal(2, body1.Messages.Count);
+
+        var response2 = await client.PostAsync("/api/edge/poll", null);
+        var body2 = await response2.Content.ReadFromJsonAsync<EdgePollResponse>();
+        Assert.NotNull(body2);
+        Assert.Equal(2, body2.Messages.Count);
+
+        Assert.Equal(body1.Messages.Select(m => m.WebhookEventId), body2.Messages.Select(m => m.WebhookEventId));
+        Assert.Equal(body1.Messages.Select(m => m.PayloadJson), body2.Messages.Select(m => m.PayloadJson));
+    }
+
+    [Fact]
+    public async Task EdgeMode_Poll_DoesNotModifyAttemptsOrNextAttemptAt()
+    {
+        using var factory = CreateEdgePullFactory();
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Ingest-Key", "test-key");
+
+        var pastTime = DateTimeOffset.UtcNow.AddMinutes(-5);
+        await SeedOutboxEntryAsync(factory, "evt-readonly", "{\"msg\":\"readonly\"}", nextAttemptAt: pastTime, attempts: 3);
+
+        DateTimeOffset? initialNextAttemptAt;
+        using (var scope = factory.Services.CreateScope())
+        {
+            var dbContext = scope.ServiceProvider.GetRequiredService<OutboxDbContext>();
+            var initialEntry = await dbContext.Entries.AsNoTracking().SingleAsync(e => e.WebhookEventId == "evt-readonly");
+            initialNextAttemptAt = initialEntry.NextAttemptAt;
+        }
+
+        var response = await client.PostAsync("/api/edge/poll", null);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        using (var scope = factory.Services.CreateScope())
+        {
+            var dbContext = scope.ServiceProvider.GetRequiredService<OutboxDbContext>();
+            var entryAfter = await dbContext.Entries.AsNoTracking().SingleAsync(e => e.WebhookEventId == "evt-readonly");
+
+            Assert.Equal(3, entryAfter.Attempts);
+            Assert.Equal(initialNextAttemptAt, entryAfter.NextAttemptAt);
+        }
+    }
+
+    [Fact]
+    public async Task EdgeMode_Ack_OneEntry_SubsequentPollReturnsRemainingTwo()
+    {
+        using var factory = CreateEdgePullFactory();
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Ingest-Key", "test-key");
+
+        await SeedOutboxEntryAsync(factory, "evt-1", "{\"msg\":1}");
+        await SeedOutboxEntryAsync(factory, "evt-2", "{\"msg\":2}");
+        await SeedOutboxEntryAsync(factory, "evt-3", "{\"msg\":3}");
+
+        var ackResponse = await client.PostAsJsonAsync("/api/edge/outbox/ack", new EdgeOutboxAckRequest(["evt-2"]));
+        Assert.Equal(HttpStatusCode.NoContent, ackResponse.StatusCode);
+
+        var pollResponse = await client.PostAsync("/api/edge/poll", null);
+        Assert.Equal(HttpStatusCode.OK, pollResponse.StatusCode);
+        var pollBody = await pollResponse.Content.ReadFromJsonAsync<EdgePollResponse>();
+        Assert.NotNull(pollBody);
+        Assert.Equal(2, pollBody.Messages.Count);
+        Assert.Equal(["evt-1", "evt-3"], pollBody.Messages.Select(m => m.WebhookEventId));
+    }
+
+    [Fact]
+    public async Task EdgeMode_Ack_DuplicateAck_SecondCallSucceedsWithoutAffectingOthers()
+    {
+        using var factory = CreateEdgePullFactory();
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Ingest-Key", "test-key");
+
+        await SeedOutboxEntryAsync(factory, "evt-1", "{\"msg\":1}");
+        await SeedOutboxEntryAsync(factory, "evt-2", "{\"msg\":2}");
+        await SeedOutboxEntryAsync(factory, "evt-3", "{\"msg\":3}");
+
+        var ack1 = await client.PostAsJsonAsync("/api/edge/outbox/ack", new EdgeOutboxAckRequest(["evt-1"]));
+        Assert.Equal(HttpStatusCode.NoContent, ack1.StatusCode);
+
+        var ack2 = await client.PostAsJsonAsync("/api/edge/outbox/ack", new EdgeOutboxAckRequest(["evt-1"]));
+        Assert.Equal(HttpStatusCode.NoContent, ack2.StatusCode);
+
+        var pollResponse = await client.PostAsync("/api/edge/poll", null);
+        var pollBody = await pollResponse.Content.ReadFromJsonAsync<EdgePollResponse>();
+        Assert.NotNull(pollBody);
+        Assert.Equal(2, pollBody.Messages.Count);
+        Assert.Equal(["evt-2", "evt-3"], pollBody.Messages.Select(m => m.WebhookEventId));
+    }
+
+    [Fact]
+    public async Task EdgeMode_Ack_NonExistentId_ReturnsNoContent()
+    {
+        using var factory = CreateEdgePullFactory();
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Ingest-Key", "test-key");
+
+        var ackResponse = await client.PostAsJsonAsync("/api/edge/outbox/ack", new EdgeOutboxAckRequest(["non-existent-evt"]));
+        Assert.Equal(HttpStatusCode.NoContent, ackResponse.StatusCode);
+    }
+
+    [Fact]
+    public async Task EdgeMode_Ack_EmptyList_ReturnsNoContent()
+    {
+        using var factory = CreateEdgePullFactory();
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Ingest-Key", "test-key");
+
+        var ackResponse = await client.PostAsJsonAsync("/api/edge/outbox/ack", new EdgeOutboxAckRequest([]));
+        Assert.Equal(HttpStatusCode.NoContent, ackResponse.StatusCode);
+    }
+
+    [Fact]
+    public async Task EdgeMode_Ack_ExceedingLimit_ReturnsBadRequest()
+    {
+        using var factory = CreateEdgePullFactory(builder =>
+        {
+            builder.UseSetting("Outbox:BatchSize", "2");
+        });
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Ingest-Key", "test-key");
+
+        var overLimitIds = Enumerable.Range(1, 21).Select(i => $"evt-{i}").ToList();
+        var ackResponse = await client.PostAsJsonAsync("/api/edge/outbox/ack", new EdgeOutboxAckRequest(overLimitIds));
+
+        Assert.Equal(HttpStatusCode.BadRequest, ackResponse.StatusCode);
+    }
+
+    [Fact]
+    public async Task EdgeMode_Poll_DeadLetteredItem_NotIncludedInResult()
+    {
+        using var factory = CreateEdgePullFactory();
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Ingest-Key", "test-key");
+
+        await SeedOutboxEntryAsync(factory, "evt-normal", "{\"msg\":\"normal\"}");
+        await SeedOutboxEntryAsync(factory, "evt-dead", "{\"msg\":\"dead\"}", deadLetteredAt: DateTimeOffset.UtcNow);
+
+        var response = await client.PostAsync("/api/edge/poll", null);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        var body = await response.Content.ReadFromJsonAsync<EdgePollResponse>();
+        Assert.NotNull(body);
+        var item = Assert.Single(body.Messages);
+        Assert.Equal("evt-normal", item.WebhookEventId);
+    }
+
+    [Fact]
+    public async Task EdgeMode_Poll_FutureNextAttemptAtItem_NotIncludedInResult()
+    {
+        using var factory = CreateEdgePullFactory();
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Ingest-Key", "test-key");
+
+        await SeedOutboxEntryAsync(factory, "evt-ready", "{\"msg\":\"ready\"}");
+        await SeedOutboxEntryAsync(factory, "evt-future", "{\"msg\":\"future\"}", nextAttemptAt: DateTimeOffset.UtcNow.AddMinutes(10));
+
+        var response = await client.PostAsync("/api/edge/poll", null);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        var body = await response.Content.ReadFromJsonAsync<EdgePollResponse>();
+        Assert.NotNull(body);
+        var item = Assert.Single(body.Messages);
+        Assert.Equal("evt-ready", item.WebhookEventId);
+    }
+
+    [Fact]
+    public async Task EdgeMode_Ack_MultipleIds_DeletesAllSpecifiedEntries()
+    {
+        using var factory = CreateEdgePullFactory();
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Ingest-Key", "test-key");
+
+        await SeedOutboxEntryAsync(factory, "evt-1", "{\"msg\":1}");
+        await SeedOutboxEntryAsync(factory, "evt-2", "{\"msg\":2}");
+        await SeedOutboxEntryAsync(factory, "evt-3", "{\"msg\":3}");
+
+        var ackResponse = await client.PostAsJsonAsync("/api/edge/outbox/ack", new EdgeOutboxAckRequest(["evt-1", "evt-3"]));
+        Assert.Equal(HttpStatusCode.NoContent, ackResponse.StatusCode);
+
+        var pollResponse = await client.PostAsync("/api/edge/poll", null);
+        var pollBody = await pollResponse.Content.ReadFromJsonAsync<EdgePollResponse>();
+        Assert.NotNull(pollBody);
+        var item = Assert.Single(pollBody.Messages);
+        Assert.Equal("evt-2", item.WebhookEventId);
+    }
 }
+
