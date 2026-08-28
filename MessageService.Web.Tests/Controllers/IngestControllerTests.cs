@@ -35,7 +35,8 @@ public class IngestControllerTests
         FakeProfileStore? profileStore = null,
         FakeContentDownloadQueue? downloadQueue = null,
         FakeProfileRefreshQueue? profileRefreshQueue = null,
-        FakeHeartbeatStore? heartbeatStore = null) =>
+        FakeHeartbeatStore? heartbeatStore = null,
+        PushHeartbeatTracker? pushHeartbeatTracker = null) =>
         new(
             sink ?? new FakeIngestSink(),
             contentWorkSource ?? new FakeContentWorkSource(),
@@ -44,6 +45,7 @@ public class IngestControllerTests
             profileRefreshQueue ?? new FakeProfileRefreshQueue(),
             heartbeatStore ?? new FakeHeartbeatStore(),
             OptionsFactory.Create(new IngestOptions()),
+            pushHeartbeatTracker ?? new PushHeartbeatTracker(TimeProvider.System),
             NullLogger<IngestController>.Instance);
 
     // === POST events ===

@@ -212,6 +212,9 @@ public static class MessageServiceCoreServiceCollectionExtensions
         {
             builder.Services.AddScoped<IHeartbeatStore, DbHeartbeatStore>();
             builder.Services.AddScoped<IHeartbeatReporter, DbHeartbeatReporter>();
+
+            // 反向通道：記錄推送心跳的到達時間，決定 EdgePullService 要不要接手輪詢
+            builder.Services.AddSingleton<PushHeartbeatTracker>();
         }
         else
         {
@@ -221,6 +224,20 @@ public static class MessageServiceCoreServiceCollectionExtensions
         if (builder.Configuration.GetValue("Heartbeat:Enabled", true))
         {
             builder.Services.AddHostedService<HeartbeatService>();
+        }
+
+        // Core 端的反向通道輪詢器：只在有資料庫（落地端）且設定了 Edge 位址時才存在——
+        // 沒設 Ingest:EdgeBaseUrl 就完全不註冊，行為與沒有這個功能時一致
+        if (capabilities.HasDatabaseAccess && !string.IsNullOrWhiteSpace(ingestOptionsRaw.EdgeBaseUrl))
+        {
+            builder.Services.AddHttpClient(EdgePullService.HttpClientName, client =>
+            {
+                client.BaseAddress = new Uri(ingestOptionsRaw.EdgeBaseUrl!);
+                // poll／ack 都是小 JSON 往返，逾時要短——blob 取回另有長逾時的 client，不可共用
+                client.Timeout = TimeSpan.FromSeconds(5);
+                client.DefaultRequestHeaders.Add("X-Ingest-Key", ingestOptionsRaw.ApiKey ?? "");
+            });
+            builder.Services.AddHostedService<EdgePullService>();
         }
 
         // 媒體下載／頭貼刷新的入列佇列：這台主機要不要真的做這兩件事只看 OutboundHere，

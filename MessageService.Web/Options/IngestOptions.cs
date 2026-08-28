@@ -41,4 +41,16 @@ public class IngestOptions
     /// IIS 部署時 web.config 的 requestLimits maxAllowedContentLength（同為 300MB）會先擋——
     /// 改這裡的值要同步改 MessageService.Web/web.config 那一處，反之亦然。</summary>
     public long MaxContentBytes { get; set; } = 300L * 1024 * 1024;
+
+    /// <summary>Core 端專用：Edge 主機的位址。空＝永不輪詢（與現行行為完全相同）。</summary>
+    public string? EdgeBaseUrl { get; set; }
+
+    /// <summary>輪詢間隔（秒）。預設 1 秒。</summary>
+    public int PullIntervalSeconds { get; set; } = 1;
+
+    /// <summary>多久沒收到「推送」心跳才啟動輪詢（秒）。預設 180 秒。</summary>
+    public int PullActivationSeconds { get; set; } = 180;
+
+    /// <summary>poll 連續失敗時的退避上限（秒）。預設 60 秒。</summary>
+    public int PullFailureMaxBackoffSeconds { get; set; } = 60;
 }
