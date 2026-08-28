@@ -9,6 +9,7 @@ public enum Capability
     Webhook,
     IngestApi,
     Viewer,
+    EdgePullApi,
 }
 
 [AttributeUsage(AttributeTargets.Class)]

@@ -15,12 +15,22 @@ public static class DeploymentValidator
         var capabilities = DeploymentCapabilities.Derive(mode, line, viewer, ingest);
         var db = database ?? DatabaseStartupDecision.Default;
 
-        if (mode is DeploymentMode.Edge &&
-            (string.IsNullOrWhiteSpace(ingest.BaseUrl) || string.IsNullOrWhiteSpace(ingest.ApiKey)))
+        if (mode is DeploymentMode.Edge)
         {
-            throw new InvalidOperationException(
-                "Deployment:Mode=Edge 需要設定 Ingest:BaseUrl（Core 模式主機的 ingest API 位址）與 " +
-                "Ingest:ApiKey（雙邊共用密鑰，須與 Core 端一致），否則 outbox 排出的事件無處可送。");
+            if (ingest.Channel is IngestChannel.Pull)
+            {
+                if (string.IsNullOrWhiteSpace(ingest.ApiKey))
+                {
+                    throw new InvalidOperationException(
+                        "Deployment:Mode=Edge 且 Ingest:Channel=Pull：Pull 模式仍需 ApiKey 驗證 Core 進來的輪詢請求。");
+                }
+            }
+            else if (string.IsNullOrWhiteSpace(ingest.BaseUrl) || string.IsNullOrWhiteSpace(ingest.ApiKey))
+            {
+                throw new InvalidOperationException(
+                    "Deployment:Mode=Edge 需要設定 Ingest:BaseUrl（Core 模式主機的 ingest API 位址）與 " +
+                    "Ingest:ApiKey（雙邊共用密鑰，須與 Core 端一致），否則 outbox 排出的事件無處可送。");
+            }
         }
 
         if (mode is DeploymentMode.Core && string.IsNullOrWhiteSpace(ingest.ApiKey))

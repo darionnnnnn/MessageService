@@ -136,4 +136,35 @@ public class DeploymentCapabilitiesTests
             DeploymentCapabilities.Derive(DeploymentMode.Core, Line(), Viewer(), Ingest("key")),
             DeploymentCapabilities.Derive(DeploymentMode.Db, Line(), Viewer(), Ingest("key")));
     }
+
+    [Theory]
+    [InlineData(DeploymentMode.AllInOne, IngestChannel.Auto, false)]
+    [InlineData(DeploymentMode.AllInOne, IngestChannel.Push, false)]
+    [InlineData(DeploymentMode.AllInOne, IngestChannel.Pull, false)]
+    [InlineData(DeploymentMode.Edge, IngestChannel.Auto, true)]
+    [InlineData(DeploymentMode.Edge, IngestChannel.Push, false)]
+    [InlineData(DeploymentMode.Edge, IngestChannel.Pull, true)]
+    [InlineData(DeploymentMode.Core, IngestChannel.Auto, false)]
+    [InlineData(DeploymentMode.Core, IngestChannel.Push, false)]
+    [InlineData(DeploymentMode.Core, IngestChannel.Pull, false)]
+    [InlineData(DeploymentMode.Viewer, IngestChannel.Auto, false)]
+    [InlineData(DeploymentMode.Viewer, IngestChannel.Push, false)]
+    [InlineData(DeploymentMode.Viewer, IngestChannel.Pull, false)]
+    public void EdgePullApiEnabled_DerivesCorrectlyForModeAndChannel(DeploymentMode mode, IngestChannel channel, bool expected)
+    {
+        var capabilities = DeploymentCapabilities.Derive(
+            mode, Line(), Viewer(), new IngestOptions { Channel = channel, ApiKey = "key" });
+
+        Assert.Equal(expected, capabilities.EdgePullApiEnabled);
+    }
+
+    [Fact]
+    public void EdgePullApiEnabled_DoesNotDependOnApiKey()
+    {
+        // 刻意不檢查 ApiKey：金鑰未設時要讓 IngestApiKeyMiddleware 回 404，而不是讓路由消失後回 405
+        var capabilitiesWithoutKey = DeploymentCapabilities.Derive(
+            DeploymentMode.Edge, Line(), Viewer(), new IngestOptions { Channel = IngestChannel.Auto, ApiKey = null });
+
+        Assert.True(capabilitiesWithoutKey.EdgePullApiEnabled);
+    }
 }

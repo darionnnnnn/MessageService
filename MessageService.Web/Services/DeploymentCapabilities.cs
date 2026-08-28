@@ -11,7 +11,8 @@ public record DeploymentCapabilities(
     bool IngestApiEnabled,
     bool ViewerEnabled,
     bool OutboundHere,
-    bool RunsRetention)
+    bool RunsRetention,
+    bool EdgePullApiEnabled)
 {
     public static DeploymentCapabilities Derive(DeploymentMode mode, LineOptions line, ViewerOptions viewer, IngestOptions ingest)
     {
@@ -24,6 +25,12 @@ public record DeploymentCapabilities(
         var ingestApiEnabled = mode is DeploymentMode.AllInOne or DeploymentMode.Core
             && !string.IsNullOrWhiteSpace(ingest.ApiKey);
 
+        // edge pull API 只在 Edge 模式且 Channel 不是 Push 時開放。
+        // 與 IngestApiEnabled 分開判斷的理由是兩者保護的是相反方向的通道。
+        // 這裡刻意不檢查 ApiKey（與 IngestApiEnabled 不同）：金鑰未設時要讓
+        // IngestApiKeyMiddleware 回 404（見下方管線掛載），而不是讓路由整個消失後回 405。
+        var edgePullApiEnabled = mode is DeploymentMode.Edge && ingest.Channel is not IngestChannel.Push;
+
         // 夾住 hasDatabaseAccess：檢視端整組服務都要 MessageDbContext，Edge 顯式設
         // Viewer:Enabled=true（多半是從別台主機複製設定忘記清）若照單全收，服務註冊矩陣會
         // 註冊出解析不了的相依、炸出難懂的 DI 錯誤——這裡先夾住讓註冊矩陣保持一致，
@@ -35,6 +42,6 @@ public record DeploymentCapabilities(
         // 即使也直連資料庫也不跑，避免多實例同時清除同一張表
         var runsRetention = mode is DeploymentMode.AllInOne or DeploymentMode.Core;
 
-        return new DeploymentCapabilities(receivesWebhook, hasDatabaseAccess, ingestApiEnabled, viewerEnabled, outboundHere, runsRetention);
+        return new DeploymentCapabilities(receivesWebhook, hasDatabaseAccess, ingestApiEnabled, viewerEnabled, outboundHere, runsRetention, edgePullApiEnabled);
     }
 }

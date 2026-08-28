@@ -1,8 +1,10 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text;
+using MessageService.Controllers;
 using MessageService.Data;
 using MessageService.Models;
+using MessageService.Options;
 using MessageService.Services;
 using MessageService.Tests.TestSupport;
 using Microsoft.AspNetCore.Hosting;
@@ -10,6 +12,7 @@ using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
 
 namespace MessageService.Tests.Controllers;
 
@@ -544,4 +547,200 @@ public class DeploymentModeTests : IDisposable
         ReceivedAt: DateTimeOffset.UtcNow,
         HasContent: false,
         ContentFileName: null);
+
+    // === 作業A-step1：/api/edge/poll 閘門與端點測試 ===
+
+    [Fact]
+    public async Task EdgeMode_ChannelPush_EdgePollEndpoint_ReturnsNotFound()
+    {
+        using var factory = CreateFactory(builder =>
+        {
+            builder.UseSetting("Deployment:Mode", "Edge");
+            builder.UseSetting("Line:ChannelSecret", "secret");
+            builder.UseSetting("Ingest:BaseUrl", "https://core-host.example");
+            builder.UseSetting("Ingest:ApiKey", "test-key");
+            builder.UseSetting("Ingest:Channel", "Push");
+            builder.UseSetting("ConnectionStrings:Outbox", $"Data Source={_outboxPath}");
+        });
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Ingest-Key", "test-key");
+
+        var response = await client.PostAsync("/api/edge/poll", null);
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task EdgeMode_ChannelAuto_MissingApiKey_ReturnsNotFound()
+    {
+        var ingestOptions = new IngestOptions
+        {
+            Channel = IngestChannel.Auto,
+            BaseUrl = "https://core-host.example",
+            ApiKey = "temp-key"
+        };
+
+        using var factory = CreateFactory(builder =>
+        {
+            builder.UseSetting("Deployment:Mode", "Edge");
+            builder.UseSetting("Line:ChannelSecret", "secret");
+            builder.UseSetting("Ingest:BaseUrl", "https://core-host.example");
+            builder.UseSetting("Ingest:ApiKey", "temp-key");
+            builder.UseSetting("Ingest:Channel", "Auto");
+            builder.UseSetting("ConnectionStrings:Outbox", $"Data Source={_outboxPath}");
+            builder.ConfigureServices(services =>
+            {
+                services.AddSingleton<IOptions<IngestOptions>>(new OptionsWrapper<IngestOptions>(ingestOptions));
+            });
+        });
+        using var client = factory.CreateClient();
+        ingestOptions.ApiKey = "";
+
+        var response = await client.PostAsync("/api/edge/poll", null);
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task EdgeMode_ChannelAuto_MissingKeyHeader_ReturnsUnauthorized()
+    {
+        using var factory = CreateFactory(builder =>
+        {
+            builder.UseSetting("Deployment:Mode", "Edge");
+            builder.UseSetting("Line:ChannelSecret", "secret");
+            builder.UseSetting("Ingest:BaseUrl", "https://core-host.example");
+            builder.UseSetting("Ingest:ApiKey", "test-key");
+            builder.UseSetting("Ingest:Channel", "Auto");
+            builder.UseSetting("ConnectionStrings:Outbox", $"Data Source={_outboxPath}");
+        });
+        using var client = factory.CreateClient();
+
+        var response = await client.PostAsync("/api/edge/poll", null);
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task EdgeMode_ChannelAuto_WrongKey_ReturnsUnauthorized()
+    {
+        using var factory = CreateFactory(builder =>
+        {
+            builder.UseSetting("Deployment:Mode", "Edge");
+            builder.UseSetting("Line:ChannelSecret", "secret");
+            builder.UseSetting("Ingest:BaseUrl", "https://core-host.example");
+            builder.UseSetting("Ingest:ApiKey", "test-key");
+            builder.UseSetting("Ingest:Channel", "Auto");
+            builder.UseSetting("ConnectionStrings:Outbox", $"Data Source={_outboxPath}");
+        });
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Ingest-Key", "wrong-key");
+
+        var response = await client.PostAsync("/api/edge/poll", null);
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task EdgeMode_ChannelAuto_DisallowedIp_ReturnsForbidden()
+    {
+        using var factory = CreateFactory(builder =>
+        {
+            builder.UseSetting("Deployment:Mode", "Edge");
+            builder.UseSetting("Line:ChannelSecret", "secret");
+            builder.UseSetting("Ingest:BaseUrl", "https://core-host.example");
+            builder.UseSetting("Ingest:ApiKey", "test-key");
+            builder.UseSetting("Ingest:Channel", "Auto");
+            builder.UseSetting("ConnectionStrings:Outbox", $"Data Source={_outboxPath}");
+            builder.UseSetting("Ingest:AllowedClientIps:0", "10.0.0.1");
+            builder.ConfigureServices(services =>
+                services.AddSingleton<IStartupFilter>(new FakeRemoteIpStartupFilter(IPAddress.Parse("192.168.1.1"))));
+        }, allowLocalhost: false);
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Ingest-Key", "test-key");
+
+        var response = await client.PostAsync("/api/edge/poll", null);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task EdgeMode_ChannelAuto_CorrectKeyAndAllowedIp_ReturnsOkWithHeartbeat()
+    {
+        using var factory = CreateFactory(builder =>
+        {
+            builder.UseSetting("Deployment:Mode", "Edge");
+            builder.UseSetting("Line:ChannelSecret", "secret");
+            builder.UseSetting("Ingest:BaseUrl", "https://core-host.example");
+            builder.UseSetting("Ingest:ApiKey", "test-key");
+            builder.UseSetting("Ingest:Channel", "Auto");
+            builder.UseSetting("ConnectionStrings:Outbox", $"Data Source={_outboxPath}");
+        });
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Ingest-Key", "test-key");
+
+        var response = await client.PostAsync("/api/edge/poll", null);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<EdgePollResponse>();
+        Assert.NotNull(body);
+        Assert.Equal("Edge", body.Role);
+        Assert.Equal(Environment.MachineName, body.MachineName);
+    }
+
+    [Fact]
+    public async Task EdgeMode_ChannelPull_CorrectKeyAndAllowedIp_ReturnsOkWithHeartbeat()
+    {
+        using var factory = CreateFactory(builder =>
+        {
+            builder.UseSetting("Deployment:Mode", "Edge");
+            builder.UseSetting("Line:ChannelSecret", "secret");
+            builder.UseSetting("Ingest:ApiKey", "test-key");
+            builder.UseSetting("Ingest:Channel", "Pull");
+            builder.UseSetting("ConnectionStrings:Outbox", $"Data Source={_outboxPath}");
+        });
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Ingest-Key", "test-key");
+
+        var response = await client.PostAsync("/api/edge/poll", null);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<EdgePollResponse>();
+        Assert.NotNull(body);
+        Assert.Equal("Edge", body.Role);
+        Assert.Equal(Environment.MachineName, body.MachineName);
+    }
+
+    [Theory]
+    [InlineData("AllInOne")]
+    [InlineData("Core")]
+    [InlineData("Viewer")]
+    public async Task NonEdgeModes_EdgePollEndpoint_ReturnsNotFound(string mode)
+    {
+        using var factory = CreateFactory(builder =>
+        {
+            builder.UseSetting("Deployment:Mode", mode);
+            if (mode == "AllInOne")
+            {
+                builder.UseSetting("Line:ChannelSecret", "secret");
+            }
+            else if (mode == "Core")
+            {
+                builder.UseSetting("Ingest:ApiKey", "correct-key");
+            }
+            builder.UseSetting("ConnectionStrings:Sqlite", $"Data Source={_dbPath}");
+            builder.UseSetting("ConnectionStrings:Outbox", $"Data Source={_outboxPath}");
+            builder.UseSetting("Viewer:AllowedClientIps:0", "127.0.0.1");
+        });
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Ingest-Key", "correct-key");
+
+        var response = await client.PostAsync("/api/edge/poll", null);
+
+        // AllInOne / Core / Viewer 模式未啟用 EdgePullApi，EdgeController 被 DeploymentModeConvention 移除。
+        // 在 Viewer 啟用的模式下，路由層掛有靜態資源後援（只接受 GET/HEAD），未比對到 endpoint 的 POST 請求
+        // 會回傳 405（MethodNotAllowed）或 404（NotFound），皆代表 EdgeController 不存在
+        Assert.True(
+            response.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.MethodNotAllowed,
+            $"預期 404 或 405（EdgeController 在 {mode} 模式下不該存在），實際是 {response.StatusCode}");
+    }
 }
