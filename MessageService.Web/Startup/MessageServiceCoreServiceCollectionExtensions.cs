@@ -180,12 +180,13 @@ public static class MessageServiceCoreServiceCollectionExtensions
             if (ingestOptionsRaw.Channel is IngestChannel.Pull)
             {
                 builder.Services.AddScoped<IContentWorkSource, StagingContentWorkSource>();
+                builder.Services.AddScoped<IProfileStore, StagingProfileStore>();
             }
             else
             {
                 builder.Services.AddScoped<IContentWorkSource, ApiContentWorkSource>();
+                builder.Services.AddScoped<IProfileStore, ApiProfileStore>();
             }
-            builder.Services.AddScoped<IProfileStore, ApiProfileStore>();
 
             // 只有 Edge（沒有本機資料庫）才需要打這兩支具名 HttpClient；Core 端就算日後
             // Core:OutboundHere=true，走的也是上面的 DbContentWorkSource，不會用到它們。
@@ -326,8 +327,9 @@ public static class MessageServiceCoreServiceCollectionExtensions
             // 通道狀態：Auto 模式下推送失敗要暫停轉發、每隔一個探測週期再試（見 EdgeChannelState）
             builder.Services.AddSingleton<EdgeChannelState>();
 
-            // 拉取模式的媒體暫存區：Core 派工進來、下載完成的 blob 等 Core 取走
+            // 拉取模式的暫存區：Core 派工進來、產出的結果等 Core 取走
             builder.Services.AddSingleton<EdgeContentStaging>();
+            builder.Services.AddSingleton<EdgeProfileStaging>();
 
             // Pull 模式下 Edge 從不主動連 Core，轉發器整個不註冊——webhook 照收、寫進 outbox，
             // 由 Core 端輪詢取走

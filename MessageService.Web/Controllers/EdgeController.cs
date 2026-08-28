@@ -17,6 +17,8 @@ public class EdgeController(
     OutboxDbContext outboxDbContext,
     DeploymentCapabilities capabilities,
     EdgeContentStaging staging,
+    EdgeProfileStaging profileStaging,
+    IProfileRefreshQueue profileRefreshQueue,
     IOptions<DeploymentOptions> deploymentOptions,
     IOptions<OutboxOptions> outboxOptions) : ControllerBase
 {
@@ -48,6 +50,18 @@ public class EdgeController(
         // Pending 下一輪再派（背壓）——回傳實際收下的清單讓 Core 知道哪些才真的認領出去了
         var acceptedWork = staging.AcceptDispatch(request?.ContentWork ?? []);
 
+        // 名稱／頭貼刷新：Core 連同它算好的 staleness 一起派下來，入列給既有的
+        // ProfileRefreshService 處理（流程不變，只是資料來源換成暫存區）
+        var profileWork = request?.ProfileWork ?? [];
+        if (profileWork.Count > 0)
+        {
+            profileStaging.Dispatch(profileWork);
+            foreach (var item in profileWork)
+            {
+                profileRefreshQueue.Enqueue(new ProfileRefreshTask(item.GroupId, item.UserId));
+            }
+        }
+
         var response = new EdgePollResponse(
             Role: deploymentOptions.Value.Mode.ToString(),
             MachineName: Environment.MachineName,
@@ -56,7 +70,8 @@ public class EdgeController(
             Messages: messages,
             AcceptedContentWork: acceptedWork,
             ReadyContentIds: staging.GetReadyIds(),
-            FailedContentIds: staging.DrainFailedIds());
+            FailedContentIds: staging.DrainFailedIds(),
+            ProfileResults: profileStaging.DrainResults());
 
         return Ok(response);
     }
@@ -111,7 +126,9 @@ public class EdgeController(
 
 public record EdgePollRequest(
     /// <summary>Core 這一輪要派給 Edge 下載的媒體工作。</summary>
-    IReadOnlyList<ContentWorkItem> ContentWork);
+    IReadOnlyList<ContentWorkItem> ContentWork,
+    /// <summary>Core 這一輪要派給 Edge 刷新的名稱／頭貼工作（含 Core 算好的 staleness）。</summary>
+    IReadOnlyList<EdgeProfileWorkItem> ProfileWork);
 
 public record EdgePollResponse(
     string Role,
@@ -124,7 +141,9 @@ public record EdgePollResponse(
     /// <summary>已下載完成、等 Core 用 GET content/{id} 取回的 Id。</summary>
     IReadOnlyList<long> ReadyContentIds,
     /// <summary>下載失敗、要 Core 依既有重試狀態機處理的 Id。</summary>
-    IReadOnlyList<long> FailedContentIds);
+    IReadOnlyList<long> FailedContentIds,
+    /// <summary>Edge 打完 LINE API 的名稱／頭貼結果，總量受單輪預算限制，超出的下一輪再回。</summary>
+    IReadOnlyList<EdgeProfileResult> ProfileResults);
 
 public record EdgeOutboxItem(
     string WebhookEventId,

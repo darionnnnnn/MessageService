@@ -47,6 +47,7 @@ public class EdgePullServiceTests
         FakeIngestSink Sink,
         FakeContentDownloadQueue DownloadQueue,
         FakeContentWorkSource WorkSource,
+        FakeProfileStore ProfileStore,
         List<HttpRequestMessage> Requests,
         List<string> RequestBodies,
         RecordingLogger Logger);
@@ -69,7 +70,8 @@ public class EdgePullServiceTests
         Func<HttpRequestMessage, HttpResponseMessage> responder,
         IngestOptions? options = null,
         FakeIngestSink? sink = null,
-        FakeContentWorkSource? workSource = null)
+        FakeContentWorkSource? workSource = null,
+        FakeProfileStore? profileStore = null)
     {
         var requests = new List<HttpRequestMessage>();
         var bodies = new List<string>();
@@ -86,10 +88,13 @@ public class EdgePullServiceTests
         var actualSink = sink ?? new FakeIngestSink();
         var downloadQueue = new FakeContentDownloadQueue();
         var actualWorkSource = workSource ?? new FakeContentWorkSource();
+        var actualProfileStore = profileStore ?? new FakeProfileStore();
 
         var services = new ServiceCollection();
         services.AddSingleton(ProcessOwnerId.Instance);
+        services.AddSingleton(OptionsFactory.Create(new ProfileCacheOptions()));
         services.AddScoped<IContentWorkSource>(_ => actualWorkSource);
+        services.AddScoped<IProfileStore>(_ => actualProfileStore);
         services.AddScoped<IHeartbeatStore>(_ => heartbeatStore);
         services.AddScoped<IIngestSink>(_ => actualSink);
         services.AddScoped<IContentDownloadQueue>(_ => downloadQueue);
@@ -110,7 +115,8 @@ public class EdgePullServiceTests
             logger);
 
         return new Harness(
-            service, time, tracker, heartbeatStore, actualSink, downloadQueue, actualWorkSource, requests, bodies, logger);
+            service, time, tracker, heartbeatStore, actualSink, downloadQueue, actualWorkSource, actualProfileStore,
+            requests, bodies, logger);
     }
 
     private static HttpResponseMessage PollResponse(
@@ -119,12 +125,14 @@ public class EdgePullServiceTests
         IReadOnlyList<EdgeOutboxItem>? messages = null,
         IReadOnlyList<long>? readyContentIds = null,
         IReadOnlyList<long>? failedContentIds = null,
-        IReadOnlyList<long>? acceptedContentWork = null) =>
+        IReadOnlyList<long>? acceptedContentWork = null,
+        IReadOnlyList<EdgeProfileResult>? profileResults = null) =>
         new(HttpStatusCode.OK)
         {
             Content = JsonContent.Create(new EdgePollResponse(
                 role, machineName, outboxPending, oldestAge, messages ?? [],
-                acceptedContentWork ?? [], readyContentIds ?? [], failedContentIds ?? [])),
+                acceptedContentWork ?? [], readyContentIds ?? [], failedContentIds ?? [],
+                profileResults ?? [])),
         };
 
     // === 啟停判斷 ===
@@ -590,5 +598,93 @@ public class EdgePullServiceTests
         // 正在取回中的那筆不該被重新派工——內容已經在傳回來的路上
         var secondPollBody = harness.RequestBodies.Last(b => b.Contains("contentWork", StringComparison.OrdinalIgnoreCase));
         Assert.DoesNotContain("\"contentId\":9", secondPollBody, StringComparison.OrdinalIgnoreCase);
+    }
+
+    // === 名稱／頭貼反向化（作業D） ===
+
+    [Fact]
+    public async Task PollOnceAsync_DispatchesStaleProfilesOnlyAfterLandingMessages()
+    {
+        var profileStore = new FakeProfileStore { StalenessToReturn = new ProfileStaleness(true, true) };
+        var item = new EdgeOutboxItem("evt-1", JsonSerializer.Serialize(SampleEnvelope));
+        var harness = CreateHarness(request =>
+            request.RequestUri!.AbsolutePath.EndsWith("/poll")
+                ? PollResponse(messages: [item])
+                : new HttpResponseMessage(HttpStatusCode.NoContent),
+            profileStore: profileStore);
+
+        // 第一輪落地訊息，累積刷新對象；第二輪才把過期的派出去
+        await harness.Service.PollOnceAsync(CancellationToken.None);
+        await harness.Service.PollOnceAsync(CancellationToken.None);
+
+        var secondPoll = harness.RequestBodies.Where(b => b.Contains("profileWork", StringComparison.OrdinalIgnoreCase)).ToList();
+        Assert.Contains(secondPoll, b => b.Contains("G1") && b.Contains("U1"));
+    }
+
+    [Fact]
+    public async Task PollOnceAsync_FreshProfiles_AreNotDispatched()
+    {
+        var profileStore = new FakeProfileStore { StalenessToReturn = new ProfileStaleness(false, false) };
+        var item = new EdgeOutboxItem("evt-1", JsonSerializer.Serialize(SampleEnvelope));
+        var harness = CreateHarness(request =>
+            request.RequestUri!.AbsolutePath.EndsWith("/poll")
+                ? PollResponse(messages: [item])
+                : new HttpResponseMessage(HttpStatusCode.NoContent),
+            profileStore: profileStore);
+
+        await harness.Service.PollOnceAsync(CancellationToken.None);
+        await harness.Service.PollOnceAsync(CancellationToken.None);
+
+        // TTL 內的不派出去，Edge 就不會白打 LINE API
+        var polls = harness.RequestBodies.Where(b => b.Contains("profileWork", StringComparison.OrdinalIgnoreCase));
+        Assert.All(polls, b => Assert.Contains("\"profileWork\":[]", b.Replace(" ", "")));
+    }
+
+    [Fact]
+    public async Task PollOnceAsync_ProfileResults_AreLandedThroughProfileStore()
+    {
+        var profileStore = new FakeProfileStore();
+        var results = new List<EdgeProfileResult>
+        {
+            new("G1", null, new GroupSummary("G1", "研發群組", "https://g/pic", [1, 2], "image/png"), null),
+            new("G1", "U1", null, new MemberProfile("U1", "小明", "https://m/pic", [3, 4], "image/jpeg")),
+        };
+        var harness = CreateHarness(_ => PollResponse(profileResults: results), profileStore: profileStore);
+
+        await harness.Service.PollOnceAsync(CancellationToken.None);
+
+        var group = Assert.Single(profileStore.UpsertedGroups);
+        Assert.Equal("研發群組", group.Summary.GroupName);
+        Assert.Equal([1, 2], group.Summary.PictureBytes);
+
+        var member = Assert.Single(profileStore.UpsertedMembers);
+        Assert.Equal("小明", member.Profile.DisplayName);
+        Assert.Equal([3, 4], member.Profile.PictureBytes);
+    }
+
+    [Fact]
+    public async Task PollOnceAsync_ProfileLandingFailure_DoesNotBreakThePoll()
+    {
+        var profileStore = new ThrowingProfileStore();
+        var harness = CreateHarness(
+            _ => PollResponse(profileResults: [new("G1", null, new GroupSummary("G1", "名稱", null), null)]),
+            profileStore: profileStore);
+
+        await harness.Service.PollOnceAsync(CancellationToken.None);
+
+        Assert.True(profileStore.WasCalled);
+        // 頭貼是非關鍵資料：落地失敗不得讓整輪算成失敗而觸發退避
+        Assert.Equal(TimeSpan.FromSeconds(1), harness.Service.CurrentDelay());
+    }
+
+    private sealed class ThrowingProfileStore : FakeProfileStore, IProfileStore
+    {
+        public bool WasCalled { get; private set; }
+
+        Task IProfileStore.UpsertGroupAsync(string groupId, GroupSummary summary, CancellationToken cancellationToken)
+        {
+            WasCalled = true;
+            throw new InvalidOperationException("資料庫寫入失敗");
+        }
     }
 }
