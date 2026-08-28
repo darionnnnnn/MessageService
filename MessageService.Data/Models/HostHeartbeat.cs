@@ -18,6 +18,11 @@ public class HostHeartbeat
     /// （見 OutboxForwarderService 的積壓告警），其餘主機固定 null。</summary>
     public double? OutboxOldestAgeSeconds { get; set; }
 
+    /// <summary>這一列的心跳是怎麼進來的：Push（那台主機自己送來或自己直寫）或
+    /// Pull（Core 主動輪詢 Edge 取回來的）。拆機部署時看得出目前走的是哪個方向，
+    /// 防火牆只開通一邊時尤其重要。舊資料為 null，顯示為未知。</summary>
+    public string? Channel { get; set; }
+
     /// <summary>金鑰的 SHA-256 前 4 bytes（見 FieldCipher.KeyId），未啟用加密固定 null。
     /// 多台直連資料庫的主機互相比對，金鑰設定不一致時能立刻看出來。</summary>
     public string? EncryptionKeyFingerprint { get; set; }

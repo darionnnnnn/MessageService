@@ -348,6 +348,22 @@ Core 的 ingest API，Core 沒起來的話 Edge 只是把事件暫存在本機 o
 - `Ingest:BaseUrl`（只有 Edge 要設）：指向 Core 主機的網域，例如 `https://core-host.example/`
 - `Ingest:AllowedClientIps`（只有 Core 要設）：Edge 主機的對外 IP，不是辦公室網段
 
+### E1b. 防火牆只開通 core→edge 時
+
+預設（`Ingest:Channel=Auto`）不需要任何額外設定：Edge 先試推送，不通就自動改由 Core
+輪詢接手；防火牆哪天開通，心跳（每分鐘一次）一送成功就自動升級回推送。要讓它運作，兩端各補一項：
+
+- Core 端加 `Ingest:EdgeBaseUrl`，指向 Edge 主機，例如 `https://edge-host.example/`
+- **Edge 端也要設 `Ingest:AllowedClientIps`**，填 Core 主機的內網 IP。這個白名單空清單
+  等於全部拒絕，沒設的話 Core 的輪詢一律吃 403
+
+確定 edge→core 這個方向永遠不會開通時，Edge 端可以再加 `Ingest:Channel=Pull`：
+不做任何主動連線與探測，`Ingest:BaseUrl` 也可以留空。反過來確定只走推送的環境設 `Push`，
+Edge 就不會開放 `/api/edge` 這組端點。
+
+設定完成後，在設定頁的「主機狀態」區塊可以看到每台主機目前走的是「推送」還是「輪詢」。
+機制與完整的資料流見 [DEPLOYMENT-MODES.md](DEPLOYMENT-MODES.md) 的「通道方向」。
+
 ### E2. IIS 上傳大小限制（容易漏掉的一步）
 
 Core 端會接收 Edge 端轉來的媒體檔案上傳（最大到 `Ingest:MaxContentBytes`，預設 300MB），

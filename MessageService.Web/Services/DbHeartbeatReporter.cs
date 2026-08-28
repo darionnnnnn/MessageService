@@ -8,5 +8,5 @@ public class DbHeartbeatReporter(IHeartbeatStore store, IOptions<DeploymentOptio
     : IHeartbeatReporter
 {
     public Task ReportAsync(HeartbeatReport report, CancellationToken cancellationToken) =>
-        store.UpsertAsync(deploymentOptions.Value.Mode.ToString(), Environment.MachineName, report, cipher.KeyId, cancellationToken);
+        store.UpsertAsync(deploymentOptions.Value.Mode.ToString(), Environment.MachineName, report, cipher.KeyId, HeartbeatChannel.Push, cancellationToken);
 }

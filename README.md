@@ -93,6 +93,12 @@ StickerContentBackfillService（啟動時替既有貼圖訊息補出 Pending 內
 | `Viewer:Enabled` | `bool?`，這台要不要開檢視端（未設定時依模式推導），三台拓撲用 |
 | `Viewer:AllowedClientIps` | 檢視端頁面／API 的 IP 白名單，空白名單視為全拒 |
 | `Ingest:BaseUrl` / `Ingest:ApiKey` | `Edge`／`Core` 拆機用，`AllInOne` 模式不需要 |
+| `Ingest:Channel` | Edge 端的通道方向：`Auto`（預設，推送優先、不通則由 Core 輪詢接手並定期探測）／`Push`／`Pull`，見 [docs/DEPLOYMENT-MODES.md](docs/DEPLOYMENT-MODES.md) 的「通道方向」 |
+| `Ingest:EdgeBaseUrl` | Core 端指向 Edge 的位址。**空（預設）＝永不輪詢**，行為與沒有這個功能時相同 |
+| `Ingest:PullIntervalSeconds` / `PullActivationSeconds` | 輪詢間隔與啟動門檻，預設 1／180 秒。門檻只看**推送**心跳，輪詢拉回的不算 |
+| `Ingest:PullFailureMaxBackoffSeconds` | 輪詢連續失敗時的退避上限（預設 60 秒），避免不通時每秒重試刷爆 log |
+| `Ingest:PullStagingMaxBytes` | 拉取方向下 Edge 端媒體暫存區的上限（預設 600MB），不得小於 `Ingest:MaxContentBytes`；滿了會拒收派工形成背壓，工作留在 Core 端下一輪重派 |
+| `Ingest:ChannelProbeIntervalMinutes` | `Auto` 下推送暫停後、outbox 轉送多久放行一次當保底探測（預設 60 分）。心跳每分鐘照打且成功即恢復推送，這個週期只在心跳也不通時才有意義 |
 | `Outbox:PollIntervalSeconds` / `BatchSize` | outbox 排空節奏，預設 5／50 |
 | `Outbox:BaseRetryDelaySeconds` / `MaxRetryDelaySeconds` | 指數退避（第 N 次失敗延遲 Base×2^(N-1)，封頂 Max），預設 5／300。暫時性失敗永遠重試、沒有死信門檻——只有 `PermanentIngestException`（如 ingest API 判定 payload 格式不合）第一次遇到就直接死信 |
 | `Retention:CleanupTimeOfDay` | 每日清除時間（本地時間，預設 03:00:00）。**保留天數本身不在這裡**——已搬進檢視端設定頁（`ViewerSettings.RetentionDays`，預設 1095 天＝3 年），`RetentionCleanupService` 每次執行時讀 DB |

@@ -47,23 +47,9 @@ public class HeartbeatService(
         var reporter = scope.ServiceProvider.GetRequiredService<IHeartbeatReporter>();
 
         var report = capabilities.ReceivesWebhook
-            ? await ComputeOutboxStatsAsync(scope.ServiceProvider.GetRequiredService<OutboxDbContext>(), cancellationToken)
+            ? await OutboxStatsReader.ComputeAsync(scope.ServiceProvider.GetRequiredService<OutboxDbContext>(), cancellationToken)
             : new HeartbeatReport(null, null);
 
         await reporter.ReportAsync(report, cancellationToken);
-    }
-
-    private static async Task<HeartbeatReport> ComputeOutboxStatsAsync(OutboxDbContext outboxDbContext, CancellationToken cancellationToken)
-    {
-        var pending = outboxDbContext.Entries.Where(e => e.DeadLetteredAt == null);
-
-        var count = await pending.CountAsync(cancellationToken);
-        if (count == 0)
-        {
-            return new HeartbeatReport(0, null);
-        }
-
-        var oldestCreatedAt = await pending.OrderBy(e => e.CreatedAt).Select(e => e.CreatedAt).FirstAsync(cancellationToken);
-        return new HeartbeatReport(count, (DateTimeOffset.UtcNow - oldestCreatedAt).TotalSeconds);
     }
 }

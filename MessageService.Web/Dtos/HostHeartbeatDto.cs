@@ -11,4 +11,5 @@ public record HostHeartbeatDto(
     string Status,
     long? OutboxPending,
     double? OutboxOldestAgeSeconds,
-    string? EncryptionKeyFingerprint);
+    string? EncryptionKeyFingerprint,
+    string? Channel);

@@ -8,5 +8,5 @@ public interface IHeartbeatStore
 {
     Task UpsertAsync(
         string role, string machineName, HeartbeatReport report, string? encryptionKeyFingerprint,
-        CancellationToken cancellationToken);
+        string channel, CancellationToken cancellationToken);
 }

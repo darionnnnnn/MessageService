@@ -175,8 +175,19 @@ public static class MessageServiceCoreServiceCollectionExtensions
         }
         else
         {
-            builder.Services.AddScoped<IContentWorkSource, ApiContentWorkSource>();
-            builder.Services.AddScoped<IProfileStore, ApiProfileStore>();
+            // 拉取模式下 Edge 不能主動連 Core：待辦由 Core 每次 poll 派下來、下載完放記憶體
+            // 暫存等 Core 來取（見 StagingContentWorkSource／EdgeContentStaging）
+            // 兩組實作都註冊為具體型別，由 ChannelAware* 依目前通道方向二選一——推送不通時
+            // 媒體與名稱／頭貼要跟著反向，不能只有訊息與心跳反轉（見 EdgeChannelState.UsePullResources）
+            builder.Services.AddScoped<StagingContentWorkSource>();
+            builder.Services.AddScoped<StagingProfileStore>();
+            if (ingestOptionsRaw.Channel is not IngestChannel.Pull)
+            {
+                builder.Services.AddScoped<ApiContentWorkSource>();
+                builder.Services.AddScoped<ApiProfileStore>();
+            }
+            builder.Services.AddScoped<IContentWorkSource, ChannelAwareContentWorkSource>();
+            builder.Services.AddScoped<IProfileStore, ChannelAwareProfileStore>();
 
             // 只有 Edge（沒有本機資料庫）才需要打這兩支具名 HttpClient；Core 端就算日後
             // Core:OutboundHere=true，走的也是上面的 DbContentWorkSource，不會用到它們。
@@ -184,6 +195,10 @@ public static class MessageServiceCoreServiceCollectionExtensions
             // 每個方法自己記得加——這是端到端演練實際踩到的 bug：一開始沒設，兩個類別的
             // 所有請求都被 IngestApiKeyMiddleware 擋成 401，只有真的起兩個行程互打才測得出來
             var ingestApiKeyForClient = ingestOptionsRaw.ApiKey ?? "";
+            // Pull 模式下 Ingest:BaseUrl 允許留空，這兩支 client 也不會被用到——註冊了反而會在
+            // 第一次 CreateClient 時 new Uri("") 炸掉（ChannelAware* 會避開，但心跳等路徑不保證）
+            if (ingestOptionsRaw.Channel is not IngestChannel.Pull)
+            {
             builder.Services.AddHttpClient("ingest", client =>
             {
                 var baseUrl = ingestOptionsRaw.BaseUrl
@@ -201,6 +216,7 @@ public static class MessageServiceCoreServiceCollectionExtensions
                 client.Timeout = TimeSpan.FromMinutes(10);
                 client.DefaultRequestHeaders.Add("X-Ingest-Key", ingestApiKeyForClient);
             });
+            }
         }
 
         // 需求4：Web 端要能看到另外幾台服務是否正常運作——有資料庫就直接寫 HostHeartbeats，
@@ -212,15 +228,42 @@ public static class MessageServiceCoreServiceCollectionExtensions
         {
             builder.Services.AddScoped<IHeartbeatStore, DbHeartbeatStore>();
             builder.Services.AddScoped<IHeartbeatReporter, DbHeartbeatReporter>();
+
+            // 反向通道：記錄推送心跳的到達時間，決定 EdgePullService 要不要接手輪詢
+            builder.Services.AddSingleton<PushHeartbeatTracker>();
         }
         else
         {
             builder.Services.AddScoped<IHeartbeatReporter, HttpHeartbeatReporter>();
         }
         // 測試主機（WebAppFactoryFixture）會把這個關掉，見 HeartbeatOptions.Enabled 說明
-        if (builder.Configuration.GetValue("Heartbeat:Enabled", true))
+        // Pull 模式下 Edge 從不主動連 Core，心跳改由 poll 回應即時計算（見 EdgeController.Poll），
+        // 不註冊這個背景服務——註冊了只會每個週期對打不通的 Core 送一次、留下無意義的失敗 log
+        var pushesHeartbeat = capabilities.HasDatabaseAccess || ingestOptionsRaw.Channel is not IngestChannel.Pull;
+        if (builder.Configuration.GetValue("Heartbeat:Enabled", true) && pushesHeartbeat)
         {
             builder.Services.AddHostedService<HeartbeatService>();
+        }
+
+        // Core 端的反向通道輪詢器：只在有資料庫（落地端）且設定了 Edge 位址時才存在——
+        // 沒設 Ingest:EdgeBaseUrl 就完全不註冊，行為與沒有這個功能時一致
+        if (capabilities.HasDatabaseAccess && !string.IsNullOrWhiteSpace(ingestOptionsRaw.EdgeBaseUrl))
+        {
+            builder.Services.AddHttpClient(EdgePullService.HttpClientName, client =>
+            {
+                client.BaseAddress = new Uri(ingestOptionsRaw.EdgeBaseUrl!);
+                // poll／ack 都是小 JSON 往返，逾時要短——blob 取回另有長逾時的 client，不可共用
+                client.Timeout = TimeSpan.FromSeconds(5);
+                client.DefaultRequestHeaders.Add("X-Ingest-Key", ingestOptionsRaw.ApiKey ?? "");
+            });
+            builder.Services.AddHttpClient(EdgePullService.ContentHttpClientName, client =>
+            {
+                client.BaseAddress = new Uri(ingestOptionsRaw.EdgeBaseUrl!);
+                // blob 可達數百 MB，比照既有 "ingest-content" 對大檔放寬 timeout 的理由
+                client.Timeout = TimeSpan.FromMinutes(10);
+                client.DefaultRequestHeaders.Add("X-Ingest-Key", ingestOptionsRaw.ApiKey ?? "");
+            });
+            builder.Services.AddHostedService<EdgePullService>();
         }
 
         // 媒體下載／頭貼刷新的入列佇列：這台主機要不要真的做這兩件事只看 OutboundHere，
@@ -289,7 +332,20 @@ public static class MessageServiceCoreServiceCollectionExtensions
             });
             builder.Services.AddSingleton<IOutboxSignal, OutboxSignal>();
             builder.Services.AddScoped<IOutboxWriter, SqliteOutboxWriter>();
-            builder.Services.AddHostedService<OutboxForwarderService>();
+
+            // 通道狀態：Auto 模式下推送失敗要暫停轉發、每隔一個探測週期再試（見 EdgeChannelState）
+            builder.Services.AddSingleton<EdgeChannelState>();
+
+            // 拉取模式的暫存區：Core 派工進來、產出的結果等 Core 取走
+            builder.Services.AddSingleton<EdgeContentStaging>();
+            builder.Services.AddSingleton<EdgeProfileStaging>();
+
+            // Pull 模式下 Edge 從不主動連 Core，轉發器整個不註冊——webhook 照收、寫進 outbox，
+            // 由 Core 端輪詢取走
+            if (ingestOptionsRaw.Channel is not IngestChannel.Pull)
+            {
+                builder.Services.AddHostedService<OutboxForwarderService>();
+            }
         }
 
         return new MessageServiceCoreRegistration(

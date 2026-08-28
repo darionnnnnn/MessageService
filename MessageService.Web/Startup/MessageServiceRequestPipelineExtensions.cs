@@ -101,6 +101,7 @@ public static class MessageServiceRequestPipelineExtensions
             app.UseWhen(
                 context => !context.Request.Path.StartsWithSegments("/api/line")
                     && !context.Request.Path.StartsWithSegments("/api/ingest")
+                    && !context.Request.Path.StartsWithSegments("/api/edge")
                     && !context.Request.Path.StartsWithSegments("/healthz"),
                 viewerPipeline => viewerPipeline.UseMiddleware<IpAllowlistMiddleware>(
                     new IpAllowlistOptions("Viewer:AllowedClientIps", "viewer")));
@@ -127,6 +128,18 @@ public static class MessageServiceRequestPipelineExtensions
                     ingestPipeline.UseMiddleware<IpAllowlistMiddleware>(
                         new IpAllowlistOptions("Ingest:AllowedClientIps", "ingest"));
                     ingestPipeline.UseMiddleware<IngestApiKeyMiddleware>();
+                });
+        }
+
+        if (capabilities.EdgePullApiEnabled)
+        {
+            app.UseWhen(
+                context => context.Request.Path.StartsWithSegments("/api/edge"),
+                edgePipeline =>
+                {
+                    edgePipeline.UseMiddleware<IpAllowlistMiddleware>(
+                        new IpAllowlistOptions("Ingest:AllowedClientIps", "edge"));
+                    edgePipeline.UseMiddleware<IngestApiKeyMiddleware>();
                 });
         }
 

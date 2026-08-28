@@ -215,6 +215,9 @@ namespace MessageService.Data.Migrations.SqlServer
                         .HasMaxLength(128)
                         .HasColumnType("nvarchar(128)");
 
+                    b.Property<string>("Channel")
+                        .HasColumnType("nvarchar(max)");
+
                     b.Property<string>("EncryptionKeyFingerprint")
                         .HasColumnType("nvarchar(max)");
 

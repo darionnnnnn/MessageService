@@ -37,6 +37,7 @@ public class DeploymentModeConvention(DeploymentCapabilities capabilities) : IAp
         // 第二道閘門，兩者本來就只保護同一件事，分開反而讓「改一邊忘了改另一邊」有機可乘
         Capability.IngestApi => capabilities.IngestApiEnabled,
         Capability.Viewer => capabilities.ViewerEnabled,
+        Capability.EdgePullApi => capabilities.EdgePullApiEnabled,
         _ => false,
     };
 }

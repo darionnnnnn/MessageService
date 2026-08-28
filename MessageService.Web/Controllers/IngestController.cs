@@ -22,6 +22,7 @@ public class IngestController(
     IProfileRefreshQueue profileRefreshQueue,
     IHeartbeatStore heartbeatStore,
     IOptions<IngestOptions> ingestOptions,
+    PushHeartbeatTracker pushHeartbeatTracker,
     ILogger<IngestController> logger) : ControllerBase
 {
     [HttpPost("events")]
@@ -209,11 +210,11 @@ public class IngestController(
         // 實際擋長度所以只能在這裡擋。刻意不用 Enum.TryParse（會把 "99"／"-1" 這類沒有對應具名
         // 成員、只是恰好能轉成底層 int 的數字字串也判定為合法——這是 Enum.TryParse 廣為人知的
         // 陷阱），改成直接比對宣告的成員名稱本身
-        if (!Enum.GetNames<DeploymentMode>().Contains(request.Role))
+        if (!HeartbeatIdentity.IsValidRole(request.Role))
         {
             return BadRequest($"Unknown Role: {request.Role}");
         }
-        if (string.IsNullOrWhiteSpace(request.MachineName) || request.MachineName.Length > 128)
+        if (!HeartbeatIdentity.IsValidMachineName(request.MachineName))
         {
             return BadRequest("MachineName must be non-empty and at most 128 characters.");
         }
@@ -223,7 +224,11 @@ public class IngestController(
         await heartbeatStore.UpsertAsync(
             request.Role, request.MachineName,
             new HeartbeatReport(request.OutboxPending, request.OutboxOldestAgeSeconds),
-            encryptionKeyFingerprint: null, cancellationToken);
+            encryptionKeyFingerprint: null, channel: HeartbeatChannel.Push, cancellationToken);
+
+        // 標記「推送通道還活著」——EdgePullService 靠這個決定要不要接手輪詢。
+        // 只有這條推送路徑可以呼叫；輪詢自己拉回來的心跳呼叫它會把輪詢停掉（自我震盪）
+        pushHeartbeatTracker.MarkReceived();
         return NoContent();
     }
 }

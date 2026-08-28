@@ -39,12 +39,16 @@ public class OutboxForwarderServiceTests : IDisposable
     }
 
     private OutboxForwarderService CreateForwarder(
-        OutboxOptions? options = null, HeartbeatOptions? heartbeatOptions = null, ILogger<OutboxForwarderService>? logger = null) =>
+        OutboxOptions? options = null, HeartbeatOptions? heartbeatOptions = null, ILogger<OutboxForwarderService>? logger = null,
+        EdgeChannelState? channelState = null) =>
         new(
             _provider.GetRequiredService<IServiceScopeFactory>(),
             new FakeOutboxSignal(),
             _downloadQueue,
             _profileRefreshQueue,
+            channelState ?? new EdgeChannelState(
+                OptionsFactory.Create(new DeploymentOptions()), OptionsFactory.Create(new IngestOptions()),
+                TimeProvider.System),
             OptionsFactory.Create(options ?? new OutboxOptions
             {
                 BatchSize = 50,

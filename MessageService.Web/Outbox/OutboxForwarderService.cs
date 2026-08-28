@@ -16,6 +16,7 @@ public class OutboxForwarderService(
     IOutboxSignal signal,
     IContentDownloadQueue downloadQueue,
     IProfileRefreshQueue profileRefreshQueue,
+    EdgeChannelState channelState,
     IOptions<OutboxOptions> options,
     IOptions<HeartbeatOptions> heartbeatOptions,
     ILogger<OutboxForwarderService> logger) : BackgroundService
@@ -119,13 +120,20 @@ public class OutboxForwarderService(
 
         var now = DateTimeOffset.UtcNow;
         var batch = await dbContext.Entries
-            .Where(e => e.DeadLetteredAt == null)
-            .Where(e => e.NextAttemptAt == null || e.NextAttemptAt <= now)
+            .WherePending(now)
             .OrderBy(e => e.Id)
             .Take(_options.BatchSize)
             .ToListAsync(cancellationToken);
 
         if (batch.Count == 0)
+        {
+            return false;
+        }
+
+        // edge→core 這個方向不通時（Auto 模式推送失敗後）不空試——Core 端會改用輪詢把
+        // 資料取走，這裡只要每隔一個探測週期放行一次，通了就自動恢復推送。見 EdgeChannelState。
+        // 閘門放在取完 batch 之後：空批次送不出任何東西，拿它當探測會讓計時白白重置
+        if (!channelState.ShouldAttemptPush())
         {
             return false;
         }
@@ -215,6 +223,9 @@ public class OutboxForwarderService(
                 dbContext.Entries.Remove(entry);
             }
 
+            // 這批真的送到了對端（不論個別項目是成功還是被永久拒絕）——推送方向是通的
+            channelState.MarkPushSucceeded();
+
             // 批次結果沒提到的項目：現有兩套實作都會完整回覆整批（暫時性失敗是整批往外拋，
             // 不會只回部分結果），走到這裡代表對端行為異常——照暫時性失敗給退避，不能
             // 「原樣不動」：NextAttemptAt 沒推進的話這批會立刻重跑，變成無退避的熱迴圈。
@@ -238,6 +249,16 @@ public class OutboxForwarderService(
                 entry.Attempts++;
                 entry.LastError = batchFailure!.Message;
                 entry.NextAttemptAt = now + ComputeBackoff(entry.Attempts);
+            }
+
+            // 整批連不上對端：在 Auto 模式下暫停推送，改由 Core 端輪詢接手，
+            // 之後每隔一個探測週期再試一次（見 EdgeChannelState）
+            var wasPaused = channelState.PushPaused;
+            channelState.MarkPushFailed();
+            if (!wasPaused && channelState.PushPaused)
+            {
+                logger.LogWarning(batchFailure,
+                    "推送到 Core 失敗，暫停主動推送改由對方輪詢接手，之後每隔一個探測週期再試一次。");
             }
 
             logger.LogWarning(batchFailure,

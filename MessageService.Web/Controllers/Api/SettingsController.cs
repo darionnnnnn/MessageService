@@ -297,7 +297,7 @@ public class SettingsController(
 
         return Ok(rows.Select(h => new HostHeartbeatDto(
             h.Role, h.MachineName, h.LastSeenAt, ComputeStatus(now - h.LastSeenAt, interval),
-            h.OutboxPending, h.OutboxOldestAgeSeconds, h.EncryptionKeyFingerprint)).ToList());
+            h.OutboxPending, h.OutboxOldestAgeSeconds, h.EncryptionKeyFingerprint, h.Channel)).ToList());
     }
 
     // 主機更名、角色改了、或那台機器退役時，舊列會永遠留著顯示 Offline，而且原本沒有任何

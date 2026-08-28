@@ -98,6 +98,36 @@ public class DeploymentValidatorTests
     }
 
     [Fact]
+    public void Edge_ChannelPull_WithApiKey_EmptyBaseUrl_DoesNotThrow()
+    {
+        var ex = Record.Exception(() =>
+            Validate(DeploymentMode.Edge, Line(channelSecret: "secret"),
+                new IngestOptions { Channel = IngestChannel.Pull, BaseUrl = "", ApiKey = "key" }));
+
+        Assert.Null(ex);
+    }
+
+    [Fact]
+    public void Edge_ChannelPull_WithoutApiKey_Throws()
+    {
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            Validate(DeploymentMode.Edge, Line(channelSecret: "secret"),
+                new IngestOptions { Channel = IngestChannel.Pull, BaseUrl = "", ApiKey = "" }));
+
+        Assert.Contains("Pull 模式仍需 ApiKey 驗證 Core 進來的輪詢請求", ex.Message);
+    }
+
+    [Fact]
+    public void Edge_ChannelAuto_WithoutBaseUrl_Throws()
+    {
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            Validate(DeploymentMode.Edge, Line(channelSecret: "secret"),
+                new IngestOptions { Channel = IngestChannel.Auto, BaseUrl = "", ApiKey = "key" }));
+
+        Assert.Contains("Ingest:BaseUrl", ex.Message);
+    }
+
+    [Fact]
     public void Db_WithApiKey_DoesNotThrow()
     {
         var ex = Record.Exception(() =>
@@ -481,5 +511,16 @@ public class DeploymentValidatorTests
                 hasSqlServerConnectionString: true));
 
         Assert.Empty(logger.Errors);
+    }
+
+    [Fact]
+    public void Core_WithEdgeBaseUrlButNoApiKey_Throws()
+    {
+        // 沒有金鑰的輪詢每一輪都會被 Edge 回 401，表現成「一直退避」很難查
+        var ex = Assert.Throws<InvalidOperationException>(() => Validate(
+            mode: DeploymentMode.Core,
+            ingest: new IngestOptions { EdgeBaseUrl = "https://edge.example/", ApiKey = "" }));
+
+        Assert.Contains("Ingest:ApiKey", ex.Message);
     }
 }

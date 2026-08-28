@@ -35,8 +35,9 @@ public class DeploymentModeConventionTests
         bool ingestApiEnabled = false,
         bool viewerEnabled = false,
         bool outboundHere = false,
-        bool runsRetention = false) =>
-        new(receivesWebhook, hasDatabaseAccess, ingestApiEnabled, viewerEnabled, outboundHere, runsRetention);
+        bool runsRetention = false,
+        bool edgePullApiEnabled = false) =>
+        new(receivesWebhook, hasDatabaseAccess, ingestApiEnabled, viewerEnabled, outboundHere, runsRetention, edgePullApiEnabled);
 
     [Fact]
     public void Apply_CapabilityPresent_KeepsController()
