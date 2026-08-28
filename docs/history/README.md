@@ -9,6 +9,7 @@
 
 | 檔案 | 內容 |
 |---|---|
+| `2026-08-28_BIDIR-1-PLAN.md` | 2026-08-28 通道方向彈性化輪：Edge↔Core 四條流（訊息/心跳/媒體/名稱頭貼）支援單向防火牆任一方向、Auto 自動切換與心跳探測恢復的規劃、15+3 條定案、終檢與換模型體檢紀錄 |
 | `CONSOLIDATION-PLAN.md` | 2026-08-13 部署收斂輪：兩專案合併成 `MessageService.Web`、模式改名 `AllInOne`/`Edge`/`Core`/`Viewer`、schema 改用 `Database.Migrate()` 的規劃與執行紀錄 |
 | `POST-CONSOLIDATION-REVIEW-PLAN.md` | 部署收斂後的外部審查回饋輪（P0 批次 ingest bug、心跳監測、加密信封 key id 等） |
 | `REVIEW-FEEDBACK-2-PLAN.md` | 部署收斂第二輪審查回饋（SQLite 路徑修正、provider 推導與救場、心跳強化等） |

@@ -223,6 +223,8 @@ Core 則沒有問題（參數預設值就是舊行為）。`startupAgeSeconds`�
   宣告，Edge 不做任何探測。要自動升級請用預設的 `Auto`。
 - **拉取方向的媒體暫存在記憶體**：Edge 重啟會遺失暫存中的內容，那幾筆會在下一輪 poll
   被重新派工、重新從 LINE 下載一次（LINE 內容 API 不冪等計費）。
+- **Pull 模式下 outbox 死信沒有告警**：每小時的死信計數 log 由轉送服務負責，Pull 模式
+  不註冊它。死信積壓只能從 Core 端看到 OutboxPending 持續增加來間接察覺。
 - **拉取方向的名稱／頭貼結果沒有 ack**：poll 回應在傳輸中遺失時該筆結果會消失，
   要等 TTL（`ProfileCache:RefreshAfter`）再次過期才會重新刷新。訊息與媒體不受影響，
   那兩條流都有 ack。
