@@ -43,8 +43,41 @@ raw body 算的 HMAC，任何反序列化再序列化都會讓 Edge 驗簽失敗
 之外，所有路徑都回 404。Edge 不可達時回 502，由 LINE 的 redelivery 重送
 （Edge 端 outbox 與落地端的唯一索引保證重送安全）。
 
-防火牆只需開通 proxy→Edge 單向。`Ingest:AllowedClientIps` 與這條路徑無關——那份白名單
-保護的是 `/api/edge/*`，webhook 端點靠簽章驗證，不看來源 IP。
+### 三種拓撲組合
+
+Edge 與 EdgeProxy 的關係由兩個設定決定，可以組出三種環境：
+
+| 環境 | LINE Console 的 Webhook URL | `Line:OutboundVia`（Edge 端） | Edge 需要對外網路？ |
+|---|---|---|---|
+| 完全不用 proxy | 直指 Edge | `Direct`（預設） | 需要（收 webhook＋打 LINE API） |
+| proxy 進、Edge 出 | 指向 EdgeProxy | `Direct`（預設） | 需要（打 LINE API） |
+| 全走 proxy | 指向 EdgeProxy | `EdgeProxy` | **不需要** |
+
+第三種下 Edge 對 LINE 的四類 outbound（媒體、貼圖、群組／成員名稱、頭貼圖檔）
+全部改經 EdgeProxy 轉發，Edge 可以完全沒有 internet。
+
+### 防火牆方向
+
+| 需要開通 | 什麼情況下需要 |
+|---|---|
+| proxy → Edge | 用 EdgeProxy 收 webhook 時（轉發 webhook） |
+| **Edge → proxy** | `Line:OutboundVia=EdgeProxy` 時（LINE outbound 走 proxy）——**與上一條反向**，只開了 proxy→Edge 的環境要另外開通這一條 |
+| Core ↔ Edge | 依 `Ingest:Channel` 而定，見上方「通道方向」 |
+
+### EdgeProxy 上的兩組路由與白名單
+
+| 路由 | 白名單 | 為什麼 |
+|---|---|---|
+| `/api/line/webhook` | **不掛** | 來源是 LINE，IP 不固定；靠 Edge 端的簽章驗證把關 |
+| `/line/*`（LINE outbound 轉發） | `EdgeProxy:AllowedClientIps`（填 Edge 的 IP，**空＝全擋**） | 來源固定就是 Edge，可以也應該鎖死 |
+
+`/line/*` 的目標網域**寫死在程式裡**：`/line/api`→`api.line.me`、`/line/data`→`api-data.line.me`、
+`/line/sticker`→`stickershop.line-scdn.net`。頭貼圖檔的網址是 LINE 在 API 回應裡給的、
+網域不固定，所以走 `/line/image/{host}/{path}`——`{host}` 必須通過寫死的網域字尾允許清單
+（`.line-scdn.net`、`.line.me`）、字元集檢查與解析後的一致性檢查三道關卡才會被轉發，
+不符合一律 403。這幾道是為了讓它**不會變成開放代理**。
+
+`Ingest:AllowedClientIps` 與這兩組路由都無關——那份白名單保護的是 `/api/edge/*`。
 
 內容下載／頭貼快取完全獨立於模式，只看 `Line:OutboundHere`（`bool?`，未顯式設定時依模式
 推導，見上表）——這台主機要不要對外呼叫 LINE API。「頭貼快取」除了名稱與來源 URL，也包含
@@ -251,6 +284,11 @@ Core 則沒有問題（參數預設值就是舊行為）。`startupAgeSeconds`�
   宣告，Edge 不做任何探測。要自動升級請用預設的 `Auto`。
 - **拉取方向的媒體暫存在記憶體**：Edge 重啟會遺失暫存中的內容，那幾筆會在下一輪 poll
   被重新派工、重新從 LINE 下載一次（LINE 內容 API 不冪等計費）。
+- **`Line:OutboundVia=EdgeProxy` 時 proxy 成為單點**：Edge 的所有 LINE outbound 都經過它，
+  proxy 停機期間媒體與名稱／頭貼都下載不了（訊息本身不受影響，靠 outbox 與 Core 輪詢）。
+  下載失敗會走既有的重試狀態機，proxy 恢復後自動補上。
+- **Edge 設定頁的守門白名單不能從設定頁改**：`EdgeAdmin:AllowedClientIps` 只讀 appsettings。
+  把它放進設定頁能改的地方，等於設錯一次就把自己鎖在門外、只能改檔案救回來。
 - **EdgeProxy 不回報心跳**：它不認識 Core、也沒有資料庫，設定頁的「主機狀態」看不到這台。
   proxy 停機的症狀是「訊息停止進來、LINE Console 的 Verify 失敗」；要主動監控請用外部
   探測打它的 `/healthz`。

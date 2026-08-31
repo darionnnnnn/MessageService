@@ -401,6 +401,70 @@ curl -i -X POST https://既有網域/MSLine/api/line/webhook -H "Content-Type: a
 之後發一則真訊息，Edge 的 log 應出現 `Queued ... to outbox`。
 proxy 本身不回報心跳，設定頁的「主機狀態」看不到它，這是預期行為。
 
+### E1d. 讓 Edge 完全不需要對外網路（LINE outbound 也走 proxy）
+
+E1c 只把 webhook「進來」的方向搬到 proxy；Edge 對 LINE 的 outbound（下載媒體、貼圖、
+查群組／成員名稱、下載頭貼）預設仍是自己直連 internet。Edge 那台完全沒有對外網路時，
+再加這兩步：
+
+1. **Edge 端**設定：
+
+   ```json
+   "Line": {
+     "OutboundVia": "EdgeProxy",
+     "OutboundProxyBaseUrl": "https://既有網域/MSLine"
+   }
+   ```
+
+2. **EdgeProxy 端**設定 `EdgeProxy:AllowedClientIps`，填 Edge 主機的 IP
+   （**空清單＝全擋**，不填的話 Edge 的每個 outbound 都會吃 403）。
+
+3. **防火牆要開通 `Edge → proxy` 這個方向**——注意它與 E1c 的 `proxy → Edge` **相反**，
+   只開了 E1c 那個方向的環境要另外開通這一條。
+
+驗證（在 Edge 主機上跑，`<KEY>` 換成 `Line:ChannelAccessToken`）：
+
+```bash
+curl -i -H "Authorization: Bearer <KEY>" https://既有網域/MSLine/line/api/v2/bot/info
+```
+
+回 200 並帶 bot 資訊就是整條鏈通了。回 403 表示 `EdgeProxy:AllowedClientIps` 沒把 Edge 的 IP
+放進去；回 502 表示 proxy 連不到 LINE。
+
+### E1e. Edge 設定頁（免重啟改設定）
+
+Edge 提供一個極簡設定頁 `/edge-admin`，可以在不重啟站台的情況下改幾個常動的設定，
+存檔後**立即生效**。設定值以 DPAPI（機器層級）加密後存在 `Db\edge-settings.dat`，
+優先權高於 `appsettings.json`。
+
+**開啟方式**：在 `appsettings.Production.json` 加白名單（**這個鍵只能放在這裡**）：
+
+```json
+"EdgeAdmin": { "AllowedClientIps": [ "192.0.2.50/32" ] }
+```
+
+空清單或未設定＝全擋（頁面回 403）。這個鍵刻意不能從設定頁自己改——
+設錯一次就把自己鎖在門外，只能回頭改檔案救。
+
+**能改的設定**：LINE Channel Secret／Channel Access Token、Ingest 共用金鑰、
+Ingest 允許來源 IP、Webhook 來源限制（模式與允許 IP）。
+其餘設定（部署模式、通道方向、各種逾時）仍在 `appsettings.json`——
+它們決定啟動時要註冊哪些服務，本來就不可能熱生效。
+
+**機密的顯示**：頁面永遠不會回傳明文，已設定的只顯示遮罩與末四碼；
+要改就直接填新值，**留空表示維持原值**（不會被清成空字串）。
+
+加密檔綁這台機器，複製到別台解不開；重佈站台時 `Db\` 目錄要一併保留
+（與 `outbox.db` 同一個目錄，見上方對 `Db\` 的說明）。
+
+### E1f. 只接受來自 EdgeProxy 的 webhook
+
+用了 EdgeProxy 之後，Edge 的 webhook 端點仍然接受任何來源（靠簽章驗證把關）。
+要再加一層縱深，可在設定頁把「Webhook 來源限制」改成 `AllowlistOnly` 並填入
+EdgeProxy 的 IP——之後直接打 Edge 的 webhook 請求會被回 403，不會進到簽章驗證。
+
+預設是 `Any`（不限制），不設定就與升級前行為完全相同。
+
 ### E2. IIS 上傳大小限制（容易漏掉的一步）
 
 Core 端會接收 Edge 端轉來的媒體檔案上傳（最大到 `Ingest:MaxContentBytes`，預設 300MB），
