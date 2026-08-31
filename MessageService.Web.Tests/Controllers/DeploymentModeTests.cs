@@ -986,7 +986,7 @@ public class DeploymentModeTests : IDisposable
     }
 
     [Fact]
-    public async Task EdgeMode_Poll_FutureNextAttemptAtItem_NotIncludedInResult()
+    public async Task EdgeMode_Poll_ReturnsItemsRegardlessOfPushBackoff()
     {
         using var factory = CreateEdgePullFactory();
         using var client = factory.CreateClient();
@@ -1000,8 +1000,13 @@ public class DeploymentModeTests : IDisposable
 
         var body = await response.Content.ReadFromJsonAsync<EdgePollResponse>();
         Assert.NotNull(body);
-        var item = Assert.Single(body.Messages);
-        Assert.Equal("evt-ready", item.WebhookEventId);
+
+        // NextAttemptAt 是推送方向的退避排程。防火牆只開通 core→edge 時推送一直失敗，
+        // 退避會把它推到 MaxRetryDelaySeconds（預設 300 秒）之後——拉取端若也照著過濾，
+        // Core 就會有好幾分鐘查不到訊息，而訊息其實好端端躺在 outbox 裡
+        Assert.Equal(
+            ["evt-ready", "evt-future"],
+            body.Messages.Select(m => m.WebhookEventId).Order().Reverse().ToArray());
     }
 
     [Fact]

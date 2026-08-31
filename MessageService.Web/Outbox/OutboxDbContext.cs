@@ -30,11 +30,19 @@ public class OutboxDbContext(DbContextOptions<OutboxDbContext> options) : DbCont
 
 public static class OutboxQueryExtensions
 {
-    /// <summary>
-    /// 挑選待送（未死信、且重試時間已到或無需等待）的 outbox 項目。
-    /// </summary>
-    public static IQueryable<OutboxEntry> WherePending(this IQueryable<OutboxEntry> query, DateTimeOffset now) =>
+    /// <summary>尚待落地的項目：只排除死信。這是兩個消費端（推送轉發器、Core 的拉取）
+    /// **唯一**共用的條件。</summary>
+    public static IQueryable<OutboxEntry> WhereDeliverable(this IQueryable<OutboxEntry> query) =>
+        query.Where(e => e.DeadLetteredAt == null);
+
+    /// <summary>推送轉發器要送的項目：待落地、且退避時間已到。
+    ///
+    /// <b>NextAttemptAt 是推送方向專屬的概念</b>，拉取端不可以套用——那是「上次推給 Core
+    /// 失敗、隔多久再推」的排程。防火牆只開通 core→edge 時推送本來就會一直失敗，退避會把
+    /// NextAttemptAt 一路推到 MaxRetryDelaySeconds（預設 300 秒）之後，若拉取端也照著過濾，
+    /// Core 就會有長達五分鐘查不到任何訊息——訊息其實好端端躺在 outbox 裡。</summary>
+    public static IQueryable<OutboxEntry> WherePushDue(this IQueryable<OutboxEntry> query, DateTimeOffset now) =>
         query
-            .Where(e => e.DeadLetteredAt == null)
+            .WhereDeliverable()
             .Where(e => e.NextAttemptAt == null || e.NextAttemptAt <= now);
 }

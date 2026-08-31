@@ -105,7 +105,8 @@ Core ──▶ POST /api/edge/content/{id}/ack  完整落地後才送，Edge 收
 ```
 
 訊息是 at-least-once：Core 落地成功才送 ack，Edge 收到 ack 才刪 outbox，重複投遞靠
-`GroupMessages.WebhookEventId` 唯一索引去重。
+`GroupMessages.WebhookEventId` 唯一索引去重。拉取端只排除死信，不看 `NextAttemptAt`——
+那是推送方向的退避排程，兩個方向各自獨立，同一筆被兩邊都取走也只會落地一次。
 
 媒體的重試次數與保留視窗仍由 Core 端的 `DbContentWorkSource` 判斷（`MaxRetries`、
 `FailedRetryWindowDays`），Edge 只是換一個地方下載。派工不做認領，那些內容在 Core 端

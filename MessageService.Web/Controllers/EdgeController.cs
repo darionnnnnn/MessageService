@@ -36,10 +36,11 @@ public class EdgeController(
             pending = stats.OutboxPending;
             oldestAgeSeconds = stats.OutboxOldestAgeSeconds;
 
-            var now = DateTimeOffset.UtcNow;
+            // 刻意不看 NextAttemptAt：那是推送方向的退避排程（見 WherePushDue）。
+            // 拉取是獨立通道，被推送的退避擋住的話，Core 會有好幾分鐘看不到已經收下的訊息
             messages = await outboxDbContext.Entries
                 .AsNoTracking()
-                .WherePending(now)
+                .WhereDeliverable()
                 .OrderBy(e => e.Id)
                 .Take(outboxOptions.Value.BatchSize)
                 .Select(e => new EdgeOutboxItem(e.WebhookEventId, e.PayloadJson))

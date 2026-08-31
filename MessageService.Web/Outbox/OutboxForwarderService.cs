@@ -120,7 +120,7 @@ public class OutboxForwarderService(
 
         var now = DateTimeOffset.UtcNow;
         var batch = await dbContext.Entries
-            .WherePending(now)
+            .WherePushDue(now)
             .OrderBy(e => e.Id)
             .Take(_options.BatchSize)
             .ToListAsync(cancellationToken);
