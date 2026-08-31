@@ -100,12 +100,6 @@ public static class EncryptedSettingsFile
         return Path.GetFullPath(Path.Combine(contentRootPath, "Db", "edge-settings.dat"));
     }
 
-    /// <summary>
-    /// 讀取加密設定檔。
-    /// 檔案不存在時回傳空字典與 NotFound 狀態（不拋例外、不記 log）；
-    /// 讀取成功時回傳值字典與 Loaded 狀態；
-    /// 解密或反序列化失敗時回傳空字典與 Unreadable 狀態並記錄 Error（避免設定損毀導致站台無法啟動，退回 appsettings）。
-    /// </summary>
     /// <summary>讀檔並對「檔案正被別人占用」重試幾次。
     ///
     /// 寫入端是「先寫暫存檔再 File.Move 覆蓋」，而檔案監看的重載跟其他行程的寫入完全沒有
@@ -129,6 +123,12 @@ public static class EncryptedSettingsFile
         }
     }
 
+    /// <summary>
+    /// 讀取加密設定檔。
+    /// 檔案不存在時回傳空字典與 NotFound 狀態（不拋例外、不記 log）；
+    /// 讀取成功時回傳值字典與 Loaded 狀態；
+    /// 解密或反序列化失敗時回傳空字典與 Unreadable 狀態並記錄 Error（避免設定損毀導致站台無法啟動，退回 appsettings）。
+    /// </summary>
     public static EncryptedSettingsReadResult Read(string path, ISettingsProtector protector, ILogger? logger = null)
     {
         ArgumentNullException.ThrowIfNull(path);
