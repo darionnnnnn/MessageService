@@ -65,6 +65,7 @@ public static class MessageServiceCoreServiceCollectionExtensions
         builder.Services.Configure<EncryptionOptions>(builder.Configuration.GetSection(EncryptionOptions.SectionName));
         builder.Services.Configure<HeartbeatOptions>(builder.Configuration.GetSection(HeartbeatOptions.SectionName));
         builder.Services.Configure<EdgeProxyOptions>(builder.Configuration.GetSection(EdgeProxyOptions.SectionName));
+        builder.Services.Configure<WebhookSourceOptions>(builder.Configuration.GetSection(WebhookSourceOptions.SectionName));
         // 單例：金鑰是固定設定值，跟請求無關；MessageDbContext 的建構子也靠 DI 注入同一份實例，
         // 見 MessageDbContextModelCacheKeyFactory 對「模型依 cipher 狀態分開快取」的說明。合併前
         // 收錄端與檢視端各自持有一份，現在單一行程只有一份，跨行程金鑰不一致的風險本身也隨之消失

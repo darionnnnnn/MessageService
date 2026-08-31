@@ -3,6 +3,7 @@ using MessageService.Data;
 using MessageService.Middleware;
 using MessageService.Options;
 using MessageService.Services;
+using MessageService.Web.Configuration;
 using MessageService.Web.Middleware;
 using MessageService.Web.Services;
 using Microsoft.AspNetCore.HttpOverrides;
@@ -143,6 +144,24 @@ public static class MessageServiceRequestPipelineExtensions
                 });
         }
 
+        // Webhook 來源限制中介層：條件 capabilities.ReceivesWebhook，限定 /api/line/webhook 路徑群組
+        if (capabilities.ReceivesWebhook)
+        {
+            app.UseWhen(
+                context => context.Request.Path.StartsWithSegments("/api/line/webhook"),
+                webhookPipeline => webhookPipeline.UseMiddleware<WebhookSourceMiddleware>());
+        }
+
+        // Edge 管理設定頁白名單：僅在 Edge 模式下對 /edge-admin 路徑群組掛載
+        // EdgeAdmin:AllowedClientIps 只讀 appsettings，不進加密設定檔，避免自鎖
+        if (deploymentMode is DeploymentMode.Edge)
+        {
+            app.UseWhen(
+                context => context.Request.Path.StartsWithSegments("/edge-admin"),
+                adminPipeline => adminPipeline.UseMiddleware<IpAllowlistMiddleware>(
+                    new IpAllowlistOptions("EdgeAdmin:AllowedClientIps", "edge-admin")));
+        }
+
         if (deploymentMode is DeploymentMode.EdgeProxy)
         {
             app.UseWhen(
@@ -159,6 +178,11 @@ public static class MessageServiceRequestPipelineExtensions
 
         app.UseRouting();
         app.UseAuthorization();
+
+        if (deploymentMode is DeploymentMode.Edge)
+        {
+            app.MapEdgeAdminEndpoints();
+        }
 
         if (capabilities.ViewerEnabled)
         {

@@ -55,8 +55,7 @@ public class IpAllowlistMiddleware
     private bool IsAllowed(IPAddress remoteIp)
     {
         var networks = GetAllowedNetworks();
-        var normalizedIp = remoteIp.IsIPv4MappedToIPv6 ? remoteIp.MapToIPv4() : remoteIp;
-        return networks.Any(network => network.Contains(normalizedIp));
+        return IpNetworkParser.IsAllowed(remoteIp, networks);
     }
 
     private List<IPNetwork> GetAllowedNetworks()
@@ -69,7 +68,7 @@ public class IpAllowlistMiddleware
                 return _cachedNetworks;
             }
 
-            _cachedNetworks = ParseAllowedIps(rawEntries);
+            _cachedNetworks = IpNetworkParser.ParseAllowedIps(rawEntries, _logger, _options.Label, _options.ConfigSectionName);
             _cachedRawEntries = rawEntries;
 
             if (_cachedNetworks.Count == 0 && !_hasWarnedEmpty)
@@ -83,8 +82,24 @@ public class IpAllowlistMiddleware
             return _cachedNetworks;
         }
     }
+}
 
-    private List<IPNetwork> ParseAllowedIps(IReadOnlyList<string> entries)
+/// <summary>
+/// IP 與 CIDR 網段解析與匹配的共用小工具。
+/// </summary>
+internal static class IpNetworkParser
+{
+    public static bool IsAllowed(IPAddress remoteIp, IReadOnlyList<IPNetwork> networks)
+    {
+        var normalizedIp = remoteIp.IsIPv4MappedToIPv6 ? remoteIp.MapToIPv4() : remoteIp;
+        return networks.Any(network => network.Contains(normalizedIp));
+    }
+
+    public static List<IPNetwork> ParseAllowedIps(
+        IReadOnlyList<string> entries,
+        ILogger? logger = null,
+        string? label = null,
+        string? sectionName = null)
     {
         var networks = new List<IPNetwork>();
         foreach (var entry in entries)
@@ -98,11 +113,11 @@ public class IpAllowlistMiddleware
             {
                 if (!IPNetwork.TryParse(entry, out var network))
                 {
-                    _logger.LogWarning(
+                    logger?.LogWarning(
                         "{Label}: {Section} 有一條 CIDR 網段解析失敗並略過：\"{Entry}\"。" +
                         "IPNetwork 要求主機位元全為 0，例如 \"10.1.0.5/24\" 請改成 \"10.1.0.0/24\"" +
                         "（若只要允許單一位址則改成 \"10.1.0.5/32\"）。",
-                        _options.Label, _options.ConfigSectionName, entry);
+                        label ?? "IP", sectionName ?? "Allowlist", entry);
                     continue;
                 }
                 networks.Add(network);
@@ -111,9 +126,9 @@ public class IpAllowlistMiddleware
 
             if (!IPAddress.TryParse(entry, out var address))
             {
-                _logger.LogWarning(
+                logger?.LogWarning(
                     "{Label}: {Section} 有一條設定值不是合法的 IP 或 CIDR 網段並略過：\"{Entry}\"。",
-                    _options.Label, _options.ConfigSectionName, entry);
+                    label ?? "IP", sectionName ?? "Allowlist", entry);
                 continue;
             }
             networks.Add(new IPNetwork(address, address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork ? 32 : 128));
@@ -122,3 +137,4 @@ public class IpAllowlistMiddleware
         return networks;
     }
 }
+
