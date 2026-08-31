@@ -14,7 +14,12 @@ public class LineContentClientTests
     private static LineContentClient CreateClient(Func<HttpRequestMessage, HttpResponseMessage> responder, out FakeHttpMessageHandler handler)
     {
         handler = new FakeHttpMessageHandler(responder);
-        var factory = new FakeHttpClientFactory(handler);
+        var authHandler = new MessageService.Web.Services.LineAuthorizationHandler(
+            new FakeOptionsMonitor<LineOptions>(new LineOptions { ChannelAccessToken = "test-token" }))
+        {
+            InnerHandler = handler
+        };
+        var factory = new FakeHttpClientFactory(authHandler);
         return new LineContentClient(factory, OptionsFactoryCreate(new LineOptions { ChannelAccessToken = "test-token" }));
     }
 

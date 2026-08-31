@@ -7,7 +7,7 @@
 
 ## appsettings.Production.*.json
 
-四個拓撲各一份樣板，對應 `Deployment:Mode` 的四個值：
+五個拓撲各一份樣板，對應 `Deployment:Mode` 的五個值：
 
 | 檔案 | 拓撲 | 用在哪台主機 |
 |---|---|---|
@@ -15,6 +15,7 @@
 | `appsettings.Production.Edge.json` | 拆機：Edge | 只收 webhook，透過 ingest API 轉送給 Core |
 | `appsettings.Production.Core.json` | 拆機：Core | 直連資料庫＋ingest API＋檢視端（兩台拆機時） |
 | `appsettings.Production.Viewer.json` | 三台拓撲、或兩台拓撲切法 A：Viewer | 純檢視端，不收 webhook、不開 ingest API（見 `docs/DEPLOYMENT-MODES.md` 的兩台拓撲兩種切法） |
+| `appsettings.Production.EdgeProxy.json` | Edge 沒有合法 HTTPS 憑證時 | 借用既有憑證的對外伺服器，只把 webhook 原封轉發給 Edge（見 `docs/DEPLOYMENT-GUIDE.md` 的 Part E1c） |
 
 複製樣板、改名成 `appsettings.Production.json`、填機密的完整步驟（含三台拓撲時 Core 端
 要加的 `Viewer:Enabled=false` override）見 `docs/DEPLOYMENT-GUIDE.md` 的 Part C，

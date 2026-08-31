@@ -42,8 +42,9 @@ public static class MessageServiceStartupValidationExtensions
         var lineOptions = validationScope.ServiceProvider.GetRequiredService<IOptions<LineOptions>>().Value;
         var viewerOptions = validationScope.ServiceProvider.GetRequiredService<IOptions<ViewerOptions>>().Value;
         var ingestOptions = validationScope.ServiceProvider.GetRequiredService<IOptions<IngestOptions>>().Value;
+        var edgeProxyOptions = validationScope.ServiceProvider.GetRequiredService<IOptions<EdgeProxyOptions>>().Value;
         DeploymentValidator.Validate(
-            deploymentOptions, lineOptions, viewerOptions, ingestOptions, validationLogger,
+            deploymentOptions, lineOptions, viewerOptions, ingestOptions, edgeProxyOptions, validationLogger,
             decision);
 
         // 救場沒有觸發、確實在用 SQL Server：偵測站台目錄下是否殘留救場期間累積的 SQLite 資料——

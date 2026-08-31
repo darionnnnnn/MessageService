@@ -2,7 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using MessageService.Options;
 using MessageService.Services;
-using OptionsFactory = Microsoft.Extensions.Options.Options;
+using MessageService.Tests.TestSupport;
 
 namespace MessageService.Tests.Services;
 
@@ -11,7 +11,7 @@ public class LineSignatureValidatorTests
     private const string Secret = "test-channel-secret";
 
     private static LineSignatureValidator CreateValidator(string secret = Secret) =>
-        new(OptionsFactory.Create(new LineOptions { ChannelSecret = secret }));
+        new(new FakeOptionsMonitor<LineOptions>(new LineOptions { ChannelSecret = secret }));
 
     private static string ComputeSignature(string secret, byte[] body)
     {

@@ -17,8 +17,6 @@ public class LineContentClient : ILineContentClient
     {
         _httpClient = httpClientFactory.CreateClient(HttpClientName);
         _httpClient.BaseAddress ??= new Uri("https://api-data.line.me/");
-        _httpClient.DefaultRequestHeaders.Authorization =
-            new AuthenticationHeaderValue("Bearer", options.Value.ChannelAccessToken);
 
         _stickerHttpClient = httpClientFactory.CreateClient(StickerHttpClientName);
         _stickerHttpClient.BaseAddress ??= new Uri("https://stickershop.line-scdn.net/");

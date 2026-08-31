@@ -9,13 +9,13 @@ namespace MessageService.Middleware;
 /// 只掛在 /api/ingest 路徑（見 Program.cs 用 UseWhen 限定的路徑群組），不影響 LINE webhook
 /// 端點——webhook 靠簽章驗證，這裡是另一組完全獨立的憑證，服務對服務之間的共用密鑰。
 /// 用固定長度＋固定時間比較，不讓「金鑰前幾個字元對不對」透過回應時間差異被推敲出來。</summary>
-public class IngestApiKeyMiddleware(RequestDelegate next, IOptions<IngestOptions> options, ILogger<IngestApiKeyMiddleware> logger)
+public class IngestApiKeyMiddleware(RequestDelegate next, IOptionsMonitor<IngestOptions> options, ILogger<IngestApiKeyMiddleware> logger)
 {
     private const string HeaderName = "X-Ingest-Key";
 
     public async Task InvokeAsync(HttpContext context)
     {
-        var expected = options.Value.ApiKey;
+        var expected = options.CurrentValue.ApiKey;
 
         // 理論上不會發生：DeploymentModeConvention 在金鑰未設定時已經把 controller 整個移除，
         // 請求根本不會有 endpoint 可以落地。留著這道防線只是不信任「路由層一定先擋到」。

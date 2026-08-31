@@ -28,8 +28,13 @@ public class HttpIngestSinkTests
         Func<HttpRequestMessage, HttpResponseMessage> responder, string apiKey = "test-key")
     {
         var handler = new FakeHttpMessageHandler(responder);
-        var httpClient = new HttpClient(handler) { BaseAddress = new Uri("https://db-host.example/") };
-        var sink = new HttpIngestSink(httpClient, OptionsFactory.Create(new IngestOptions { ApiKey = apiKey }), NullLogger<HttpIngestSink>.Instance);
+        var apiKeyHandler = new MessageService.Web.Services.IngestApiKeyHandler(
+            new FakeOptionsMonitor<IngestOptions>(new IngestOptions { ApiKey = apiKey }))
+        {
+            InnerHandler = handler
+        };
+        var httpClient = new HttpClient(apiKeyHandler) { BaseAddress = new Uri("https://db-host.example/") };
+        var sink = new HttpIngestSink(httpClient, NullLogger<HttpIngestSink>.Instance);
         return (sink, handler);
     }
 
@@ -115,7 +120,7 @@ public class HttpIngestSinkTests
     {
         var handler = new FakeHttpMessageHandler(_ => throw new HttpRequestException("connection refused"));
         var httpClient = new HttpClient(handler) { BaseAddress = new Uri("https://db-host.example/") };
-        var sink = new HttpIngestSink(httpClient, OptionsFactory.Create(new IngestOptions { ApiKey = "key" }), NullLogger<HttpIngestSink>.Instance);
+        var sink = new HttpIngestSink(httpClient, NullLogger<HttpIngestSink>.Instance);
 
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(
             () => sink.SubmitAsync(SampleEnvelope(), CancellationToken.None));

@@ -1,5 +1,6 @@
 using MessageService.Options;
 using MessageService.Services;
+using MessageService.Web.Configuration;
 using MessageService.Web.Startup;
 using NLog.Web;
 
@@ -33,6 +34,44 @@ var deploymentMode = deploymentOptions.Mode;
 var rawModeValue = builder.Configuration["Deployment:Mode"];
 var usedLegacyModeName = rawModeValue is not null
     && new[] { "Full", "Line", "Db" }.Contains(rawModeValue.Trim(), StringComparer.OrdinalIgnoreCase);
+
+// 加密設定檔（Edge 專屬）：疊在 appsettings 之上，支援熱生效。
+// 僅在 Deployment:Mode=Edge 時加入設定來源鏈最後面（優先權最高），並註冊 EdgeSettingsStore 單例供管理設定。
+if (deploymentMode is DeploymentMode.Edge)
+{
+    var encryptedSettingsPath = EncryptedSettingsFile.ResolvePath(builder.Environment.ContentRootPath);
+    // 這裡不掃 builder.Services 找已註冊的 ISettingsProtector——測試是在 WithWebHostBuilder
+    // 的 callback 裡註冊的，那比這裡晚跑，掃了永遠命中不到。測試改用 EdgeSettingsStore
+    // 建構時的 SetProtector 覆寫（見 EncryptedSettingsSource）。
+    //
+    // 非 Windows 沒有 DPAPI：這條路徑上機密會以明文落地，所以不靜默降級——
+    // 除非顯式設定 EdgeAdmin:AllowPlaintextSettings=true，否則直接擋啟動
+    ISettingsProtector encryptedSettingsProtector;
+    if (OperatingSystem.IsWindows())
+    {
+        encryptedSettingsProtector = new DpapiSettingsProtector();
+    }
+    else if (builder.Configuration.GetValue("EdgeAdmin:AllowPlaintextSettings", false))
+    {
+        encryptedSettingsProtector = new PlaintextSettingsProtector();
+    }
+    else
+    {
+        throw new InvalidOperationException(
+            "Deployment:Mode=Edge 的加密設定檔需要 Windows DPAPI，這個作業系統不支援。" +
+            "若確定要讓設定以明文落地（僅限測試環境），請設定 EdgeAdmin:AllowPlaintextSettings=true。");
+    }
+
+    var encryptedSource = new EncryptedSettingsConfigurationSource(encryptedSettingsPath, encryptedSettingsProtector);
+    ((IConfigurationBuilder)builder.Configuration).Add(encryptedSource);
+
+    builder.Services.AddSingleton(encryptedSettingsProtector);
+    builder.Services.AddSingleton(sp => new EdgeSettingsStore(
+        encryptedSettingsPath,
+        sp.GetRequiredService<ISettingsProtector>(),
+        encryptedSource.Provider,
+        sp.GetRequiredService<ILogger<EdgeSettingsStore>>()));
+}
 
 // 同樣是「容器建好之前就要知道」的原始讀取——各能力是否開啟只取決於模式與這些 override 設定，
 // 不需要等 DI 容器建好；DeploymentCapabilities.Derive 是全站唯一的推導點（見該類別說明）

@@ -15,9 +15,8 @@ namespace MessageService.Services;
 /// 重試不會變好，判定為永久失敗直接死信；其餘（含 401/403，可能是金鑰設定錯，
 /// 修好設定後重試會成功）與所有 5xx／連線層錯誤一律當暫時性失敗，往外拋讓 outbox
 /// 照退避排程重試。</summary>
-public class HttpIngestSink(HttpClient httpClient, IOptions<IngestOptions> options, ILogger<HttpIngestSink> logger) : IIngestSink
+public class HttpIngestSink(HttpClient httpClient, ILogger<HttpIngestSink> logger) : IIngestSink
 {
-    private const string HeaderName = "X-Ingest-Key";
 
     // 靜態旗標，跨這顆類別所有實例共用——AddHttpClient<TClient,TImplementation> 預設每次
     // 解析都給新實例，單一欄位存不住「已經印過警告」的狀態。刻意不是「已知 Core 不支援批次」
@@ -129,9 +128,6 @@ public class HttpIngestSink(HttpClient httpClient, IOptions<IngestOptions> optio
         {
             Content = JsonContent.Create(envelope)
         };
-        // API 金鑰是設定值、不是使用者輸入，不會出現 HttpHeaders 的合法字元檢查會刁難的內容，
-        // 但仍用 TryAddWithoutValidation 避免萬一金鑰帶了不尋常字元讓整個請求直接炸掉
-        request.Headers.TryAddWithoutValidation(HeaderName, options.Value.ApiKey ?? "");
 
         try
         {
@@ -156,7 +152,6 @@ public class HttpIngestSink(HttpClient httpClient, IOptions<IngestOptions> optio
         {
             Content = JsonContent.Create(envelopes)
         };
-        request.Headers.TryAddWithoutValidation(HeaderName, options.Value.ApiKey ?? "");
 
         try
         {

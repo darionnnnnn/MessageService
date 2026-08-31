@@ -45,4 +45,15 @@ public class IpAllowlistMiddlewareTests
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
     }
+
+    [Fact]
+    public async Task Request_WithMalformedCidrMixedWithValidIp_DoesNotThrowAndValidIpSucceeds()
+    {
+        // 白名單裡混一筆格式錯誤的 CIDR ＋ 一筆正確的 → 不丟例外，正確那筆照常生效（RFC 5737 格式保留）
+        using var fixture = new WebAppFactoryFixture(["192.0.2.5/24", "127.0.0.1", "invalid-ip-string"]);
+
+        var response = await fixture.Client.GetAsync("/api/groups");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
 }

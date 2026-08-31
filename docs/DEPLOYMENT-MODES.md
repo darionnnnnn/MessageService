@@ -1,27 +1,83 @@
 # 部署角色（Deployment Modes）
 
-> 本文件只講現行的四種角色定義與設定；合併專案的原因、設計決策理由、雙行程端到端驗證紀錄
+> 本文件只講現行的五種角色定義與設定；合併專案的原因、設計決策理由、雙行程端到端驗證紀錄
 > 見 [docs/history/DEPLOYMENT-MODES-DECISIONS.md](history/DEPLOYMENT-MODES-DECISIONS.md)——
 > 非必要不需要讀，避免浪費 token。
 
 `MessageService.Web` 是唯一的可發佈專案，同一份成品可以部署成一台包辦，也可以拆成兩三台，
 由每台主機各自的 `Deployment:Mode` 設定決定角色——不是不同的部署產物，只是設定差異。
-`Deployment:Mode` 的合法值是 `AllInOne`／`Edge`／`Core`／`Viewer`；舊名稱 `Full`／`Line`／`Db`
+`Deployment:Mode` 的合法值是 `AllInOne`／`Edge`／`Core`／`Viewer`／`EdgeProxy`；舊名稱 `Full`／`Line`／`Db`
 仍是相容別名（讀到時 log 記一則提醒，不擋啟動）。
 
-## 四種角色
+## 五種角色
 
-| | AllInOne | Edge | Core | Viewer |
-|---|---|---|---|---|
-| `/api/line/webhook` | ✓ | ✓ | ✗（路由不存在，非拒絕） | ✗ |
-| `/api/ingest/*` | 視 `Ingest:ApiKey` 而定 | ✗ | 視 `Ingest:ApiKey` 而定 | ✗ |
-| 檢視端 UI＋API | ✓ | ✗ | ✓（可用 `Viewer:Enabled=false` 關掉，三台拓撲用） | ✓ |
-| 直連主資料庫 | ✓ | ✗ | ✓ | ✓ |
-| 本機 outbox＋排空 | ✓ | ✓ | ✗（無 webhook，無事件可寫） | ✗ |
-| 保留期清除 | ✓ | ✗ | ✓ | ✗（即使直連資料庫也不跑，避免三台拓撲下跟 Core 搶著清同一張表） |
-| 貼圖內容回填 | ✓ | ✗ | ✓ | ✗（同上：維護類背景工作只由一台負責。兩台同跑會撞唯一鍵，程式會逐筆補完該批未撞的部分，但那是白工） |
-| `Line:OutboundHere` 預設 | `true` | `true` | `false` | `false` |
-| 落地方式 | outbox → `DirectIngestSink` | outbox → `HttpIngestSink` → 對方的 `/api/ingest/events(-batch)` | `IngestController` → `DirectIngestSink` | 不適用 |
+| | AllInOne | Edge | Core | Viewer | EdgeProxy |
+|---|---|---|---|---|---|
+| `/api/line/webhook` | ✓ | ✓ | ✗（路由不存在，非拒絕） | ✗ | ✓（不處理，原封轉發給 Edge） |
+| `/api/ingest/*` | 視 `Ingest:ApiKey` 而定 | ✗ | 視 `Ingest:ApiKey` 而定 | ✗ | ✗ |
+| 檢視端 UI＋API | ✓ | ✗ | ✓（可用 `Viewer:Enabled=false` 關掉，三台拓撲用） | ✓ | ✗ |
+| 直連主資料庫 | ✓ | ✗ | ✓ | ✓ | ✗ |
+| 本機 outbox＋排空 | ✓ | ✓ | ✗（無 webhook，無事件可寫） | ✗ | ✗（零狀態，不緩衝） |
+| 保留期清除 | ✓ | ✗ | ✓ | ✗（即使直連資料庫也不跑，避免三台拓撲下跟 Core 搶著清同一張表） | ✗ |
+| 貼圖內容回填 | ✓ | ✗ | ✓ | ✗（同上：維護類背景工作只由一台負責。兩台同跑會撞唯一鍵，程式會逐筆補完該批未撞的部分，但那是白工） | ✗ |
+| `Line:OutboundHere` 預設 | `true` | `true` | `false` | `false` | `false`（不對外呼叫 LINE API） |
+| 落地方式 | outbox → `DirectIngestSink` | outbox → `HttpIngestSink` → 對方的 `/api/ingest/events(-batch)` | `IngestController` → `DirectIngestSink` | 不適用 | 不落地，只轉發 |
+
+### EdgeProxy：借用既有 HTTPS 入口
+
+LINE 要求 webhook URL 是合法憑證的 HTTPS。Edge 主機沒有憑證時，在公司已有合法憑證的
+對外伺服器上，於既有 IIS 站台底下加一個 application，部署**同一份產物**並設
+`Deployment:Mode=EdgeProxy`：
+
+```
+LINE ──HTTPS──▶ EdgeProxy（有憑證的對外伺服器）──HTTP──▶ Edge（內網）
+```
+
+它只做一件事：把 `POST /api/line/webhook` 的請求**原封**轉給 `EdgeProxy:TargetBaseUrl`。
+request body 從串流直接複製成位元組轉發，路徑上沒有任何解析——`X-Line-Signature` 是對
+raw body 算的 HMAC，任何反序列化再序列化都會讓 Edge 驗簽失敗。轉發的標頭只有
+`Content-Type` 與 `X-Line-Signature` 兩個，其餘一律不轉。
+
+其他一切它都不做：不碰資料庫、不緩衝、不落地、不重試、不驗簽、不持有任何金鑰。
+除了兩支健康檢查探針（`/healthz` 與 `/healthz/ready`，後者在沒有資料庫的模式一律回 200）
+之外，所有路徑都回 404。Edge 不可達時回 502，由 LINE 的 redelivery 重送
+（Edge 端 outbox 與落地端的唯一索引保證重送安全）。
+
+### 三種拓撲組合
+
+Edge 與 EdgeProxy 的關係由兩個設定決定，可以組出三種環境：
+
+| 環境 | LINE Console 的 Webhook URL | `Line:OutboundVia`（Edge 端） | Edge 需要對外網路？ |
+|---|---|---|---|
+| 完全不用 proxy | 直指 Edge | `Direct`（預設） | 需要（收 webhook＋打 LINE API） |
+| proxy 進、Edge 出 | 指向 EdgeProxy | `Direct`（預設） | 需要（打 LINE API） |
+| 全走 proxy | 指向 EdgeProxy | `EdgeProxy` | **不需要** |
+
+第三種下 Edge 對 LINE 的四類 outbound（媒體、貼圖、群組／成員名稱、頭貼圖檔）
+全部改經 EdgeProxy 轉發，Edge 可以完全沒有 internet。
+
+### 防火牆方向
+
+| 需要開通 | 什麼情況下需要 |
+|---|---|
+| proxy → Edge | 用 EdgeProxy 收 webhook 時（轉發 webhook） |
+| **Edge → proxy** | `Line:OutboundVia=EdgeProxy` 時（LINE outbound 走 proxy）——**與上一條反向**，只開了 proxy→Edge 的環境要另外開通這一條 |
+| Core ↔ Edge | 依 `Ingest:Channel` 而定，見上方「通道方向」 |
+
+### EdgeProxy 上的兩組路由與白名單
+
+| 路由 | 白名單 | 為什麼 |
+|---|---|---|
+| `/api/line/webhook` | **不掛** | 來源是 LINE，IP 不固定；靠 Edge 端的簽章驗證把關 |
+| `/line/*`（LINE outbound 轉發） | `EdgeProxy:AllowedClientIps`（填 Edge 的 IP，**空＝全擋**） | 來源固定就是 Edge，可以也應該鎖死 |
+
+`/line/*` 的目標網域**寫死在程式裡**：`/line/api`→`api.line.me`、`/line/data`→`api-data.line.me`、
+`/line/sticker`→`stickershop.line-scdn.net`。頭貼圖檔的網址是 LINE 在 API 回應裡給的、
+網域不固定，所以走 `/line/image/{host}/{path}`——`{host}` 必須通過寫死的網域字尾允許清單
+（`.line-scdn.net`、`.line.me`）、字元集檢查與解析後的一致性檢查三道關卡才會被轉發，
+不符合一律 403。這幾道是為了讓它**不會變成開放代理**。
+
+`Ingest:AllowedClientIps` 與這兩組路由都無關——那份白名單保護的是 `/api/edge/*`。
 
 內容下載／頭貼快取完全獨立於模式，只看 `Line:OutboundHere`（`bool?`，未顯式設定時依模式
 推導，見上表）——這台主機要不要對外呼叫 LINE API。「頭貼快取」除了名稱與來源 URL，也包含
@@ -69,6 +125,7 @@
 | （無） | `Http:UseHttpsRedirection`（`bool`，預設 `false`） | 新增，IIS 直接綁 HTTPS 的部署不需要應用層再轉址一次 |
 | （無） | `Database:AutoMigrate`（`bool`，預設 `true`） | 新增，啟動時自動跑 `Database.Migrate()`；**三台拓撲請只在 Core 開、Viewer 設 `false`**（鎖不跨機器，見 DEPLOYMENT-GUIDE） |
 | （無） | `Database:SqliteBusyTimeoutMs`／`ContentDownload:ClaimLeaseMinutes`／`ContentDownload:MaxPendingIdsPerScan` | 新增，說明見 README 設定表 |
+| （無） | `EdgeProxy:TargetBaseUrl`（必填）／`EdgeProxy:TimeoutSeconds`（預設 10） | 新增，只有 `Deployment:Mode=EdgeProxy` 會用到（見上方「EdgeProxy」） |
 | （無） | `Ingest:Channel`（預設 `Auto`）／`Ingest:EdgeBaseUrl`（預設空）／`Ingest:PullIntervalSeconds`／`Ingest:PullActivationSeconds`／`Ingest:PullFailureMaxBackoffSeconds`／`Ingest:PullStagingMaxBytes`／`Ingest:ChannelProbeIntervalMinutes` | 新增，通道方向相關；全部有預設值，不改設定即維持推送行為（見上方「通道方向」） |
 
 ## 通道方向：Edge↔Core 只需要開通單向防火牆
@@ -227,6 +284,14 @@ Core 則沒有問題（參數預設值就是舊行為）。`startupAgeSeconds`�
   宣告，Edge 不做任何探測。要自動升級請用預設的 `Auto`。
 - **拉取方向的媒體暫存在記憶體**：Edge 重啟會遺失暫存中的內容，那幾筆會在下一輪 poll
   被重新派工、重新從 LINE 下載一次（LINE 內容 API 不冪等計費）。
+- **`Line:OutboundVia=EdgeProxy` 時 proxy 成為單點**：Edge 的所有 LINE outbound 都經過它，
+  proxy 停機期間媒體與名稱／頭貼都下載不了（訊息本身不受影響，靠 outbox 與 Core 輪詢）。
+  下載失敗會走既有的重試狀態機，proxy 恢復後自動補上。
+- **Edge 設定頁的守門白名單不能從設定頁改**：`EdgeAdmin:AllowedClientIps` 只讀 appsettings。
+  把它放進設定頁能改的地方，等於設錯一次就把自己鎖在門外、只能改檔案救回來。
+- **EdgeProxy 不回報心跳**：它不認識 Core、也沒有資料庫，設定頁的「主機狀態」看不到這台。
+  proxy 停機的症狀是「訊息停止進來、LINE Console 的 Verify 失敗」；要主動監控請用外部
+  探測打它的 `/healthz`。
 - **Pull 模式下 outbox 死信沒有告警**：每小時的死信計數 log 由轉送服務負責，Pull 模式
   不註冊它。死信積壓只能從 Core 端看到 OutboxPending 持續增加來間接察覺。
 - **拉取方向的名稱／頭貼結果沒有 ack**：poll 回應在傳輸中遺失時該筆結果會消失，

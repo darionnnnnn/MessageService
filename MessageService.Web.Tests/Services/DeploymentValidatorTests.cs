@@ -40,12 +40,15 @@ public class DeploymentValidatorTests
             ChannelAccessToken = channelAccessToken ?? (outboundHere ? "token" : "")
         };
 
-    private static void Validate(DeploymentMode mode, LineOptions? line = null, IngestOptions? ingest = null, ViewerOptions? viewer = null) =>
+    private static void Validate(
+        DeploymentMode mode, LineOptions? line = null, IngestOptions? ingest = null,
+        ViewerOptions? viewer = null, EdgeProxyOptions? edgeProxy = null) =>
         DeploymentValidator.Validate(
             new DeploymentOptions { Mode = mode },
             line ?? Line(),
             viewer ?? new ViewerOptions(),
             ingest ?? new IngestOptions(),
+            edgeProxy ?? new EdgeProxyOptions(),
             NullLogger.Instance);
 
     [Fact]
@@ -219,6 +222,7 @@ public class DeploymentValidatorTests
             Line(channelSecret: "", outboundHere: true, channelAccessToken: "token"),
             new ViewerOptions(),
             new IngestOptions { ApiKey = "key" },
+            new EdgeProxyOptions(),
             logger);
 
         Assert.Contains(logger.Warnings, w => w.Contains("重複下載"));
@@ -235,6 +239,7 @@ public class DeploymentValidatorTests
             Line(channelSecret: "secret", outboundHere: true, channelAccessToken: "token"),
             new ViewerOptions(),
             new IngestOptions { BaseUrl = "https://core-host", ApiKey = "key" },
+            new EdgeProxyOptions(),
             logger);
 
         Assert.DoesNotContain(logger.Warnings, w => w.Contains("重複下載"));
@@ -327,6 +332,7 @@ public class DeploymentValidatorTests
             Line(channelSecret: "secret"),
             new ViewerOptions { AllowedClientIps = [] },
             new IngestOptions(),
+            new EdgeProxyOptions(),
             logger);
 
         Assert.Contains(logger.Warnings, w => w.Contains("AllowedClientIps"));
@@ -342,6 +348,7 @@ public class DeploymentValidatorTests
             Line(channelSecret: "secret"),
             new ViewerOptions { AllowedClientIps = ["10.0.0.0/24"] },
             new IngestOptions(),
+            new EdgeProxyOptions(),
             logger);
 
         Assert.DoesNotContain(logger.Warnings, w => w.Contains("AllowedClientIps"));
@@ -366,6 +373,7 @@ public class DeploymentValidatorTests
             Line(channelSecret: "secret"),
             new ViewerOptions { AllowedClientIps = ["10.0.0.0/24"] },
             new IngestOptions(),
+            new EdgeProxyOptions(),
             logger,
             Db(configuredProvider: "Sqlite", effectiveProvider: "Sqlite", wasInferred: false,
                 hasSqlServerConnectionString: true));
@@ -383,6 +391,7 @@ public class DeploymentValidatorTests
             Line(channelSecret: "secret"),
             new ViewerOptions { AllowedClientIps = ["10.0.0.0/24"] },
             new IngestOptions(),
+            new EdgeProxyOptions(),
             logger,
             Db(configuredProvider: "Sqlite", effectiveProvider: "Sqlite", wasInferred: false));
 
@@ -399,6 +408,7 @@ public class DeploymentValidatorTests
             Line(channelSecret: "secret"),
             new ViewerOptions { AllowedClientIps = ["10.0.0.0/24"] },
             new IngestOptions(),
+            new EdgeProxyOptions(),
             logger,
             Db(configuredProvider: "SqlServer", effectiveProvider: "SqlServer", wasInferred: false,
                 hasSqlServerConnectionString: true));
@@ -418,6 +428,7 @@ public class DeploymentValidatorTests
             Line(channelSecret: "secret"),
             new ViewerOptions { AllowedClientIps = ["10.0.0.0/24"] },
             new IngestOptions(),
+            new EdgeProxyOptions(),
             logger,
             Db(configuredProvider: null, effectiveProvider: "SqlServer", wasInferred: true,
                 hasSqlServerConnectionString: true));
@@ -434,6 +445,7 @@ public class DeploymentValidatorTests
                 Line(channelSecret: "secret"),
                 new ViewerOptions { AllowedClientIps = ["10.0.0.0/24"] },
                 new IngestOptions(),
+                new EdgeProxyOptions(),
                 NullLogger.Instance,
                 Db(configuredProvider: "SqlServer", effectiveProvider: "SqlServer", wasInferred: false,
                     hasSqlServerConnectionString: false)));
@@ -456,7 +468,8 @@ public class DeploymentValidatorTests
             : new IngestOptions { ApiKey = "key" };
 
         DeploymentValidator.Validate(
-            new DeploymentOptions { Mode = mode }, line, new ViewerOptions(), ingest, logger,
+            new DeploymentOptions { Mode = mode }, line, new ViewerOptions(), ingest,
+            new EdgeProxyOptions(), logger,
             Db(sqliteFallbackConfigured: true));
 
         Assert.Contains(logger.Warnings, w => w.Contains("SqliteFallback"));
@@ -472,6 +485,7 @@ public class DeploymentValidatorTests
             Line(channelSecret: "secret"),
             new ViewerOptions { AllowedClientIps = ["10.0.0.0/24"] },
             new IngestOptions(),
+            new EdgeProxyOptions(),
             logger,
             Db(sqliteFallbackConfigured: true));
 
@@ -488,6 +502,7 @@ public class DeploymentValidatorTests
             Line(channelSecret: "secret"),
             new ViewerOptions { AllowedClientIps = ["10.0.0.0/24"] },
             new IngestOptions(),
+            new EdgeProxyOptions(),
             logger,
             Db(configuredProvider: "SqlServer", effectiveProvider: "Sqlite", wasInferred: false,
                 hasSqlServerConnectionString: true, sqliteFallbackTriggered: true,
@@ -506,6 +521,7 @@ public class DeploymentValidatorTests
             Line(channelSecret: "secret"),
             new ViewerOptions { AllowedClientIps = ["10.0.0.0/24"] },
             new IngestOptions(),
+            new EdgeProxyOptions(),
             logger,
             Db(configuredProvider: "SqlServer", effectiveProvider: "SqlServer", wasInferred: false,
                 hasSqlServerConnectionString: true));
@@ -522,5 +538,191 @@ public class DeploymentValidatorTests
             ingest: new IngestOptions { EdgeBaseUrl = "https://edge.example/", ApiKey = "" }));
 
         Assert.Contains("Ingest:ApiKey", ex.Message);
+    }
+
+    // ==== EdgeProxy 模式驗證 ====
+
+    [Fact]
+    public void EdgeProxy_WithTargetBaseUrl_DoesNotThrow()
+    {
+        var ex = Record.Exception(() => Validate(
+            DeploymentMode.EdgeProxy,
+            edgeProxy: new EdgeProxyOptions { TargetBaseUrl = "http://192.0.2.10/MSLine" }));
+
+        Assert.Null(ex);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void EdgeProxy_WithoutTargetBaseUrl_Throws(string? targetBaseUrl)
+    {
+        var ex = Assert.Throws<InvalidOperationException>(() => Validate(
+            DeploymentMode.EdgeProxy,
+            edgeProxy: new EdgeProxyOptions { TargetBaseUrl = targetBaseUrl }));
+
+        Assert.Contains("EdgeProxy:TargetBaseUrl", ex.Message);
+    }
+
+    [Fact]
+    public void EdgeProxy_WithLeftoverLineOrIngestOrViewerConfig_Warns()
+    {
+        var logger = new CapturingLogger();
+
+        DeploymentValidator.Validate(
+            new DeploymentOptions { Mode = DeploymentMode.EdgeProxy },
+            Line(channelSecret: "secret", outboundHere: false, channelAccessToken: "token"),
+            new ViewerOptions { Enabled = true },
+            new IngestOptions { BaseUrl = "https://core-host", ApiKey = "key", EdgeBaseUrl = "https://edge-host" },
+            new EdgeProxyOptions { TargetBaseUrl = "http://192.0.2.10/MSLine" },
+            logger);
+
+        Assert.Contains(logger.Warnings, w => w.Contains("EdgeProxy 只做轉發"));
+    }
+
+    [Fact]
+    public void EdgeProxy_CleanConfig_DoesNotWarn()
+    {
+        var logger = new CapturingLogger();
+
+        DeploymentValidator.Validate(
+            new DeploymentOptions { Mode = DeploymentMode.EdgeProxy },
+            new LineOptions { ChannelSecret = "", ChannelAccessToken = "", OutboundHere = null },
+            new ViewerOptions { Enabled = null },
+            new IngestOptions { BaseUrl = null, ApiKey = null, EdgeBaseUrl = null },
+            new EdgeProxyOptions { TargetBaseUrl = "http://192.0.2.10/MSLine" },
+            logger);
+
+        Assert.DoesNotContain(logger.Warnings, w => w.Contains("EdgeProxy 只做轉發"));
+    }
+
+    [Fact]
+    public void EdgeProxy_WithLeftoverDatabaseConnectionString_Warns()
+    {
+        var logger = new CapturingLogger();
+
+        // 整份設定檔從 Core 複製過來時最常見的殘留——資料庫區塊對 EdgeProxy 完全沒有作用
+        DeploymentValidator.Validate(
+            new DeploymentOptions { Mode = DeploymentMode.EdgeProxy },
+            new LineOptions { ChannelSecret = "", ChannelAccessToken = "", OutboundHere = null },
+            new ViewerOptions(),
+            new IngestOptions(),
+            new EdgeProxyOptions { TargetBaseUrl = "http://192.0.2.10/MSLine" },
+            logger,
+            DatabaseStartupDecision.Default with { HasSqlServerConnectionString = true });
+
+        Assert.Contains(logger.Warnings, w => w.Contains("EdgeProxy 只做轉發"));
+    }
+
+    [Fact]
+    public void EdgeProxy_WithFullCopiedEdgeConfig_DoesNotThrow_OnlyWarns()
+    {
+        var logger = new CapturingLogger();
+
+        // 部署 EdgeProxy 最常見的做法就是整份 appsettings 從 Edge/Core 複製過來改 Mode——
+        // 這些殘留（EdgeBaseUrl 缺 ApiKey、OutboundHere=true 缺 token、SqlServer 缺連線字串）
+        // 都各自對到其他模式的擋啟動規則，EdgeProxy 必須在自己的檢查後直接返回，
+        // 否則公網那台部署當天就起不來、錯誤訊息還指向它根本沒有的功能
+        var ex = Record.Exception(() => DeploymentValidator.Validate(
+            new DeploymentOptions { Mode = DeploymentMode.EdgeProxy },
+            new LineOptions { ChannelSecret = "secret", ChannelAccessToken = "", OutboundHere = true },
+            new ViewerOptions { Enabled = true },
+            new IngestOptions { BaseUrl = "https://core-host", ApiKey = "", EdgeBaseUrl = "https://edge-host" },
+            new EdgeProxyOptions { TargetBaseUrl = "http://192.0.2.10/MSLine" },
+            logger,
+            DatabaseStartupDecision.Default with
+            {
+                ConfiguredProvider = "SqlServer", EffectiveProvider = "SqlServer",
+                HasSqlServerConnectionString = false,
+            }));
+
+        Assert.Null(ex);
+        Assert.Contains(logger.Warnings, w => w.Contains("EdgeProxy 只做轉發"));
+    }
+
+    [Theory]
+    [InlineData("192.0.2.10/MSLine")]
+    [InlineData("ftp://edge-host/MSLine")]
+    public void EdgeProxy_MalformedTargetBaseUrl_ThrowsAtStartup(string target)
+    {
+        // 漏打 http:// 這種手滑若不在啟動時擋，會變成每則 webhook 都 502、訊息靜默全掉
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            Validate(DeploymentMode.EdgeProxy, Line(channelSecret: ""),
+                edgeProxy: new EdgeProxyOptions { TargetBaseUrl = target }));
+
+        Assert.Contains("http", ex.Message);
+    }
+
+    [Fact]
+    public void Edge_WithOutboundViaEdgeProxy_WithoutProxyUrl_Throws()
+    {
+        var line = Line(channelSecret: "secret");
+        line.OutboundVia = LineOutboundVia.EdgeProxy;
+        line.OutboundProxyBaseUrl = "";
+
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            Validate(DeploymentMode.Edge, line, new IngestOptions { BaseUrl = "https://db-host", ApiKey = "key" }));
+
+        Assert.Contains("Line:OutboundProxyBaseUrl", ex.Message);
+    }
+
+    [Fact]
+    public void Edge_WithOutboundViaEdgeProxy_MalformedProxyUrl_Throws()
+    {
+        var line = Line(channelSecret: "secret");
+        line.OutboundVia = LineOutboundVia.EdgeProxy;
+        line.OutboundProxyBaseUrl = "192.0.2.10/MSLine"; // 漏 scheme
+
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            Validate(DeploymentMode.Edge, line, new IngestOptions { BaseUrl = "https://db-host", ApiKey = "key" }));
+
+        Assert.Contains("Line:OutboundProxyBaseUrl", ex.Message);
+    }
+
+    [Fact]
+    public void Edge_WithOutboundViaEdgeProxy_ValidProxyUrl_DoesNotThrow()
+    {
+        var line = Line(channelSecret: "secret");
+        line.OutboundVia = LineOutboundVia.EdgeProxy;
+        line.OutboundProxyBaseUrl = "http://192.0.2.10/MSLine";
+
+        var ex = Record.Exception(() =>
+            Validate(DeploymentMode.Edge, line, new IngestOptions { BaseUrl = "https://db-host", ApiKey = "key" }));
+
+        Assert.Null(ex);
+    }
+
+    [Fact]
+    public void EdgeProxy_WithOutboundViaEdgeProxy_DoesNotThrow()
+    {
+        // EdgeProxy 模式在自己的區塊就 return，不受這些檢查影響
+        var line = Line(channelSecret: "");
+        line.OutboundVia = LineOutboundVia.EdgeProxy;
+        line.OutboundProxyBaseUrl = ""; // 故意留空
+
+        var ex = Record.Exception(() =>
+            Validate(DeploymentMode.EdgeProxy, line, edgeProxy: new EdgeProxyOptions { TargetBaseUrl = "http://192.0.2.10/MSLine" }));
+
+        Assert.Null(ex);
+    }
+
+    [Fact]
+    public void Core_WithOutboundViaEdgeProxy_LogsWarning()
+    {
+        var logger = new CapturingLogger();
+        var line = Line(channelSecret: "");
+        line.OutboundVia = LineOutboundVia.EdgeProxy;
+        line.OutboundProxyBaseUrl = "http://192.0.2.10/MSLine";
+
+        DeploymentValidator.Validate(
+            new DeploymentOptions { Mode = DeploymentMode.Core },
+            line,
+            new ViewerOptions(),
+            new IngestOptions { ApiKey = "key" },
+            new EdgeProxyOptions(),
+            logger);
+
+        Assert.Contains(logger.Warnings, w => w.Contains("Line:OutboundVia=EdgeProxy 只在對外打 LINE API 的模式"));
     }
 }

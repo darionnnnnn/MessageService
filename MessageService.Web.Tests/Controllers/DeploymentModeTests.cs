@@ -13,6 +13,7 @@ using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Http;
 using Microsoft.Extensions.Options;
 
 namespace MessageService.Tests.Controllers;
@@ -218,13 +219,14 @@ public class DeploymentModeTests : IDisposable
     [Theory]
     [InlineData("ingest")]
     [InlineData("ingest-content")]
-    public void LineModeWithOutboundHere_NamedHttpClients_CarryApiKeyHeader(string clientName)
+    public async Task LineModeWithOutboundHere_NamedHttpClients_CarryApiKeyHeader(string clientName)
     {
         // 真的抓過一次的 bug：ApiContentWorkSource／ApiProfileStore 打的請求完全沒帶
         // X-Ingest-Key，全部被 IngestApiKeyMiddleware 擋成 401——起兩個真實行程互打才測出來，
         // 因為其餘測試都是直接呼叫 controller 或用 FakeHttpMessageHandler，沒有一個真的
-        // 經過這裡驗證的 HttpClient 具名註冊本身。修法是在註冊時就把標頭設成預設值，
-        // 這裡直接從 DI 解析具名 client 確認標頭真的在，防止回歸。
+        // 經過這裡驗證的 HttpClient 具名註冊本身。
+        // 改為 DelegatingHandler 後，標頭在 SendAsync 時附加，透過發送請求給自訂 PrimaryHandler 來驗證。
+        HttpRequestMessage? sentRequest = null;
         using var factory = CreateFactory(builder =>
         {
             builder.UseSetting("Deployment:Mode", "Line");
@@ -233,13 +235,31 @@ public class DeploymentModeTests : IDisposable
             builder.UseSetting("Line:ChannelAccessToken", "dummy-token");
             builder.UseSetting("Ingest:BaseUrl", "https://db-host.example");
             builder.UseSetting("Ingest:ApiKey", "the-shared-secret");
+            builder.ConfigureServices(services =>
+            {
+                services.Configure<HttpClientFactoryOptions>(clientName, options =>
+                {
+                    options.HttpMessageHandlerBuilderActions.Add(b =>
+                    {
+                        b.PrimaryHandler = new FakeHttpMessageHandler(req =>
+                        {
+                            sentRequest = req;
+                            return new HttpResponseMessage(HttpStatusCode.OK);
+                        });
+                    });
+                });
+            });
         }, allowLocalhost: false);
 
         using var scope = factory.Services.CreateScope();
         var httpClientFactory = scope.ServiceProvider.GetRequiredService<IHttpClientFactory>();
         var client = httpClientFactory.CreateClient(clientName);
 
-        var headerValues = client.DefaultRequestHeaders.GetValues("X-Ingest-Key");
+        using var request = new HttpRequestMessage(HttpMethod.Get, "test");
+        await client.SendAsync(request);
+
+        Assert.NotNull(sentRequest);
+        var headerValues = sentRequest!.Headers.GetValues("X-Ingest-Key");
         Assert.Equal("the-shared-secret", Assert.Single(headerValues));
     }
 
@@ -592,6 +612,7 @@ public class DeploymentModeTests : IDisposable
             builder.ConfigureServices(services =>
             {
                 services.AddSingleton<IOptions<IngestOptions>>(new OptionsWrapper<IngestOptions>(ingestOptions));
+                services.AddSingleton<IOptionsMonitor<IngestOptions>>(new FakeOptionsMonitor<IngestOptions>(ingestOptions));
             });
         });
         using var client = factory.CreateClient();
@@ -1029,5 +1050,160 @@ public class DeploymentModeTests : IDisposable
         var item = Assert.Single(pollBody.Messages);
         Assert.Equal("evt-2", item.WebhookEventId);
     }
+
+    // === EdgeProxy 模式整合測試 ===
+
+    [Fact]
+    public async Task EdgeProxyMode_WithTargetBaseUrl_StartsSuccessfully_AndResponds()
+    {
+        using var factory = CreateFactory(builder =>
+        {
+            builder.UseSetting("Deployment:Mode", "EdgeProxy");
+            builder.UseSetting("EdgeProxy:TargetBaseUrl", "http://192.0.2.10/MSLine");
+        }, allowLocalhost: false);
+
+        var ex = Record.Exception(() => factory.CreateClient());
+        Assert.Null(ex);
+
+        using var client = factory.CreateClient();
+        var response = await client.GetAsync("/healthz");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    [Fact]
+    public void EdgeProxyMode_EdgeOnlyServices_AreNotRegisteredAtAll()
+    {
+        using var factory = CreateFactory(builder =>
+        {
+            builder.UseSetting("Deployment:Mode", "EdgeProxy");
+            builder.UseSetting("EdgeProxy:TargetBaseUrl", "http://192.0.2.10/MSLine");
+        }, allowLocalhost: false);
+
+        // 直接斷言「沒註冊」而不是「解析得到」：EdgeProxy 若掉進為 Edge 寫的註冊分支，
+        // 這些服務會被註冊、然後在背景服務第一次用到時才解析失敗（相依的 EdgeChannelState
+        // 只在 ReceivesWebhook 時註冊）。那種失敗不會擋啟動、只會每個心跳週期噴一次例外，
+        // 「host 起得來」這種斷言完全抓不到，必須從註冊表本身查
+        using var scope = factory.Services.CreateScope();
+        Assert.Null(scope.ServiceProvider.GetService<IHeartbeatReporter>());
+        Assert.Null(scope.ServiceProvider.GetService<IIngestSink>());
+        Assert.Null(scope.ServiceProvider.GetService<IContentWorkSource>());
+        Assert.Null(scope.ServiceProvider.GetService<IProfileStore>());
+        Assert.Null(scope.ServiceProvider.GetService<MessageService.Outbox.OutboxDbContext>());
+    }
+
+    [Fact]
+    public async Task EdgeProxyMode_Endpoints_ReturnNotFound()
+    {
+        using var factory = CreateFactory(builder =>
+        {
+            builder.UseSetting("Deployment:Mode", "EdgeProxy");
+            builder.UseSetting("EdgeProxy:TargetBaseUrl", "http://192.0.2.10/MSLine");
+        }, allowLocalhost: false);
+
+        using var client = factory.CreateClient();
+
+        var ingestResponse = await client.PostAsJsonAsync("/api/ingest/events", SampleEnvelope());
+        Assert.Equal(HttpStatusCode.NotFound, ingestResponse.StatusCode);
+
+        var pollResponse = await client.PostAsync("/api/edge/poll", null);
+        Assert.Equal(HttpStatusCode.NotFound, pollResponse.StatusCode);
+
+        var homeResponse = await client.GetAsync("/");
+        Assert.Equal(HttpStatusCode.NotFound, homeResponse.StatusCode);
+    }
+
+    [Fact]
+    public void EdgeProxyMode_HostedServices_DoNotIncludeBackgroundWorkers()
+    {
+        using var factory = CreateFactory(builder =>
+        {
+            builder.UseSetting("Deployment:Mode", "EdgeProxy");
+            builder.UseSetting("EdgeProxy:TargetBaseUrl", "http://192.0.2.10/MSLine");
+        }, allowLocalhost: false);
+
+        using var scope = factory.Services.CreateScope();
+        var hostedServices = scope.ServiceProvider.GetServices<Microsoft.Extensions.Hosting.IHostedService>().ToList();
+        var hostedServiceTypes = hostedServices.Select(s => s.GetType().Name).ToHashSet();
+
+        Assert.DoesNotContain("HeartbeatService", hostedServiceTypes);
+        Assert.DoesNotContain("OutboxForwarderService", hostedServiceTypes);
+        Assert.DoesNotContain("EdgePullService", hostedServiceTypes);
+        Assert.DoesNotContain("ContentDownloadService", hostedServiceTypes);
+        Assert.DoesNotContain("ProfileRefreshService", hostedServiceTypes);
+        Assert.DoesNotContain("RetentionCleanupService", hostedServiceTypes);
+    }
+
+    [Fact]
+    public void EdgeProxyMode_NamedHttpClient_ConfiguredCorrectly()
+    {
+        using var factory = CreateFactory(builder =>
+        {
+            builder.UseSetting("Deployment:Mode", "EdgeProxy");
+            builder.UseSetting("EdgeProxy:TargetBaseUrl", "http://edge-host.example/MSLine");
+            builder.UseSetting("EdgeProxy:TimeoutSeconds", "15");
+        }, allowLocalhost: false);
+
+        using var scope = factory.Services.CreateScope();
+        var httpClientFactory = scope.ServiceProvider.GetRequiredService<IHttpClientFactory>();
+        var client = httpClientFactory.CreateClient(EdgeProxyOptions.HttpClientName);
+
+        Assert.NotNull(client.BaseAddress);
+        Assert.Equal("http://edge-host.example/MSLine/", client.BaseAddress.ToString());
+        Assert.Equal(TimeSpan.FromSeconds(15), client.Timeout);
+    }
+
+    [Fact]
+    public void EdgeMode_LineHttpClients_WhenDirect_BaseAddressIsNull()
+    {
+        using var factory = CreateFactory(builder =>
+        {
+            builder.UseSetting("Deployment:Mode", "Edge");
+            builder.UseSetting("Ingest:BaseUrl", "https://core-host.example");
+            builder.UseSetting("Ingest:ApiKey", "test-key");
+            builder.UseSetting("Line:ChannelSecret", "secret");
+            builder.UseSetting("Line:ChannelAccessToken", "token");
+            builder.UseSetting("Line:OutboundHere", "true");
+            builder.UseSetting("Line:OutboundVia", "Direct");
+        }, allowLocalhost: false);
+
+        using var scope = factory.Services.CreateScope();
+        var httpClientFactory = scope.ServiceProvider.GetRequiredService<IHttpClientFactory>();
+
+        var contentClient = httpClientFactory.CreateClient(LineContentClient.HttpClientName);
+        var stickerClient = httpClientFactory.CreateClient(LineContentClient.StickerHttpClientName);
+        var profileClient = httpClientFactory.CreateClient(LineProfileClient.HttpClientName);
+
+        Assert.Null(contentClient.BaseAddress);
+        Assert.Null(stickerClient.BaseAddress);
+        Assert.Null(profileClient.BaseAddress);
+    }
+
+    [Fact]
+    public void EdgeMode_LineHttpClients_WhenEdgeProxy_BaseAddressPointsToProxy()
+    {
+        using var factory = CreateFactory(builder =>
+        {
+            builder.UseSetting("Deployment:Mode", "Edge");
+            builder.UseSetting("Ingest:BaseUrl", "https://core-host.example");
+            builder.UseSetting("Ingest:ApiKey", "test-key");
+            builder.UseSetting("Line:ChannelSecret", "secret");
+            builder.UseSetting("Line:ChannelAccessToken", "token");
+            builder.UseSetting("Line:OutboundHere", "true");
+            builder.UseSetting("Line:OutboundVia", "EdgeProxy");
+            builder.UseSetting("Line:OutboundProxyBaseUrl", "http://192.0.2.10/MSLine");
+        }, allowLocalhost: false);
+
+        using var scope = factory.Services.CreateScope();
+        var httpClientFactory = scope.ServiceProvider.GetRequiredService<IHttpClientFactory>();
+
+        var contentClient = httpClientFactory.CreateClient(LineContentClient.HttpClientName);
+        var stickerClient = httpClientFactory.CreateClient(LineContentClient.StickerHttpClientName);
+        var profileClient = httpClientFactory.CreateClient(LineProfileClient.HttpClientName);
+
+        Assert.Equal("http://192.0.2.10/MSLine/line/data/", contentClient.BaseAddress?.ToString());
+        Assert.Equal("http://192.0.2.10/MSLine/line/sticker/", stickerClient.BaseAddress?.ToString());
+        Assert.Equal("http://192.0.2.10/MSLine/line/api/", profileClient.BaseAddress?.ToString());
+    }
 }
+
 

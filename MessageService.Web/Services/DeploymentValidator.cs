@@ -8,12 +8,53 @@ namespace MessageService.Services;
 public static class DeploymentValidator
 {
     public static void Validate(
-        DeploymentOptions deployment, LineOptions line, ViewerOptions viewer, IngestOptions ingest, ILogger logger,
+        DeploymentOptions deployment, LineOptions line, ViewerOptions viewer, IngestOptions ingest,
+        EdgeProxyOptions edgeProxy, ILogger logger,
         DatabaseStartupDecision? database = null)
     {
         var mode = deployment.Mode;
         var capabilities = DeploymentCapabilities.Derive(mode, line, viewer, ingest);
         var db = database ?? DatabaseStartupDecision.Default;
+
+        // EdgeProxy 驗證完自己的設定就結束——後面全部是其他模式的規則，讓它繼續跑下去會被
+        // 「複製整份 appsettings 過來」的殘留設定誤擋（EdgeBaseUrl 缺 ApiKey、OutboundHere 缺
+        // token、SqlServer 缺連線字串都會 throw），錯誤訊息還指向 EdgeProxy 根本沒有的功能，
+        // 公網那台部署當天就起不來
+        if (mode is DeploymentMode.EdgeProxy)
+        {
+            if (string.IsNullOrWhiteSpace(edgeProxy.TargetBaseUrl))
+            {
+                throw new InvalidOperationException(
+                    "Deployment:Mode=EdgeProxy 需要設定 EdgeProxy:TargetBaseUrl（Edge 主機的位址，" +
+                    "例如 http://192.0.2.10/MSLine），否則轉發無處可送。");
+            }
+
+            // 只驗非空不夠：漏打 http:// 這種手滑（例如 "192.0.2.10/MSLine"）不會在啟動時
+            // 出事，而是第一則 webhook 進來時 CreateClient 才丟 UriFormatException、被轉發的
+            // 通用 catch 吃掉回 502——訊息靜默全掉、log 只剩一則被節流的警告，非常難查
+            if (!Uri.TryCreate(edgeProxy.TargetBaseUrl.Trim(), UriKind.Absolute, out var target)
+                || (target.Scheme != Uri.UriSchemeHttp && target.Scheme != Uri.UriSchemeHttps))
+            {
+                throw new InvalidOperationException(
+                    $"EdgeProxy:TargetBaseUrl（{edgeProxy.TargetBaseUrl}）不是合法的 http/https 位址——" +
+                    "請確認有帶 scheme，例如 http://192.0.2.10/MSLine。");
+            }
+
+            // 殘留設定只提醒不擋：EdgeProxy 只做轉發，不會用到 Line／Ingest／檢視端／資料庫設定。
+            // 資料庫只查得到 SQL Server 連線字串（Sqlite 那條的解析在服務註冊階段，EdgeProxy
+            // 已提早返回不會走到）——涵蓋「整份設定檔複製過來」這個主要情境就夠了
+            if (!string.IsNullOrWhiteSpace(line.ChannelSecret) || !string.IsNullOrWhiteSpace(line.ChannelAccessToken) ||
+                !string.IsNullOrWhiteSpace(ingest.BaseUrl) || !string.IsNullOrWhiteSpace(ingest.ApiKey) ||
+                !string.IsNullOrWhiteSpace(ingest.EdgeBaseUrl) || viewer.Enabled == true ||
+                db.HasSqlServerConnectionString)
+            {
+                logger.LogWarning(
+                    "Deployment:Mode=EdgeProxy 只做轉發，不會用到 Line／Ingest／檢視端／資料庫設定，但偵測到有值——" +
+                    "可能是從其他主機複製 appsettings 時忘記清掉，請確認是否為刻意保留。");
+            }
+
+            return;
+        }
 
         if (mode is DeploymentMode.Edge)
         {
@@ -71,7 +112,7 @@ public static class DeploymentValidator
         // Edge 沒有資料庫連線，檢視端整組服務都開不起來——顯式設 true 多半是從別台主機複製
         // appsettings 忘記清（跟下面 Viewer 模式殘留設定的警告同一種失誤），但這個設錯不是
         // 「多餘設定」而是「期待的功能不會存在」，寧可啟動失敗講清楚，不要讓人以為檢視端有開
-        if (!capabilities.HasDatabaseAccess && viewer.Enabled == true)
+        if (mode is DeploymentMode.Edge && viewer.Enabled == true)
         {
             throw new InvalidOperationException(
                 "Deployment:Mode=Edge 沒有資料庫連線，無法啟用檢視端（Viewer:Enabled=true）。" +
@@ -93,6 +134,34 @@ public static class DeploymentValidator
             throw new InvalidOperationException(
                 "這台主機會對外呼叫 LINE API（Line:OutboundHere 判定為 true），需要設定 " +
                 "Line:ChannelAccessToken，否則媒體下載與頭貼快取會在背景服務啟動後持續打 401。");
+        }
+
+        // Line:OutboundVia 與 OutboundProxyBaseUrl 驗證
+        if (line.OutboundVia is LineOutboundVia.EdgeProxy)
+        {
+            if (string.IsNullOrWhiteSpace(line.OutboundProxyBaseUrl))
+            {
+                throw new InvalidOperationException(
+                    "設定了 Line:OutboundVia=EdgeProxy，必須同時設定 Line:OutboundProxyBaseUrl（EdgeProxy 主機的位址，" +
+                    "例如 http://192.0.2.10/MSLine），否則外送請求無處可送。");
+            }
+
+            if (!Uri.TryCreate(line.OutboundProxyBaseUrl.Trim(), UriKind.Absolute, out var proxyUri)
+                || (proxyUri.Scheme != Uri.UriSchemeHttp && proxyUri.Scheme != Uri.UriSchemeHttps))
+            {
+                throw new InvalidOperationException(
+                    $"Line:OutboundProxyBaseUrl（{line.OutboundProxyBaseUrl}）不是合法的 http/https 位址——" +
+                    "請確認有帶 scheme，例如 http://192.0.2.10/MSLine。");
+            }
+
+            // 非 Edge／AllInOne 模式（也就是不會對外打 LINE 的模式）設了 OutboundVia=EdgeProxy
+            // → 記 Warning 說明不會有作用（比照同檔既有「Ingest:Channel 只在 Edge 有作用」那段的寫法）
+            if (mode is not (DeploymentMode.Edge or DeploymentMode.AllInOne))
+            {
+                logger.LogWarning(
+                    "Line:OutboundVia=EdgeProxy 只在對外打 LINE API 的模式（Deployment:Mode=Edge 或 AllInOne）有作用，" +
+                    "這台主機（{Mode}）的設定不會有任何效果。", mode);
+            }
         }
 
         // Core／Viewer 顯式把 OutboundHere 開成 true 表示「由這台打 LINE 內容／profile API」，
@@ -189,5 +258,6 @@ public static class DeploymentValidator
                 "Deployment:Mode=Viewer 不會用到 Line／Ingest 設定，但偵測到有值——" +
                 "可能是從其他主機複製 appsettings 時忘記清掉，請確認是否為刻意保留。");
         }
+
     }
 }

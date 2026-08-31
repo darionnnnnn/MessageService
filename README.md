@@ -31,8 +31,8 @@ MessageService.sln
 
 bot 加入群組後，透過 LINE webhook 接收群組內的訊息並寫入資料庫。職責只有三件事：**收 webhook → 落地資料庫 → 每日清除逾期資料**。
 
-支援四種部署角色（`Deployment:Mode`：`AllInOne`／`Edge`／`Core`／`Viewer`），因應收 webhook 的
-主機未必碰得到資料庫的情況；預設 `AllInOne` 就是下面這張圖。四種角色**功能完全對等**
+支援五種部署角色（`Deployment:Mode`：`AllInOne`／`Edge`／`Core`／`Viewer`／`EdgeProxy`），因應收
+webhook 的主機未必碰得到資料庫的情況；預設 `AllInOne` 就是下面這張圖。前四種角色**功能完全對等**
 （訊息收送、媒體下載、頭貼快取皆已用真實雙行程端到端驗證過，差別只在資料流經過幾台機器），
 媒體下載與頭貼快取獨立於模式、只看 `Line:OutboundHere` 這台主機要不要對外連 LINE，
 詳見 [docs/DEPLOYMENT-MODES.md](docs/DEPLOYMENT-MODES.md)。
@@ -81,7 +81,7 @@ StickerContentBackfillService（啟動時替既有貼圖訊息補出 Pending 內
 
 | 設定鍵 | 說明 |
 |---|---|
-| `Deployment:Mode` | `AllInOne`（預設）／`Edge`／`Core`／`Viewer`（舊名 `Full`／`Line`／`Db` 相容），見 [docs/DEPLOYMENT-MODES.md](docs/DEPLOYMENT-MODES.md) |
+| `Deployment:Mode` | `AllInOne`（預設）／`Edge`／`Core`／`Viewer`／`EdgeProxy`（舊名 `Full`／`Line`／`Db` 相容），見 [docs/DEPLOYMENT-MODES.md](docs/DEPLOYMENT-MODES.md) |
 | `Database:Provider` | `Sqlite`／`SqlServer`，選填。未設定時依 `ConnectionStrings:SqlServer` 有沒有值推導，顯式設定永遠優先，見 [docs/DEPLOYMENT-MODES.md](docs/DEPLOYMENT-MODES.md) |
 | `Database:SqliteFallback` | `bool`，預設 `true`，僅 `Deployment:Mode=AllInOne` 有效。有效 provider 為 SqlServer 時，啟動時探測連線／schema 失敗就改用本機 SQLite 撐起服務；設 `false` 改成寧可啟動失敗 |
 | `ConnectionStrings:SqlServer` / `Sqlite` | 連線字串，`Sqlite` 預設 `Data Source=Db/messages.db`（相對路徑以 ContentRootPath 為基準，第一次啟動自動建立目錄） |
@@ -93,6 +93,13 @@ StickerContentBackfillService（啟動時替既有貼圖訊息補出 Pending 內
 | `Viewer:Enabled` | `bool?`，這台要不要開檢視端（未設定時依模式推導），三台拓撲用 |
 | `Viewer:AllowedClientIps` | 檢視端頁面／API 的 IP 白名單，空白名單視為全拒 |
 | `Ingest:BaseUrl` / `Ingest:ApiKey` | `Edge`／`Core` 拆機用，`AllInOne` 模式不需要 |
+| `Line:OutboundVia` | Edge 端對 LINE 的 outbound 走哪裡：`Direct`（預設，Edge 自己連 internet）／`EdgeProxy`（改經 EdgeProxy 出去，Edge 可以完全沒有對外網路）。設 `EdgeProxy` 時要一併設 `Line:OutboundProxyBaseUrl` |
+| `Line:OutboundProxyBaseUrl` | `OutboundVia=EdgeProxy` 時必填：EdgeProxy 主機的位址，結尾斜線可省略 |
+| `EdgeProxy:AllowedClientIps` | EdgeProxy 上 `/line/*`（LINE outbound 轉發）的來源白名單，填 Edge 的 IP。**空＝全擋**。webhook 轉發那條路由不吃這份白名單（LINE 來源 IP 不固定） |
+| `EdgeAdmin:AllowedClientIps` | Edge 設定頁 `/edge-admin` 的來源白名單。**空＝全擋**，且**只讀 appsettings**——放進設定頁能改的地方等於設錯就自鎖 |
+| `WebhookSource:Mode` / `AllowedIps` | Edge 端 webhook 的來源限制：`Any`（預設，不限制）／`AllowlistOnly`（只接受清單內來源，用於「前面有 EdgeProxy」的拓撲）。可在設定頁改、即時生效 |
+| `EdgeProxy:TargetBaseUrl` | `Deployment:Mode=EdgeProxy` 必填：Edge 主機的位址（例 `http://192.0.2.10/MSLine`），結尾斜線可省略。見 [docs/DEPLOYMENT-MODES.md](docs/DEPLOYMENT-MODES.md) 的「EdgeProxy」 |
+| `EdgeProxy:TimeoutSeconds` | 轉發到 Edge 的逾時秒數（預設 10）。逾時回 502，由 LINE redelivery 重送 |
 | `Ingest:Channel` | Edge 端的通道方向：`Auto`（預設，推送優先、不通則由 Core 輪詢接手並定期探測）／`Push`／`Pull`，見 [docs/DEPLOYMENT-MODES.md](docs/DEPLOYMENT-MODES.md) 的「通道方向」 |
 | `Ingest:EdgeBaseUrl` | Core 端指向 Edge 的位址。**空（預設）＝永不輪詢**，行為與沒有這個功能時相同 |
 | `Ingest:PullIntervalSeconds` / `PullActivationSeconds` | 輪詢間隔與啟動門檻，預設 1／180 秒。門檻只看**推送**心跳，輪詢拉回的不算 |
