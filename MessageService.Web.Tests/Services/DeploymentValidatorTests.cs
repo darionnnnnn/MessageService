@@ -614,4 +614,43 @@ public class DeploymentValidatorTests
 
         Assert.Contains(logger.Warnings, w => w.Contains("EdgeProxy 只做轉發"));
     }
+
+    [Fact]
+    public void EdgeProxy_WithFullCopiedEdgeConfig_DoesNotThrow_OnlyWarns()
+    {
+        var logger = new CapturingLogger();
+
+        // 部署 EdgeProxy 最常見的做法就是整份 appsettings 從 Edge/Core 複製過來改 Mode——
+        // 這些殘留（EdgeBaseUrl 缺 ApiKey、OutboundHere=true 缺 token、SqlServer 缺連線字串）
+        // 都各自對到其他模式的擋啟動規則，EdgeProxy 必須在自己的檢查後直接返回，
+        // 否則公網那台部署當天就起不來、錯誤訊息還指向它根本沒有的功能
+        var ex = Record.Exception(() => DeploymentValidator.Validate(
+            new DeploymentOptions { Mode = DeploymentMode.EdgeProxy },
+            new LineOptions { ChannelSecret = "secret", ChannelAccessToken = "", OutboundHere = true },
+            new ViewerOptions { Enabled = true },
+            new IngestOptions { BaseUrl = "https://core-host", ApiKey = "", EdgeBaseUrl = "https://edge-host" },
+            new EdgeProxyOptions { TargetBaseUrl = "http://10.231.145.94/MSLine" },
+            logger,
+            DatabaseStartupDecision.Default with
+            {
+                ConfiguredProvider = "SqlServer", EffectiveProvider = "SqlServer",
+                HasSqlServerConnectionString = false,
+            }));
+
+        Assert.Null(ex);
+        Assert.Contains(logger.Warnings, w => w.Contains("EdgeProxy 只做轉發"));
+    }
+
+    [Theory]
+    [InlineData("10.231.145.94/MSLine")]
+    [InlineData("ftp://edge-host/MSLine")]
+    public void EdgeProxy_MalformedTargetBaseUrl_ThrowsAtStartup(string target)
+    {
+        // 漏打 http:// 這種手滑若不在啟動時擋，會變成每則 webhook 都 502、訊息靜默全掉
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            Validate(DeploymentMode.EdgeProxy, Line(channelSecret: ""),
+                edgeProxy: new EdgeProxyOptions { TargetBaseUrl = target }));
+
+        Assert.Contains("http", ex.Message);
+    }
 }

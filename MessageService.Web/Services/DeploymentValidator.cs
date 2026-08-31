@@ -16,11 +16,44 @@ public static class DeploymentValidator
         var capabilities = DeploymentCapabilities.Derive(mode, line, viewer, ingest);
         var db = database ?? DatabaseStartupDecision.Default;
 
-        if (mode is DeploymentMode.EdgeProxy && string.IsNullOrWhiteSpace(edgeProxy.TargetBaseUrl))
+        // EdgeProxy 驗證完自己的設定就結束——後面全部是其他模式的規則，讓它繼續跑下去會被
+        // 「複製整份 appsettings 過來」的殘留設定誤擋（EdgeBaseUrl 缺 ApiKey、OutboundHere 缺
+        // token、SqlServer 缺連線字串都會 throw），錯誤訊息還指向 EdgeProxy 根本沒有的功能，
+        // 公網那台部署當天就起不來
+        if (mode is DeploymentMode.EdgeProxy)
         {
-            throw new InvalidOperationException(
-                "Deployment:Mode=EdgeProxy 需要設定 EdgeProxy:TargetBaseUrl（Edge 主機的位址，" +
-                "例如 http://10.231.145.94/MSLine），否則轉發無處可送。");
+            if (string.IsNullOrWhiteSpace(edgeProxy.TargetBaseUrl))
+            {
+                throw new InvalidOperationException(
+                    "Deployment:Mode=EdgeProxy 需要設定 EdgeProxy:TargetBaseUrl（Edge 主機的位址，" +
+                    "例如 http://10.231.145.94/MSLine），否則轉發無處可送。");
+            }
+
+            // 只驗非空不夠：漏打 http:// 這種手滑（例如 "10.231.145.94/MSLine"）不會在啟動時
+            // 出事，而是第一則 webhook 進來時 CreateClient 才丟 UriFormatException、被轉發的
+            // 通用 catch 吃掉回 502——訊息靜默全掉、log 只剩一則被節流的警告，非常難查
+            if (!Uri.TryCreate(edgeProxy.TargetBaseUrl.Trim(), UriKind.Absolute, out var target)
+                || (target.Scheme != Uri.UriSchemeHttp && target.Scheme != Uri.UriSchemeHttps))
+            {
+                throw new InvalidOperationException(
+                    $"EdgeProxy:TargetBaseUrl（{edgeProxy.TargetBaseUrl}）不是合法的 http/https 位址——" +
+                    "請確認有帶 scheme，例如 http://10.231.145.94/MSLine。");
+            }
+
+            // 殘留設定只提醒不擋：EdgeProxy 只做轉發，不會用到 Line／Ingest／檢視端／資料庫設定。
+            // 資料庫只查得到 SQL Server 連線字串（Sqlite 那條的解析在服務註冊階段，EdgeProxy
+            // 已提早返回不會走到）——涵蓋「整份設定檔複製過來」這個主要情境就夠了
+            if (!string.IsNullOrWhiteSpace(line.ChannelSecret) || !string.IsNullOrWhiteSpace(line.ChannelAccessToken) ||
+                !string.IsNullOrWhiteSpace(ingest.BaseUrl) || !string.IsNullOrWhiteSpace(ingest.ApiKey) ||
+                !string.IsNullOrWhiteSpace(ingest.EdgeBaseUrl) || viewer.Enabled == true ||
+                db.HasSqlServerConnectionString)
+            {
+                logger.LogWarning(
+                    "Deployment:Mode=EdgeProxy 只做轉發，不會用到 Line／Ingest／檢視端／資料庫設定，但偵測到有值——" +
+                    "可能是從其他主機複製 appsettings 時忘記清掉，請確認是否為刻意保留。");
+            }
+
+            return;
         }
 
         if (mode is DeploymentMode.Edge)
@@ -198,19 +231,5 @@ public static class DeploymentValidator
                 "可能是從其他主機複製 appsettings 時忘記清掉，請確認是否為刻意保留。");
         }
 
-        // EdgeProxy 只做轉發，不會用到 Line／Ingest／檢視端／資料庫設定——多半是從其他主機複製
-        // appsettings 忘記清掉，不是錯誤但值得提醒，免得誤以為這些設定在 EdgeProxy 模式下也有作用。
-        // 資料庫只查得到 SQL Server 連線字串（Sqlite 那條的解析在服務註冊階段，EdgeProxy 已提早
-        // 返回不會走到，這裡拿不到）——涵蓋最常見的「整份設定檔複製過來」情境就夠了
-        if (mode is DeploymentMode.EdgeProxy &&
-            (!string.IsNullOrWhiteSpace(line.ChannelSecret) || !string.IsNullOrWhiteSpace(line.ChannelAccessToken) ||
-             !string.IsNullOrWhiteSpace(ingest.BaseUrl) || !string.IsNullOrWhiteSpace(ingest.ApiKey) ||
-             !string.IsNullOrWhiteSpace(ingest.EdgeBaseUrl) || viewer.Enabled == true ||
-             db.HasSqlServerConnectionString))
-        {
-            logger.LogWarning(
-                "Deployment:Mode=EdgeProxy 只做轉發，不會用到 Line／Ingest／檢視端／資料庫設定，但偵測到有值——" +
-                "可能是從其他主機複製 appsettings 時忘記清掉，請確認是否為刻意保留。");
-        }
     }
 }

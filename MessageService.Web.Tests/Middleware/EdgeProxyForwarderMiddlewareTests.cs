@@ -5,6 +5,8 @@ using MessageService.Options;
 using MessageService.Tests.TestSupport;
 using MessageService.Web.Middleware;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -199,18 +201,105 @@ public class EdgeProxyForwarderMiddlewareTests
     }
 
     [Fact]
-    public async Task WebhookForwarding_Timeout_ReturnsBadGateway502()
+    public async Task Middleware_HttpClientTimeout_WithoutClientAbort_Returns502NotRethrow()
     {
-        using var factory = CreateEdgeProxyFactory(request =>
-        {
-            throw new TaskCanceledException("HttpClient timeout occurred");
-        });
-        using var client = factory.CreateClient();
+        // HttpClient 逾時丟的 TaskCanceledException 用的是內部 token——RequestAborted 沒被取消
+        // 時必須走 502 路徑，不能被誤判成客戶端中斷往外拋。直測 middleware 才控制得住
+        // RequestAborted 的狀態（TestServer 模擬不了真實斷線）
+        var middleware = CreateMiddleware(
+            _ => throw new TaskCanceledException("HttpClient timeout"),
+            out _, out _);
 
-        using var content = new StringContent("{}", Encoding.UTF8, "application/json");
-        var response = await client.PostAsync("/api/line/webhook", content);
+        var context = NewWebhookContext();
 
-        Assert.Equal(HttpStatusCode.BadGateway, response.StatusCode);
+        await middleware.InvokeAsync(context);
+
+        Assert.Equal(StatusCodes.Status502BadGateway, context.Response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Middleware_ClientAborted_RethrowsForCancelledRequestMiddleware()
+    {
+        // 客戶端主動斷線：RequestAborted 已取消、SendAsync 丟 OperationCanceledException——
+        // 必須原樣往外拋（交給 CancelledRequestMiddleware），不能吞成 502
+        var middleware = CreateMiddleware(
+            _ => throw new OperationCanceledException(),
+            out _, out _);
+
+        using var aborted = new CancellationTokenSource();
+        aborted.Cancel();
+        var context = NewWebhookContext();
+        context.RequestAborted = aborted.Token;
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => middleware.InvokeAsync(context));
+    }
+
+    [Fact]
+    public async Task Middleware_TrailingSlash_IsStillForwarded()
+    {
+        // LINE Console 的 URL 人手多打一個尾斜線很常見；真正的 Edge 主機路由對它寬容，
+        // proxy 不比對就會變成「直收正常、經 proxy 整批 404」的難查差異
+        var forwarded = 0;
+        var middleware = CreateMiddleware(
+            _ => { Interlocked.Increment(ref forwarded); return new HttpResponseMessage(HttpStatusCode.OK); },
+            out _, out _);
+
+        var context = NewWebhookContext(path: "/api/line/webhook/");
+
+        await middleware.InvokeAsync(context);
+
+        Assert.Equal(1, forwarded);
+        Assert.Equal(StatusCodes.Status200OK, context.Response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Middleware_SetsRequestBodySizeLimit_OnWebhookPath()
+    {
+        // 公網端點無身分驗證，body 上限是唯一的記憶體防線——斷言 middleware 真的把
+        // IHttpMaxRequestBodySizeFeature 夾到 512KB
+        var middleware = CreateMiddleware(
+            _ => new HttpResponseMessage(HttpStatusCode.OK), out _, out _);
+
+        var sizeFeature = new RecordingBodySizeFeature();
+        var context = NewWebhookContext();
+        context.Features.Set<IHttpMaxRequestBodySizeFeature>(sizeFeature);
+
+        await middleware.InvokeAsync(context);
+
+        Assert.Equal(512 * 1024, sizeFeature.MaxRequestBodySize);
+    }
+
+    private static DefaultHttpContext NewWebhookContext(string path = "/api/line/webhook")
+    {
+        var context = new DefaultHttpContext();
+        context.Request.Method = "POST";
+        context.Request.Path = path;
+        context.Request.Body = new MemoryStream(Encoding.UTF8.GetBytes("{}"));
+        return context;
+    }
+
+    private sealed class RecordingBodySizeFeature : IHttpMaxRequestBodySizeFeature
+    {
+        public bool IsReadOnly => false;
+        public long? MaxRequestBodySize { get; set; }
+    }
+
+    private static EdgeProxyForwarderMiddleware CreateMiddleware(
+        Func<HttpRequestMessage, HttpResponseMessage> responder,
+        out FakeTimeProvider timeProvider, out CountingLogger logger)
+    {
+        timeProvider = new FakeTimeProvider();
+        logger = new CountingLogger();
+        var handler = new FakeHttpMessageHandler(responder);
+        var factory = new StubHttpClientFactory(handler);
+        return new EdgeProxyForwarderMiddleware(
+            _ => Task.CompletedTask, factory, timeProvider, logger);
+    }
+
+    private sealed class StubHttpClientFactory(HttpMessageHandler handler) : IHttpClientFactory
+    {
+        public HttpClient CreateClient(string name) =>
+            new(handler, disposeHandler: false) { BaseAddress = new Uri("http://edge-host.example/MSLine/") };
     }
 
     [Fact]
@@ -258,8 +347,8 @@ public class EdgeProxyForwarderMiddlewareTests
         using var client = factory.CreateClient();
 
         var getWebhookResponse = await client.GetAsync("/api/line/webhook");
-        Assert.NotEqual(HttpStatusCode.OK, getWebhookResponse.StatusCode);
-        Assert.True(getWebhookResponse.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.MethodNotAllowed);
+        // EdgeProxy 下 LineWebhookController 已被 DeploymentModeConvention 移除，404 是唯一正確答案
+        Assert.Equal(HttpStatusCode.NotFound, getWebhookResponse.StatusCode);
         Assert.Equal(0, callCount);
     }
 
@@ -315,24 +404,33 @@ public class EdgeProxyForwarderMiddlewareTests
     }
 
     [Fact]
-    public async Task WebhookForwarding_ClientAbort_RethrowsOperationCanceledException()
+    public async Task Middleware_Flapping_LogVolumeIsBounded()
     {
-        using var factory = CreateEdgeProxyFactory(request =>
-        {
-            throw new OperationCanceledException();
-        });
-        using var client = factory.CreateClient();
+        // Edge 半死不活（時好時壞）是最需要節流的情境：失敗→成功交錯 40 次，
+        // 若每次「轉失敗」都記完整堆疊、每次「轉成功」都記恢復，log 會以請求頻率被灌爆
+        var fail = false;
+        var middleware = CreateMiddleware(
+            _ => (fail = !fail)
+                ? throw new HttpRequestException("flap")
+                : new HttpResponseMessage(HttpStatusCode.OK),
+            out var time, out var logger);
 
-        // 當 requestAborted 被取消時，OperationCanceledException 往外拋，
-        // 由前置的 CancelledRequestMiddleware 攔截吞掉，回傳 200 OK 且不報錯
-        using var cts = new CancellationTokenSource();
-        cts.Cancel();
-
-        using var content = new StringContent("{}", Encoding.UTF8, "application/json");
-        // 送出已被取消的請求
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+        for (var i = 0; i < 40; i++)
         {
-            await client.PostAsync("/api/line/webhook", content, cts.Token);
-        });
+            await middleware.InvokeAsync(NewWebhookContext());
+        }
+
+        Assert.Equal(1, logger.Warnings);
+        Assert.Equal(1, logger.Infos);
+
+        // 過了節流窗口，flapping 仍在繼續 → 各多一則，讓維運知道問題還沒好
+        time.Now = time.Now.AddMinutes(11);
+        for (var i = 0; i < 4; i++)
+        {
+            await middleware.InvokeAsync(NewWebhookContext());
+        }
+
+        Assert.Equal(2, logger.Warnings);
+        Assert.Equal(2, logger.Infos);
     }
 }

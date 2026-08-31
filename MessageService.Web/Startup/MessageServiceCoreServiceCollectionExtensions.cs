@@ -125,9 +125,12 @@ public static class MessageServiceCoreServiceCollectionExtensions
 
             builder.Services.AddHttpClient(EdgeProxyOptions.HttpClientName, client =>
             {
-                // DeploymentValidator 會在啟動時擋掉沒設 TargetBaseUrl 的情況；這裡的預設值
-                // 只是為了讓「還沒走到驗證就有東西搶著解析 client」的異常路徑不要丟出難懂的例外
-                client.BaseAddress = HttpBaseAddress.Create(edgeProxyOptions.TargetBaseUrl ?? "http://localhost/");
+                // DeploymentValidator 會在啟動時擋掉沒設或格式錯誤的 TargetBaseUrl；這裡不給
+                // 任何預設值——fallback 成 localhost 之類的值等於把 webhook 轉發給自己，
+                // 會被同一個中介層再攔再轉，自我遞迴到耗盡連線。寧可在異常路徑丟例外
+                var targetBaseUrl = edgeProxyOptions.TargetBaseUrl
+                    ?? throw new InvalidOperationException("EdgeProxy:TargetBaseUrl must be set when Deployment:Mode=EdgeProxy.");
+                client.BaseAddress = HttpBaseAddress.Create(targetBaseUrl);
                 client.Timeout = TimeSpan.FromSeconds(Math.Max(1, edgeProxyOptions.TimeoutSeconds));
             });
 

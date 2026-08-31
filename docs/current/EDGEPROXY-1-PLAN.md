@@ -179,9 +179,22 @@ ThrowsWithClearMessage` 保住了 Edge 的既有行為。突變測試（改回�
 
 文件寫作紀律掃描本輪新增段落：無演變敘述違規。
 
-### 程式碼終檢
+### 程式碼終檢（獨立 Explore，重跑）
 
-第一次執行因 session 額度中斷，重跑後結果記於下方。
+第一次執行因 session 額度中斷；重跑抓到 3 高 4 中，逐項查證後全數修正（954 綠）：
+
+| 級別 | 發現 | 處置 |
+|---|---|---|
+| 高 C3 | EdgeProxy 的驗證跑完自己的檢查後**沒有 return**，會被其他模式的規則誤擋——整份 appsettings 從 Edge/Core 複製過來時（最常見的部署方式），EdgeBaseUrl 缺 ApiKey、OutboundHere=true 缺 token、SqlServer 缺連線字串三條都會 throw，公網那台**部署當天就起不來**，錯誤訊息還指向 EdgeProxy 沒有的功能 | 專屬區塊前移＋檢查完直接 return；補「整份複製設定」的迴歸測試 |
+| 高 D1 | 客戶端中斷測試假通過：`cts.Cancel()` 在送出**之前**，請求根本沒到伺服器，斷言恆真——刪掉整個 middleware 照樣綠 | 重寫為 middleware 直測（TestServer 模擬不了真實斷線）；「HttpClient 逾時（RequestAborted 未取消）→502 不往外拋」的關鍵區分一併補上（D2）；兩者皆以突變驗證會紅 |
+| 高 C1 | 公網端點無 body 上限：無任何身分驗證的路徑無條件把 body 讀進記憶體兩份（Kestrel 預設 30MB），併發無上限＝記憶體放大點 | middleware 以 `IHttpMaxRequestBodySizeFeature` 夾到 512KB（LINE webhook 是 KB 級），超過由 Kestrel 回 413 不進記憶體；補 feature 斷言測試 |
+| 中 B1 | 具名 client 的 `?? "http://localhost/"` 預設值：驗證被繞過時 webhook 會**轉發給自己**，被同一個 middleware 再攔再轉，自我遞迴到耗盡連線 | 改為 `?? throw`（與既有 "ingest" client 同型） |
+| 中 B2 | `TargetBaseUrl` 只驗非空：漏打 `http://` 不會在啟動時出事，而是每則 webhook 都 502、訊息靜默全掉 | 啟動驗證加 `Uri.TryCreate` + http/https scheme 檢查；補兩個格式測試 |
+| 中 A1 | 節流在 Edge「時好時壞」（flapping）時完全失效：每次成功→失敗轉換都算第一次失敗，log 以請求頻率被灌爆 | `_lastFailureLogAt` 成功不清除、恢復訊息也各自 10 分鐘節流——log 量有硬上界（每 10 分鐘最多一對）；補交錯 40 次的 flapping 測試並突變驗證 |
+| 中 A3 | 尾斜線：LINE Console 的 URL 多打一個 `/` 時 proxy 不轉發（Edge 直收的路由卻寬容）→「直收正常、經 proxy 整批 404」 | 比對接受尾斜線變體；入站路徑改由轉發常數派生（消掉兩份字串）；補測試 |
+| 低 A2/A5/C2/D4 | `_failing` 鎖外讀、catch 設狀態碼無 HasStarted 防線、Content-Type 解析失敗仍原樣外送、GET 斷言放寬成兩個值 | 全數順手修：讀寫全進鎖、加 HasStarted 檢查、解析不出就不帶、斷言釘死 404 |
+
+終檢確認無問題的：不是開放代理（目的地完全不受外部輸入影響）、無資訊洩漏（狀態碼透傳不帶 body、例外只進 log）、dispose 鏈正確、DI 提早返回無缺件（多餘註冊皆惰性零成本）。
 
 ### 定案8 的字面違反（已於作業A 判定保留，此處覆核）
 
