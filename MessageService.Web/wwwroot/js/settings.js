@@ -526,7 +526,7 @@
         try {
             await fetchJson(`api/settings/host-heartbeats/${encodeURIComponent(role)}/${encodeURIComponent(machineName)}`,
                 { method: 'DELETE' });
-            await Promise.all([loadDatabaseStatus(), loadHostHeartbeats()]);
+            await Promise.all([loadDatabaseStatus(), loadHostHeartbeats(), loadMessageFlow()]);
             showToast('已移除');
         } catch {
             showToast('移除失敗', true);
@@ -548,6 +548,24 @@
                 `目前以 SQLite 救援模式運作——設定的 SQL Server 啟動時連線／schema 驗證失敗` +
                 `（${status.sqliteFallbackReason || '原因不明'}），資料暫時寫入本機 SQLite。` +
                 `修好 SQL Server 後重新啟動即可切回，這段期間的資料不會自動搬過去。`;
+        }
+    }
+
+    async function loadMessageFlow() {
+        const flow = await fetchJson('api/settings/message-flow');
+
+        if (flow.lastMessageAt) {
+            els.messageFlowNote.textContent = `最後收到訊息：${new Date(flow.lastMessageAt).toLocaleString('zh-TW')}`;
+        } else {
+            els.messageFlowNote.textContent = '最後收到訊息：尚無資料';
+        }
+
+        const isSilent = flow.status === 'Silent';
+        els.messageFlowWarning.classList.toggle('d-none', !isSilent);
+        if (isSilent) {
+            els.messageFlowWarning.textContent =
+                '已超過警示門檻未收到新訊息——可能是 webhook 鏈路中斷（請檢查 LINE Developers Console 的 Webhook URL 設定、' +
+                'SSL/TLS 憑證效期、或 EdgeProxy 轉發是否正常），可對照本頁下方各主機的 Outbox 積壓數字判斷斷點。';
         }
     }
 
@@ -575,7 +593,7 @@
 
     async function handleHostHeartbeatsRefresh() {
         try {
-            await Promise.all([loadDatabaseStatus(), loadHostHeartbeats()]);
+            await Promise.all([loadDatabaseStatus(), loadHostHeartbeats(), loadMessageFlow()]);
         } catch {
             showToast('讀取主機狀態失敗', true);
         }
@@ -613,6 +631,8 @@
         els.hostHeartbeatsFingerprintWarning = $('host-heartbeats-fingerprint-warning');
         els.databaseFallbackWarning = $('database-fallback-warning');
         els.databaseProviderNote = $('database-provider-note');
+        els.messageFlowNote = $('message-flow-note');
+        els.messageFlowWarning = $('message-flow-warning');
         els.hostHeartbeatsRefreshBtn = $('host-heartbeats-refresh-btn');
         els.settingsModal = $('settings-modal');
         els.settingsModalBody = $('settings-modal-body');
@@ -684,7 +704,7 @@
 
         await Promise.all([
             loadKeywords(), loadDisplaySettings(), loadPiiMaskingSettings(), loadRetentionSettings(),
-            loadDatabaseStatus(), loadHostHeartbeats()
+            loadDatabaseStatus(), loadHostHeartbeats(), loadMessageFlow()
         ]);
     }
 

@@ -18,6 +18,7 @@ public class SettingsController(
     MessageDbContext dbContext,
     IMaskingService maskingService,
     IOptions<HeartbeatOptions> heartbeatOptions,
+    IOptions<MonitoringOptions> monitoringOptions,
     DatabaseStartupDecision databaseStartupDecision)
     : ControllerBase
 {
@@ -298,6 +299,35 @@ public class SettingsController(
         return Ok(rows.Select(h => new HostHeartbeatDto(
             h.Role, h.MachineName, h.LastSeenAt, ComputeStatus(now - h.LastSeenAt, interval),
             h.OutboxPending, h.OutboxOldestAgeSeconds, h.EncryptionKeyFingerprint, h.Channel)).ToList());
+    }
+
+    [HttpGet("message-flow")]
+    public async Task<ActionResult<MessageFlowDto>> GetMessageFlow(CancellationToken cancellationToken)
+    {
+        var maxLastMessageAt = await dbContext.Groups
+            .AsNoTracking()
+            .Select(g => g.LastMessageAt)
+            .MaxAsync(cancellationToken);
+
+        string status;
+        if (maxLastMessageAt is null)
+        {
+            status = "None";
+        }
+        else
+        {
+            var warnHours = monitoringOptions.Value.MessageSilenceWarnHours;
+            if (warnHours <= 0 || DateTimeOffset.UtcNow - maxLastMessageAt.Value <= TimeSpan.FromHours(warnHours))
+            {
+                status = "Ok";
+            }
+            else
+            {
+                status = "Silent";
+            }
+        }
+
+        return Ok(new MessageFlowDto(maxLastMessageAt, status));
     }
 
     // 主機更名、角色改了、或那台機器退役時，舊列會永遠留著顯示 Offline，而且原本沒有任何

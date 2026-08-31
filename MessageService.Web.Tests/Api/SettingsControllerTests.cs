@@ -1,8 +1,14 @@
 using System.Net;
 using System.Net.Http.Json;
+using MessageService.Data;
 using MessageService.Models;
+using MessageService.Tests.TestSupport;
 using MessageService.Web.Dtos;
 using MessageService.Web.Tests.TestSupport;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.Data.Sqlite;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace MessageService.Web.Tests.Api;
 
@@ -550,5 +556,196 @@ public class SettingsControllerTests : IDisposable
         var updatedPage = await _fixture.Client.GetFromJsonAsync<MessagesPageDto>($"/api/groups/{groupId}/messages?days=3");
         var updatedMsg = Assert.Single(updatedPage!.Messages);
         Assert.Equal("陳*明", updatedMsg.DisplayName);
+    }
+
+    // === 訊息流活性（作業A） ===
+
+    [Fact]
+    public async Task GetMessageFlow_NoGroups_ReturnsNone()
+    {
+        // 情境 1：完全沒有任何 Group → Status 是 "None"、LastMessageAt 是 null。
+        var flow = await _fixture.Client.GetFromJsonAsync<MessageFlowDto>("/api/settings/message-flow");
+
+        Assert.NotNull(flow);
+        Assert.Null(flow.LastMessageAt);
+        Assert.Equal("None", flow.Status);
+    }
+
+    [Fact]
+    public async Task GetMessageFlow_GroupsExistWithNullLastMessageAt_ReturnsNone()
+    {
+        // 情境 2：有 Group 但 LastMessageAt 全是 null → Status 是 "None"。
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            dbContext.Groups.AddRange(
+                new Group { GroupId = "G1", LastMessageAt = null },
+                new Group { GroupId = "G2", LastMessageAt = null });
+            await Task.CompletedTask;
+        });
+
+        var flow = await _fixture.Client.GetFromJsonAsync<MessageFlowDto>("/api/settings/message-flow");
+
+        Assert.NotNull(flow);
+        Assert.Null(flow.LastMessageAt);
+        Assert.Equal("None", flow.Status);
+    }
+
+    [Fact]
+    public async Task GetMessageFlow_MultipleGroups_ReturnsMaxLastMessageAt()
+    {
+        // 情境 3：有一則訊息時刻 → LastMessageAt 等於該值（多個 Group 時取最大的那個）。
+        var time1 = DateTimeOffset.UtcNow.AddHours(-3);
+        var time2 = DateTimeOffset.UtcNow.AddHours(-1);
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            dbContext.Groups.AddRange(
+                new Group { GroupId = "G1", LastMessageAt = time1 },
+                new Group { GroupId = "G2", LastMessageAt = time2 },
+                new Group { GroupId = "G3", LastMessageAt = null });
+            await Task.CompletedTask;
+        });
+
+        var flow = await _fixture.Client.GetFromJsonAsync<MessageFlowDto>("/api/settings/message-flow");
+
+        Assert.NotNull(flow);
+        Assert.NotNull(flow.LastMessageAt);
+        Assert.Equal(time2, flow.LastMessageAt.Value, TimeSpan.FromMilliseconds(1));
+        Assert.Equal("Ok", flow.Status);
+    }
+
+    [Fact]
+    public async Task GetMessageFlow_DefaultThresholdZero_LongAgoMessage_ReturnsOk()
+    {
+        // 情境 4：門檻預設 0 且最後訊息在很久以前（例如 30 天前）→ Status 是 "Ok"（預設不告警）。
+        var oldTime = DateTimeOffset.UtcNow.AddDays(-30);
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            dbContext.Groups.Add(new Group { GroupId = "G_OLD", LastMessageAt = oldTime });
+            await Task.CompletedTask;
+        });
+
+        var flow = await _fixture.Client.GetFromJsonAsync<MessageFlowDto>("/api/settings/message-flow");
+
+        Assert.NotNull(flow);
+        Assert.NotNull(flow.LastMessageAt);
+        Assert.Equal(oldTime, flow.LastMessageAt.Value, TimeSpan.FromMilliseconds(1));
+        Assert.Equal("Ok", flow.Status);
+    }
+
+    [Fact]
+    public async Task GetMessageFlow_ThresholdOneHour_LastMessageTwoHoursAgo_ReturnsSilent()
+    {
+        // 情境 5：門檻 1 小時、最後訊息 2 小時前 → Status 是 "Silent"。
+        var dbPath = Path.Combine(Path.GetTempPath(), $"messageservice-flow-test-{Guid.NewGuid():N}.db");
+        try
+        {
+            using var factory = CreateMonitoringFactory(dbPath, warnHours: 1);
+            using (var scope = factory.Services.CreateScope())
+            {
+                var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+                dbContext.Database.EnsureCreated();
+                dbContext.Groups.Add(new Group { GroupId = "G_SILENT", LastMessageAt = DateTimeOffset.UtcNow.AddHours(-2) });
+                await dbContext.SaveChangesAsync();
+            }
+
+            using var client = factory.CreateClient();
+            var flow = await client.GetFromJsonAsync<MessageFlowDto>("/api/settings/message-flow");
+
+            Assert.NotNull(flow);
+            Assert.NotNull(flow.LastMessageAt);
+            Assert.Equal("Silent", flow.Status);
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            if (File.Exists(dbPath))
+            {
+                File.Delete(dbPath);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task GetMessageFlow_ThresholdOneHour_LastMessageThirtyMinutesAgo_ReturnsOk()
+    {
+        // 情境 6：門檻 1 小時、最後訊息 30 分鐘前 → Status 是 "Ok"。
+        var dbPath = Path.Combine(Path.GetTempPath(), $"messageservice-flow-test-{Guid.NewGuid():N}.db");
+        try
+        {
+            using var factory = CreateMonitoringFactory(dbPath, warnHours: 1);
+            using (var scope = factory.Services.CreateScope())
+            {
+                var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+                dbContext.Database.EnsureCreated();
+                dbContext.Groups.Add(new Group { GroupId = "G_ACTIVE", LastMessageAt = DateTimeOffset.UtcNow.AddMinutes(-30) });
+                await dbContext.SaveChangesAsync();
+            }
+
+            using var client = factory.CreateClient();
+            var flow = await client.GetFromJsonAsync<MessageFlowDto>("/api/settings/message-flow");
+
+            Assert.NotNull(flow);
+            Assert.NotNull(flow.LastMessageAt);
+            Assert.Equal("Ok", flow.Status);
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            if (File.Exists(dbPath))
+            {
+                File.Delete(dbPath);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task GetMessageFlow_ThresholdPositive_NoGroups_ReturnsNone()
+    {
+        // 規格：「無論門檻設多少都是 None，永不告警」
+        var dbPath = Path.Combine(Path.GetTempPath(), $"messageservice-flow-test-{Guid.NewGuid():N}.db");
+        try
+        {
+            using var factory = CreateMonitoringFactory(dbPath, warnHours: 24);
+            using (var scope = factory.Services.CreateScope())
+            {
+                var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+                dbContext.Database.EnsureCreated();
+            }
+
+            using var client = factory.CreateClient();
+            var flow = await client.GetFromJsonAsync<MessageFlowDto>("/api/settings/message-flow");
+
+            Assert.NotNull(flow);
+            Assert.Null(flow.LastMessageAt);
+            Assert.Equal("None", flow.Status);
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            if (File.Exists(dbPath))
+            {
+                File.Delete(dbPath);
+            }
+        }
+    }
+
+    private static WebApplicationFactory<Program> CreateMonitoringFactory(string dbPath, int warnHours)
+    {
+        return new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
+        {
+            builder.UseEnvironment("Testing");
+            builder.UseSetting("Database:Provider", "Sqlite");
+            builder.UseSetting("ConnectionStrings:Sqlite", $"Data Source={dbPath}");
+            builder.UseSetting("Deployment:Mode", "Db");
+            builder.UseSetting("Ingest:ApiKey", "webappfactoryfixture-unused-key");
+            builder.UseSetting("Line:OutboundHere", "false");
+            builder.UseSetting("Heartbeat:Enabled", "false");
+            builder.UseSetting("Monitoring:MessageSilenceWarnHours", warnHours.ToString());
+            builder.UseSetting("Viewer:AllowedClientIps:0", "127.0.0.1");
+            builder.UseSetting("Viewer:AllowedClientIps:1", "::1");
+
+            builder.ConfigureServices(services =>
+                services.AddSingleton<IStartupFilter>(new FakeRemoteIpStartupFilter(IPAddress.Parse("127.0.0.1"))));
+        });
     }
 }
