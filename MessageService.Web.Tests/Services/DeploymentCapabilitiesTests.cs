@@ -167,4 +167,24 @@ public class DeploymentCapabilitiesTests
 
         Assert.True(capabilitiesWithoutKey.EdgePullApiEnabled);
     }
+
+    [Fact]
+    public void EdgeProxy_DerivesAllCapabilitiesAsFalse()
+    {
+        // EdgeProxy 模式本身不碰資料庫、不收錄、不下載媒體、不跑維護、不開 ingest/edge pull API
+        var capabilities = DeploymentCapabilities.Derive(
+            DeploymentMode.EdgeProxy,
+            new LineOptions { ChannelSecret = "secret", ChannelAccessToken = "token" },
+            new ViewerOptions { Enabled = true },
+            new IngestOptions { BaseUrl = "http://core", ApiKey = "key" });
+
+        Assert.False(capabilities.ReceivesWebhook);
+        Assert.False(capabilities.HasDatabaseAccess);
+        Assert.False(capabilities.IngestApiEnabled);
+        Assert.False(capabilities.ViewerEnabled);
+        Assert.False(capabilities.OutboundHere);
+        Assert.False(capabilities.RunsRetention);
+        Assert.False(capabilities.EdgePullApiEnabled);
+    }
 }
+

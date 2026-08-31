@@ -19,6 +19,11 @@ public enum DeploymentMode
     /// 三台拓撲下與 Edge／Core 各佔一台主機時使用。</summary>
     Viewer,
 
+    /// <summary>只把 LINE webhook 原封轉發給 Edge 主機的極簡角色：部署在有合法 HTTPS 憑證的
+    /// 對外伺服器上，本身不碰資料庫、不收錄、不對外呼叫 LINE API，也不持有任何金鑰。
+    /// 見 docs/DEPLOYMENT-MODES.md。</summary>
+    EdgeProxy,
+
     // 舊名（Stage 1 之前的角色命名），與新名稱共用相同底層數值——升級時舊 appsettings.json
     // 裡的 "Full"/"Line"/"Db" 不會讓啟動失敗，讀到舊名只會記一行 Warning（見 Program.cs）。
     // 不要在新程式碼裡使用這三個名稱。

@@ -1029,5 +1029,107 @@ public class DeploymentModeTests : IDisposable
         var item = Assert.Single(pollBody.Messages);
         Assert.Equal("evt-2", item.WebhookEventId);
     }
+
+    // === EdgeProxy 模式整合測試 ===
+
+    [Fact]
+    public async Task EdgeProxyMode_WithTargetBaseUrl_StartsSuccessfully_AndResponds()
+    {
+        using var factory = CreateFactory(builder =>
+        {
+            builder.UseSetting("Deployment:Mode", "EdgeProxy");
+            builder.UseSetting("EdgeProxy:TargetBaseUrl", "http://10.231.145.94/MSLine");
+        }, allowLocalhost: false);
+
+        var ex = Record.Exception(() => factory.CreateClient());
+        Assert.Null(ex);
+
+        using var client = factory.CreateClient();
+        var response = await client.GetAsync("/healthz");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    [Fact]
+    public void EdgeProxyMode_EdgeOnlyServices_AreNotRegisteredAtAll()
+    {
+        using var factory = CreateFactory(builder =>
+        {
+            builder.UseSetting("Deployment:Mode", "EdgeProxy");
+            builder.UseSetting("EdgeProxy:TargetBaseUrl", "http://10.231.145.94/MSLine");
+        }, allowLocalhost: false);
+
+        // 直接斷言「沒註冊」而不是「解析得到」：EdgeProxy 若掉進為 Edge 寫的註冊分支，
+        // 這些服務會被註冊、然後在背景服務第一次用到時才解析失敗（相依的 EdgeChannelState
+        // 只在 ReceivesWebhook 時註冊）。那種失敗不會擋啟動、只會每個心跳週期噴一次例外，
+        // 「host 起得來」這種斷言完全抓不到，必須從註冊表本身查
+        using var scope = factory.Services.CreateScope();
+        Assert.Null(scope.ServiceProvider.GetService<IHeartbeatReporter>());
+        Assert.Null(scope.ServiceProvider.GetService<IIngestSink>());
+        Assert.Null(scope.ServiceProvider.GetService<IContentWorkSource>());
+        Assert.Null(scope.ServiceProvider.GetService<IProfileStore>());
+        Assert.Null(scope.ServiceProvider.GetService<MessageService.Outbox.OutboxDbContext>());
+    }
+
+    [Fact]
+    public async Task EdgeProxyMode_Endpoints_ReturnNotFound()
+    {
+        using var factory = CreateFactory(builder =>
+        {
+            builder.UseSetting("Deployment:Mode", "EdgeProxy");
+            builder.UseSetting("EdgeProxy:TargetBaseUrl", "http://10.231.145.94/MSLine");
+        }, allowLocalhost: false);
+
+        using var client = factory.CreateClient();
+
+        var ingestResponse = await client.PostAsJsonAsync("/api/ingest/events", SampleEnvelope());
+        Assert.Equal(HttpStatusCode.NotFound, ingestResponse.StatusCode);
+
+        var pollResponse = await client.PostAsync("/api/edge/poll", null);
+        Assert.Equal(HttpStatusCode.NotFound, pollResponse.StatusCode);
+
+        var homeResponse = await client.GetAsync("/");
+        Assert.Equal(HttpStatusCode.NotFound, homeResponse.StatusCode);
+    }
+
+    [Fact]
+    public void EdgeProxyMode_HostedServices_DoNotIncludeBackgroundWorkers()
+    {
+        using var factory = CreateFactory(builder =>
+        {
+            builder.UseSetting("Deployment:Mode", "EdgeProxy");
+            builder.UseSetting("EdgeProxy:TargetBaseUrl", "http://10.231.145.94/MSLine");
+        }, allowLocalhost: false);
+
+        using var scope = factory.Services.CreateScope();
+        var hostedServices = scope.ServiceProvider.GetServices<Microsoft.Extensions.Hosting.IHostedService>().ToList();
+        var hostedServiceTypes = hostedServices.Select(s => s.GetType().Name).ToHashSet();
+
+        Assert.DoesNotContain("HeartbeatService", hostedServiceTypes);
+        Assert.DoesNotContain("OutboxForwarderService", hostedServiceTypes);
+        Assert.DoesNotContain("EdgePullService", hostedServiceTypes);
+        Assert.DoesNotContain("ContentDownloadService", hostedServiceTypes);
+        Assert.DoesNotContain("ProfileRefreshService", hostedServiceTypes);
+        Assert.DoesNotContain("RetentionCleanupService", hostedServiceTypes);
+    }
+
+    [Fact]
+    public void EdgeProxyMode_NamedHttpClient_ConfiguredCorrectly()
+    {
+        using var factory = CreateFactory(builder =>
+        {
+            builder.UseSetting("Deployment:Mode", "EdgeProxy");
+            builder.UseSetting("EdgeProxy:TargetBaseUrl", "http://edge-host.example/MSLine");
+            builder.UseSetting("EdgeProxy:TimeoutSeconds", "15");
+        }, allowLocalhost: false);
+
+        using var scope = factory.Services.CreateScope();
+        var httpClientFactory = scope.ServiceProvider.GetRequiredService<IHttpClientFactory>();
+        var client = httpClientFactory.CreateClient(EdgeProxyOptions.HttpClientName);
+
+        Assert.NotNull(client.BaseAddress);
+        Assert.Equal("http://edge-host.example/MSLine/", client.BaseAddress.ToString());
+        Assert.Equal(TimeSpan.FromSeconds(15), client.Timeout);
+    }
 }
+
 

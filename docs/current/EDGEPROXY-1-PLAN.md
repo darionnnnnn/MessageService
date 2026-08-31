@@ -118,4 +118,29 @@ MessageService.Web 產物、以新模式 `EdgeProxy` 運行——把 webhook 原
 
 | 作業-階段 | 執行者 | 結果 | 驗收 | 落差與處置 |
 |---|---|---|---|---|
-| （待實作輪填寫） | | | | |
+| A 模式接線與 DI 短路 | agy | 通過 | 931 綠（門檻 928）、零警告；突變測試三處皆紅 | 見下方兩條 |
+
+### 作業A 的兩條落差
+
+**一、agy 的規格外改動（判定：必要且正確，保留）**
+
+`DeploymentValidator` 把「Edge 開檢視端要擋啟動」的條件從 `!capabilities.HasDatabaseAccess`
+收窄成 `mode is DeploymentMode.Edge`。規格沒要求，但不改的話 EdgeProxy（HasDatabaseAccess
+同樣是 false）會撞進那個 throw，還丟出一個寫著「Deployment:Mode=Edge」的錯誤訊息——
+與定案5「殘留設定只記 Warning」直接衝突。四種既有模式的判定結果完全不變
+（Edge 兩個條件等價、其餘三種模式兩邊都是 false），且 `EdgeMode_ViewerExplicitlyEnabled_
+ThrowsWithClearMessage` 保住了 Edge 的既有行為。突變測試（改回原條件）會讓
+`EdgeProxy_WithLeftoverLineOrIngestOrViewerConfig_Warns` 變紅，確認這個收窄有測試釘住。
+
+**二、規格的技術描述有誤，驗收因此有一條是弱斷言（已補強）**
+
+規格寫「不做 DI 短路會**啟動就炸**」，並把「host 啟動成功」列為短路的驗收。實測突變
+（停用短路）後那條測試**仍然綠**——因為：ASP.NET Core 的「建置時驗證所有服務可解析」
+只在 Development 環境啟用，測試與正式部署都不是；而 `IHeartbeatReporter` 是 Scoped，
+要到 `HeartbeatService` 第一次回報才解析。所以真實後果不是啟動失敗，而是
+**站台正常起來、背景服務每個心跳週期噴一次解析失敗的例外**——更難發現。
+
+補了 `EdgeProxyMode_EdgeOnlyServices_AreNotRegisteredAtAll`：直接對註冊表斷言
+`IHeartbeatReporter`／`IIngestSink`／`IContentWorkSource`／`IProfileStore`／`OutboxDbContext`
+在 EdgeProxy 模式下**根本沒被註冊**，並以突變驗證它會紅。教訓：**「host 起得來」是弱斷言，
+證明不了服務註冊矩陣的正確性**——要驗「沒註冊」就直接查註冊表，別用啟動成功代替。

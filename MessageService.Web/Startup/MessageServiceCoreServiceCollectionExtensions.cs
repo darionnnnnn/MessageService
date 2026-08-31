@@ -64,6 +64,7 @@ public static class MessageServiceCoreServiceCollectionExtensions
         builder.Services.Configure<OutboxOptions>(builder.Configuration.GetSection(OutboxOptions.SectionName));
         builder.Services.Configure<EncryptionOptions>(builder.Configuration.GetSection(EncryptionOptions.SectionName));
         builder.Services.Configure<HeartbeatOptions>(builder.Configuration.GetSection(HeartbeatOptions.SectionName));
+        builder.Services.Configure<EdgeProxyOptions>(builder.Configuration.GetSection(EdgeProxyOptions.SectionName));
         // 單例：金鑰是固定設定值，跟請求無關；MessageDbContext 的建構子也靠 DI 注入同一份實例，
         // 見 MessageDbContextModelCacheKeyFactory 對「模型依 cipher 狀態分開快取」的說明。合併前
         // 收錄端與檢視端各自持有一份，現在單一行程只有一份，跨行程金鑰不一致的風險本身也隨之消失
@@ -110,6 +111,30 @@ public static class MessageServiceCoreServiceCollectionExtensions
             sqliteFallbackConfigured, sqliteFallbackEnabled, sqliteFallbackTriggered, sqliteFallbackReason);
         // 給設定頁「主機狀態」曝露目前實際生效的 provider 與救場狀態，見 SettingsController
         builder.Services.AddSingleton(databaseStartupDecision);
+
+        // EdgeProxy 只做一件事：把 webhook 原封轉發給 Edge。下面所有註冊（資料庫、收錄、
+        // 媒體下載、名稱／頭貼、心跳、輪詢器、outbox）它一項都用不到，而且**不能**讓它掉進
+        // 下面那個為 Edge 寫的 else 分支——那裡會註冊 Ingest:BaseUrl 未設就會炸的具名 client，
+        // 以及相依 EdgeChannelState（只在 ReceivesWebhook 時註冊）的 HttpHeartbeatReporter，
+        // 兩者都會讓 EdgeProxy 站台啟動失敗。提早返回是唯一安全的做法：與其在下面六個區塊
+        // 各加一個排除條件（漏一個就炸），不如在這裡一次切乾淨
+        if (deploymentMode is DeploymentMode.EdgeProxy)
+        {
+            var edgeProxyOptions = builder.Configuration
+                .GetSection(EdgeProxyOptions.SectionName).Get<EdgeProxyOptions>() ?? new EdgeProxyOptions();
+
+            builder.Services.AddHttpClient(EdgeProxyOptions.HttpClientName, client =>
+            {
+                // DeploymentValidator 會在啟動時擋掉沒設 TargetBaseUrl 的情況；這裡的預設值
+                // 只是為了讓「還沒走到驗證就有東西搶著解析 client」的異常路徑不要丟出難懂的例外
+                client.BaseAddress = HttpBaseAddress.Create(edgeProxyOptions.TargetBaseUrl ?? "http://localhost/");
+                client.Timeout = TimeSpan.FromSeconds(Math.Max(1, edgeProxyOptions.TimeoutSeconds));
+            });
+
+            return new MessageServiceCoreRegistration(
+                databaseStartupDecision, autoMigrate,
+                SqliteConnectionString: null, OutboxConnectionString: null, sqliteBusyTimeoutMs);
+        }
 
         // 只在真的要用 Sqlite（HasDatabaseAccess 且 provider!=SqlServer）時才解析並建立 Db\ 目錄——
         // 避免 SqlServer 部署平白多出一個沒人用的空資料夾。Migrate() 那段（見 MigrateMessageServiceDatabase）

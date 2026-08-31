@@ -8,12 +8,20 @@ namespace MessageService.Services;
 public static class DeploymentValidator
 {
     public static void Validate(
-        DeploymentOptions deployment, LineOptions line, ViewerOptions viewer, IngestOptions ingest, ILogger logger,
+        DeploymentOptions deployment, LineOptions line, ViewerOptions viewer, IngestOptions ingest,
+        EdgeProxyOptions edgeProxy, ILogger logger,
         DatabaseStartupDecision? database = null)
     {
         var mode = deployment.Mode;
         var capabilities = DeploymentCapabilities.Derive(mode, line, viewer, ingest);
         var db = database ?? DatabaseStartupDecision.Default;
+
+        if (mode is DeploymentMode.EdgeProxy && string.IsNullOrWhiteSpace(edgeProxy.TargetBaseUrl))
+        {
+            throw new InvalidOperationException(
+                "Deployment:Mode=EdgeProxy 需要設定 EdgeProxy:TargetBaseUrl（Edge 主機的位址，" +
+                "例如 http://10.231.145.94/MSLine），否則轉發無處可送。");
+        }
 
         if (mode is DeploymentMode.Edge)
         {
@@ -71,7 +79,7 @@ public static class DeploymentValidator
         // Edge 沒有資料庫連線，檢視端整組服務都開不起來——顯式設 true 多半是從別台主機複製
         // appsettings 忘記清（跟下面 Viewer 模式殘留設定的警告同一種失誤），但這個設錯不是
         // 「多餘設定」而是「期待的功能不會存在」，寧可啟動失敗講清楚，不要讓人以為檢視端有開
-        if (!capabilities.HasDatabaseAccess && viewer.Enabled == true)
+        if (mode is DeploymentMode.Edge && viewer.Enabled == true)
         {
             throw new InvalidOperationException(
                 "Deployment:Mode=Edge 沒有資料庫連線，無法啟用檢視端（Viewer:Enabled=true）。" +
@@ -187,6 +195,18 @@ public static class DeploymentValidator
         {
             logger.LogWarning(
                 "Deployment:Mode=Viewer 不會用到 Line／Ingest 設定，但偵測到有值——" +
+                "可能是從其他主機複製 appsettings 時忘記清掉，請確認是否為刻意保留。");
+        }
+
+        // EdgeProxy 只做轉發，不會用到 Line／Ingest／檢視端設定——多半是從其他主機複製
+        // appsettings 忘記清掉，不是錯誤但值得提醒，免得誤以為這些設定在 EdgeProxy 模式下也有作用
+        if (mode is DeploymentMode.EdgeProxy &&
+            (!string.IsNullOrWhiteSpace(line.ChannelSecret) || !string.IsNullOrWhiteSpace(line.ChannelAccessToken) ||
+             !string.IsNullOrWhiteSpace(ingest.BaseUrl) || !string.IsNullOrWhiteSpace(ingest.ApiKey) ||
+             !string.IsNullOrWhiteSpace(ingest.EdgeBaseUrl) || viewer.Enabled == true))
+        {
+            logger.LogWarning(
+                "Deployment:Mode=EdgeProxy 只做轉發，不會用到 Line／Ingest／檢視端設定，但偵測到有值——" +
                 "可能是從其他主機複製 appsettings 時忘記清掉，請確認是否為刻意保留。");
         }
     }
