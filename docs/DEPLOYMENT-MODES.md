@@ -56,6 +56,9 @@ Edge 與 EdgeProxy 的關係由兩個設定決定，可以組出三種環境：
 第三種下 Edge 對 LINE 的四類 outbound（媒體、貼圖、群組／成員名稱、頭貼圖檔）
 全部改經 EdgeProxy 轉發，Edge 可以完全沒有 internet。
 
+`EdgeProxy:TargetBaseUrl` 的目標不限於 Edge：單機的 `AllInOne` 主機在內網、沒有合法憑證時，
+把它指向那台 `AllInOne` 也成立（`Line:OutboundVia` 在 `AllInOne` 上同樣有作用）。
+
 ### 防火牆方向
 
 | 需要開通 | 什麼情況下需要 |
@@ -291,7 +294,10 @@ Core 則沒有問題（參數預設值就是舊行為）。`startupAgeSeconds`�
   把它放進設定頁能改的地方，等於設錯一次就把自己鎖在門外、只能改檔案救回來。
 - **EdgeProxy 不回報心跳**：它不認識 Core、也沒有資料庫，設定頁的「主機狀態」看不到這台。
   proxy 停機的症狀是「訊息停止進來、LINE Console 的 Verify 失敗」；要主動監控請用外部
-  探測打它的 `/healthz`。
+  探測打它的 `/healthz`。轉發鏈中斷本身由主機狀態頁的「最後收到訊息」涵蓋——那條訊號不分
+  斷點在哪一段，只回答「訊息流還活著嗎」，與各主機的 outbox 積壓交叉即可判斷：
+  靜默而積壓是 0 代表斷在收 webhook 那台的上游（proxy、LINE Console 設定、憑證），
+  靜默而積壓持續增加代表斷在 Edge→Core。
 - **Pull 模式下 outbox 死信沒有告警**：每小時的死信計數 log 由轉送服務負責，Pull 模式
   不註冊它。死信積壓只能從 Core 端看到 OutboxPending 持續增加來間接察覺。
 - **拉取方向的名稱／頭貼結果沒有 ack**：poll 回應在傳輸中遺失時該筆結果會消失，

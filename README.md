@@ -169,7 +169,7 @@ dotnet user-secrets set "Line:ChannelAccessToken" "<你的 access token>"
 - 文字訊息中的網址會轉成可點連結（`target="_blank"` + `rel="noopener noreferrer"`）；所有內容（含搜尋高亮）一律用 DOM 節點組裝（`textContent`／`createElement`），不用 `innerHTML`，避免訊息內容造成 XSS
 - **手機版（<768px）**：群組列表與聊天面板全螢幕切換，標頭出現「‹」返回鈕，仿 LINE 手機版導覽
 
-**設定**：聊天頁裡的寬版 modal（`modal-xl`，手機自動轉全螢幕），不再是獨立頁面——`/Home/Settings` 路由已移除。上方四個頁籤：介面顯示（字體大小 px 數值設定，見上方「字級」；「對話內容使用全版面寬度」勾選框，預設不勾＝桌面 2/3）、隱私與匿名（名稱顯示四模式，含完全匿名動植物代號；別名編輯器可依群組篩選成員；台灣個資自動遮蔽四開關——身分證/手機/市話預設開啟、健保卡預設關閉（12 碼數字跟宅配貨運單號撞格式）；訊息保留天數，異動有確認對話框防手滑）、關鍵字遮蔽規則（新增/刪除，預設等長 `*` 或自訂替換字串，全部群組或指定群組）、主機狀態（各部署主機的存活燈號／最後回報時間／outbox 積壓／加密金鑰指紋，讀 `HostHeartbeats` 表，指紋不一致時顯示警告，見下方資料表說明）。多數變更即存（字體大小與對話寬度為 localStorage、不進 DB；PII 開關切換即 PUT；其餘 PUT 後顯示 toast），保留天數則需按「儲存」並過確認對話框才會寫入。資料只在**第一次**打開 modal 時才載入（`shown.bs.modal` 才打 API，不會讓聊天頁一開就多打一輪設定用的請求），成功寫入任何變更後關閉 modal 會自動重新整理目前的訊息視窗與側欄，不用手動重新整理頁面。
+**設定**：聊天頁裡的寬版 modal（`modal-xl`，手機自動轉全螢幕），不再是獨立頁面——`/Home/Settings` 路由已移除。上方四個頁籤：介面顯示（字體大小 px 數值設定，見上方「字級」；「對話內容使用全版面寬度」勾選框，預設不勾＝桌面 2/3）、隱私與匿名（名稱顯示四模式，含完全匿名動植物代號；別名編輯器可依群組篩選成員；台灣個資自動遮蔽四開關——身分證/手機/市話預設開啟、健保卡預設關閉（12 碼數字跟宅配貨運單號撞格式）；訊息保留天數，異動有確認對話框防手滑）、關鍵字遮蔽規則（新增/刪除，預設等長 `*` 或自訂替換字串，全部群組或指定群組）、主機狀態（各部署主機的存活燈號／最後回報時間／outbox 積壓／加密金鑰指紋，讀 `HostHeartbeats` 表，指紋不一致時顯示警告，見下方資料表說明；另顯示全站「最後收到訊息」的時刻，見 `Monitoring:MessageSilenceWarnHours`）。多數變更即存（字體大小與對話寬度為 localStorage、不進 DB；PII 開關切換即 PUT；其餘 PUT 後顯示 toast），保留天數則需按「儲存」並過確認對話框才會寫入。資料只在**第一次**打開 modal 時才載入（`shown.bs.modal` 才打 API，不會讓聊天頁一開就多打一輪設定用的請求），成功寫入任何變更後關閉 modal 會自動重新整理目前的訊息視窗與側欄，不用手動重新整理頁面。
 
 **API**（都在 `MessageService.Web/Controllers/Api/`）：
 
@@ -261,6 +261,7 @@ dotnet user-secrets set "Line:ChannelAccessToken" "<你的 access token>"
 | `UseForwardedHeaders` / `ForwardedHeaders:KnownProxies` / `KnownNetworks` | 反向代理後方時開啟並設定其中一項；IIS in-process（預設部署方式）不要開，見上 |
 | `Encryption:Enabled` / `Key` / `SearchWindowDays` | **所有直連資料庫的主機必須完全一致**，否則訊息會顯示成 `ENC2:` 密文、媒體一律回 404，見 [docs/ENCRYPTION.md](docs/ENCRYPTION.md) |
 | `Heartbeat:Enabled` / `IntervalSeconds` / `OutboxBacklogAlertMinutes` | 所有部署模式都跑的存活回報，供設定頁「主機狀態」區塊顯示；`Enabled` 預設 `true`，只有測試主機會關掉；`IntervalSeconds` 預設 60，**所有主機要設成一致**（狀態燈的 Online/Delayed/Offline 門檻是以檢視端這台的設定為基準判斷，見 `SettingsController.ComputeStatus`）；`OutboxBacklogAlertMinutes`（預設 30）是 outbox 最舊未死信項目滯留幾分鐘就記一則 Error |
+| `Monitoring:MessageSilenceWarnHours` | 設定頁「主機狀態」的訊息流靜默告警門檻（小時，預設 `0`）。該區塊一律顯示「最後收到訊息」的時刻（取自 `Groups.LastMessageAt` 的最大值）；**設 0 表示只顯示、永不告警**，超過門檻才標示警示。多久沒訊息算異常取決於各群組的活躍度，所以預設不猜。這條訊號補的是「轉發鏈中斷時心跳全綠、outbox 積壓是 0，畫面看不出訊息正在流失」的盲區——與各主機的 outbox 積壓交叉即可判斷斷點在收 webhook 那台的上游還是 Edge→Core |
 
 ---
 
