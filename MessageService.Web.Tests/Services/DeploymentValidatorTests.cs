@@ -653,4 +653,76 @@ public class DeploymentValidatorTests
 
         Assert.Contains("http", ex.Message);
     }
+
+    [Fact]
+    public void Edge_WithOutboundViaEdgeProxy_WithoutProxyUrl_Throws()
+    {
+        var line = Line(channelSecret: "secret");
+        line.OutboundVia = LineOutboundVia.EdgeProxy;
+        line.OutboundProxyBaseUrl = "";
+
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            Validate(DeploymentMode.Edge, line, new IngestOptions { BaseUrl = "https://db-host", ApiKey = "key" }));
+
+        Assert.Contains("Line:OutboundProxyBaseUrl", ex.Message);
+    }
+
+    [Fact]
+    public void Edge_WithOutboundViaEdgeProxy_MalformedProxyUrl_Throws()
+    {
+        var line = Line(channelSecret: "secret");
+        line.OutboundVia = LineOutboundVia.EdgeProxy;
+        line.OutboundProxyBaseUrl = "192.0.2.10/MSLine"; // 漏 scheme
+
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            Validate(DeploymentMode.Edge, line, new IngestOptions { BaseUrl = "https://db-host", ApiKey = "key" }));
+
+        Assert.Contains("Line:OutboundProxyBaseUrl", ex.Message);
+    }
+
+    [Fact]
+    public void Edge_WithOutboundViaEdgeProxy_ValidProxyUrl_DoesNotThrow()
+    {
+        var line = Line(channelSecret: "secret");
+        line.OutboundVia = LineOutboundVia.EdgeProxy;
+        line.OutboundProxyBaseUrl = "http://192.0.2.10/MSLine";
+
+        var ex = Record.Exception(() =>
+            Validate(DeploymentMode.Edge, line, new IngestOptions { BaseUrl = "https://db-host", ApiKey = "key" }));
+
+        Assert.Null(ex);
+    }
+
+    [Fact]
+    public void EdgeProxy_WithOutboundViaEdgeProxy_DoesNotThrow()
+    {
+        // EdgeProxy 模式在自己的區塊就 return，不受這些檢查影響
+        var line = Line(channelSecret: "");
+        line.OutboundVia = LineOutboundVia.EdgeProxy;
+        line.OutboundProxyBaseUrl = ""; // 故意留空
+
+        var ex = Record.Exception(() =>
+            Validate(DeploymentMode.EdgeProxy, line, edgeProxy: new EdgeProxyOptions { TargetBaseUrl = "http://192.0.2.10/MSLine" }));
+
+        Assert.Null(ex);
+    }
+
+    [Fact]
+    public void Core_WithOutboundViaEdgeProxy_LogsWarning()
+    {
+        var logger = new CapturingLogger();
+        var line = Line(channelSecret: "");
+        line.OutboundVia = LineOutboundVia.EdgeProxy;
+        line.OutboundProxyBaseUrl = "http://192.0.2.10/MSLine";
+
+        DeploymentValidator.Validate(
+            new DeploymentOptions { Mode = DeploymentMode.Core },
+            line,
+            new ViewerOptions(),
+            new IngestOptions { ApiKey = "key" },
+            new EdgeProxyOptions(),
+            logger);
+
+        Assert.Contains(logger.Warnings, w => w.Contains("Line:OutboundVia=EdgeProxy 只在對外打 LINE API 的模式"));
+    }
 }

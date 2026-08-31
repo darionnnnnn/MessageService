@@ -15,6 +15,7 @@ public class LineProfileClient : ILineProfileClient
 
     private readonly HttpClient _httpClient;
     private readonly HttpClient _imageHttpClient;
+    private readonly LineOptions _options;
     private readonly ILogger<LineProfileClient> _logger;
 
     public LineProfileClient(IHttpClientFactory httpClientFactory, IOptions<LineOptions> options, ILogger<LineProfileClient> logger)
@@ -25,6 +26,7 @@ public class LineProfileClient : ILineProfileClient
             new AuthenticationHeaderValue("Bearer", options.Value.ChannelAccessToken);
             
         _imageHttpClient = httpClientFactory.CreateClient(ImageHttpClientName);
+        _options = options.Value;
         _logger = logger;
     }
 
@@ -85,7 +87,12 @@ public class LineProfileClient : ILineProfileClient
 
         try
         {
-            using var response = await _imageHttpClient.GetAsync(pictureUrl, cancellationToken);
+            var proxyBaseAddress = !string.IsNullOrWhiteSpace(_options.OutboundProxyBaseUrl)
+                ? HttpBaseAddress.Create(_options.OutboundProxyBaseUrl)
+                : null;
+            var requestUrl = LineImageUrlRewriter.Rewrite(pictureUrl, _options.OutboundVia, proxyBaseAddress);
+
+            using var response = await _imageHttpClient.GetAsync(requestUrl, cancellationToken);
             response.EnsureSuccessStatusCode();
             
             var contentLength = response.Content.Headers.ContentLength;

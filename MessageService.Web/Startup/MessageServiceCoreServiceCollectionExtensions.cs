@@ -134,6 +134,11 @@ public static class MessageServiceCoreServiceCollectionExtensions
                 client.Timeout = TimeSpan.FromSeconds(Math.Max(1, edgeProxyOptions.TimeoutSeconds));
             });
 
+            builder.Services.AddHttpClient(EdgeProxyLineForwarder.HttpClientName, client =>
+            {
+                client.Timeout = TimeSpan.FromMinutes(10);
+            });
+
             return new MessageServiceCoreRegistration(
                 databaseStartupDecision, autoMigrate,
                 SqliteConnectionString: null, OutboxConnectionString: null, sqliteBusyTimeoutMs);
@@ -305,11 +310,36 @@ public static class MessageServiceCoreServiceCollectionExtensions
 
             builder.Services.AddScoped<ILineContentClient, LineContentClient>();
             builder.Services.AddScoped<ILineProfileClient, LineProfileClient>();
+            var lineOptions = builder.Configuration.GetSection(LineOptions.SectionName).Get<LineOptions>()
+                ?? new LineOptions();
+            var useEdgeProxy = lineOptions.OutboundVia is LineOutboundVia.EdgeProxy;
+            Uri? proxyBaseUri = useEdgeProxy && !string.IsNullOrWhiteSpace(lineOptions.OutboundProxyBaseUrl)
+                ? HttpBaseAddress.Create(lineOptions.OutboundProxyBaseUrl)
+                : null;
+
             // 影片/檔案原檔可達數百 MB，預設 100 秒 timeout 不夠
-            builder.Services.AddHttpClient(LineContentClient.HttpClientName,
-                client => client.Timeout = TimeSpan.FromMinutes(10));
-            builder.Services.AddHttpClient(LineContentClient.StickerHttpClientName);
-            builder.Services.AddHttpClient(LineProfileClient.HttpClientName);
+            builder.Services.AddHttpClient(LineContentClient.HttpClientName, client =>
+            {
+                if (useEdgeProxy && proxyBaseUri is not null)
+                {
+                    client.BaseAddress = new Uri(proxyBaseUri, "line/data/");
+                }
+                client.Timeout = TimeSpan.FromMinutes(10);
+            });
+            builder.Services.AddHttpClient(LineContentClient.StickerHttpClientName, client =>
+            {
+                if (useEdgeProxy && proxyBaseUri is not null)
+                {
+                    client.BaseAddress = new Uri(proxyBaseUri, "line/sticker/");
+                }
+            });
+            builder.Services.AddHttpClient(LineProfileClient.HttpClientName, client =>
+            {
+                if (useEdgeProxy && proxyBaseUri is not null)
+                {
+                    client.BaseAddress = new Uri(proxyBaseUri, "line/api/");
+                }
+            });
             builder.Services.AddHttpClient(LineProfileClient.ImageHttpClientName,
                 client => client.MaxResponseContentBufferSize = LineProfileClient.MaxImageSize);
 

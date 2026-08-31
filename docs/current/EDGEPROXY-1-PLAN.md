@@ -341,3 +341,37 @@ webhook 來源限制。委派 agy，逐段驗收。
 - 跨段 grep：新設定鍵消費點、DelegatingHandler 掛滿六處出站、樣板與程式鍵名一致。
 - 兩個獨立 Explore 審全 diff；NUL／BOM 掃描。
 
+## 執行紀錄（第二階段）
+
+| 作業-階段 | 執行者 | 結果 | 驗收 | 落差與處置 |
+|---|---|---|---|---|
+| D LINE outbound 經 proxy | agy | 通過（修正一項高風險後） | 986 綠（門檻 968）、零警告 | 見下方 |
+
+### 作業D 的落差：agy 的 host 檢查有 SSRF 繞過（高風險，已修）
+
+定案10b／11 的硬契約是「`{host}` 必須通過寫死的網域字尾允許清單，否則就是開放代理／SSRF」。
+agy 實作了字尾比對，但**只對原始字串片段比對**：
+
+```
+GET /line/image/attacker.example%23.line-scdn.net/x
+  → Request.Path 解碼成 /line/image/attacker.example#.line-scdn.net/x
+  → host = "attacker.example#.line-scdn.net"  → 字尾檢查「通過」
+  → targetUrl = "https://attacker.example#.line-scdn.net/x"
+  → 實際連到的 Uri.Host = attacker.example      ← 繞過成功
+```
+
+`%23`（#）、`%3F`（?）、`%40`（@）三種在實測中確認可繞過（`%2F`、`%5C` 被 ASP.NET
+的路徑正規化擋在更前面）。agy 的測試只涵蓋單純的 `evil.example.com`，抓不到這類形狀。
+
+修法（三道防線，缺一不可）：
+1. `IsPlainHostName`：字元集只允許英數字、`.`、`-`——把所有在 URL 裡有特殊意義的字元擋掉。
+2. 字尾允許清單比對（原有）。
+3. 組出 URL 後再解析一次，斷言 `Uri.Host` 與宣稱的 host **完全一致**——擋掉前兩道沒想到的形狀。
+
+補 `Get_LineImage_HostWithUrlDelimiters_IsRejected` 五個攻擊向量的參數化測試，
+並以突變（退回只做字尾比對）驗證其中三條確實會紅。
+
+**教訓**：對「之後要被拼進 URL 的字串」做安全檢查時，**在拼接前的原始字串上比對是不夠的**
+——必須以解析後的結果（`Uri.Host`）為準，或先把字元集夾死。這條與本專案既有的
+「`Enum.TryParse` 會把 `"99"` 判成合法列舉」是同一類陷阱：驗證的對象和實際生效的對象
+不是同一個東西。

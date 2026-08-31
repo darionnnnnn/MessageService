@@ -1130,6 +1130,59 @@ public class DeploymentModeTests : IDisposable
         Assert.Equal("http://edge-host.example/MSLine/", client.BaseAddress.ToString());
         Assert.Equal(TimeSpan.FromSeconds(15), client.Timeout);
     }
+
+    [Fact]
+    public void EdgeMode_LineHttpClients_WhenDirect_BaseAddressIsNull()
+    {
+        using var factory = CreateFactory(builder =>
+        {
+            builder.UseSetting("Deployment:Mode", "Edge");
+            builder.UseSetting("Ingest:BaseUrl", "https://core-host.example");
+            builder.UseSetting("Ingest:ApiKey", "test-key");
+            builder.UseSetting("Line:ChannelSecret", "secret");
+            builder.UseSetting("Line:ChannelAccessToken", "token");
+            builder.UseSetting("Line:OutboundHere", "true");
+            builder.UseSetting("Line:OutboundVia", "Direct");
+        }, allowLocalhost: false);
+
+        using var scope = factory.Services.CreateScope();
+        var httpClientFactory = scope.ServiceProvider.GetRequiredService<IHttpClientFactory>();
+
+        var contentClient = httpClientFactory.CreateClient(LineContentClient.HttpClientName);
+        var stickerClient = httpClientFactory.CreateClient(LineContentClient.StickerHttpClientName);
+        var profileClient = httpClientFactory.CreateClient(LineProfileClient.HttpClientName);
+
+        Assert.Null(contentClient.BaseAddress);
+        Assert.Null(stickerClient.BaseAddress);
+        Assert.Null(profileClient.BaseAddress);
+    }
+
+    [Fact]
+    public void EdgeMode_LineHttpClients_WhenEdgeProxy_BaseAddressPointsToProxy()
+    {
+        using var factory = CreateFactory(builder =>
+        {
+            builder.UseSetting("Deployment:Mode", "Edge");
+            builder.UseSetting("Ingest:BaseUrl", "https://core-host.example");
+            builder.UseSetting("Ingest:ApiKey", "test-key");
+            builder.UseSetting("Line:ChannelSecret", "secret");
+            builder.UseSetting("Line:ChannelAccessToken", "token");
+            builder.UseSetting("Line:OutboundHere", "true");
+            builder.UseSetting("Line:OutboundVia", "EdgeProxy");
+            builder.UseSetting("Line:OutboundProxyBaseUrl", "http://192.0.2.10/MSLine");
+        }, allowLocalhost: false);
+
+        using var scope = factory.Services.CreateScope();
+        var httpClientFactory = scope.ServiceProvider.GetRequiredService<IHttpClientFactory>();
+
+        var contentClient = httpClientFactory.CreateClient(LineContentClient.HttpClientName);
+        var stickerClient = httpClientFactory.CreateClient(LineContentClient.StickerHttpClientName);
+        var profileClient = httpClientFactory.CreateClient(LineProfileClient.HttpClientName);
+
+        Assert.Equal("http://192.0.2.10/MSLine/line/data/", contentClient.BaseAddress?.ToString());
+        Assert.Equal("http://192.0.2.10/MSLine/line/sticker/", stickerClient.BaseAddress?.ToString());
+        Assert.Equal("http://192.0.2.10/MSLine/line/api/", profileClient.BaseAddress?.ToString());
+    }
 }
 
 

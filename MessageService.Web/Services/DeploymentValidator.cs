@@ -136,6 +136,34 @@ public static class DeploymentValidator
                 "Line:ChannelAccessToken，否則媒體下載與頭貼快取會在背景服務啟動後持續打 401。");
         }
 
+        // Line:OutboundVia 與 OutboundProxyBaseUrl 驗證
+        if (line.OutboundVia is LineOutboundVia.EdgeProxy)
+        {
+            if (string.IsNullOrWhiteSpace(line.OutboundProxyBaseUrl))
+            {
+                throw new InvalidOperationException(
+                    "設定了 Line:OutboundVia=EdgeProxy，必須同時設定 Line:OutboundProxyBaseUrl（EdgeProxy 主機的位址，" +
+                    "例如 http://192.0.2.10/MSLine），否則外送請求無處可送。");
+            }
+
+            if (!Uri.TryCreate(line.OutboundProxyBaseUrl.Trim(), UriKind.Absolute, out var proxyUri)
+                || (proxyUri.Scheme != Uri.UriSchemeHttp && proxyUri.Scheme != Uri.UriSchemeHttps))
+            {
+                throw new InvalidOperationException(
+                    $"Line:OutboundProxyBaseUrl（{line.OutboundProxyBaseUrl}）不是合法的 http/https 位址——" +
+                    "請確認有帶 scheme，例如 http://192.0.2.10/MSLine。");
+            }
+
+            // 非 Edge／AllInOne 模式（也就是不會對外打 LINE 的模式）設了 OutboundVia=EdgeProxy
+            // → 記 Warning 說明不會有作用（比照同檔既有「Ingest:Channel 只在 Edge 有作用」那段的寫法）
+            if (mode is not (DeploymentMode.Edge or DeploymentMode.AllInOne))
+            {
+                logger.LogWarning(
+                    "Line:OutboundVia=EdgeProxy 只在對外打 LINE API 的模式（Deployment:Mode=Edge 或 AllInOne）有作用，" +
+                    "這台主機（{Mode}）的設定不會有任何效果。", mode);
+            }
+        }
+
         // Core／Viewer 顯式把 OutboundHere 開成 true 表示「由這台打 LINE 內容／profile API」，
         // 此時 Edge 端必須顯式設 false，否則兩台都會下載同一批媒體（LINE 內容 API 不冪等計費、
         // 也浪費頻寬）。這種跨主機的組合錯誤單機驗證不出來，只能提醒

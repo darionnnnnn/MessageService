@@ -145,6 +145,15 @@ public static class MessageServiceRequestPipelineExtensions
 
         if (deploymentMode is DeploymentMode.EdgeProxy)
         {
+            app.UseWhen(
+                context => context.Request.Path.StartsWithSegments("/line"),
+                lineProxyPipeline =>
+                {
+                    lineProxyPipeline.UseMiddleware<IpAllowlistMiddleware>(
+                        new IpAllowlistOptions("EdgeProxy:AllowedClientIps", "line-proxy"));
+                    lineProxyPipeline.UseMiddleware<EdgeProxyLineForwarder>();
+                });
+
             app.UseMiddleware<EdgeProxyForwarderMiddleware>();
         }
 
