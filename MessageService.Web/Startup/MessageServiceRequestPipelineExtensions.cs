@@ -143,6 +143,11 @@ public static class MessageServiceRequestPipelineExtensions
                 });
         }
 
+        if (deploymentMode is DeploymentMode.EdgeProxy)
+        {
+            app.UseMiddleware<EdgeProxyForwarderMiddleware>();
+        }
+
         app.UseRouting();
         app.UseAuthorization();
 
