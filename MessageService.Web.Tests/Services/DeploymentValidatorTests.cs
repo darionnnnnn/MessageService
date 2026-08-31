@@ -578,7 +578,7 @@ public class DeploymentValidatorTests
             new EdgeProxyOptions { TargetBaseUrl = "http://10.231.145.94/MSLine" },
             logger);
 
-        Assert.Contains(logger.Warnings, w => w.Contains("EdgeProxy 只做轉發，不會用到 Line／Ingest／檢視端設定"));
+        Assert.Contains(logger.Warnings, w => w.Contains("EdgeProxy 只做轉發"));
     }
 
     [Fact]
@@ -596,5 +596,22 @@ public class DeploymentValidatorTests
 
         Assert.DoesNotContain(logger.Warnings, w => w.Contains("EdgeProxy 只做轉發"));
     }
-}
 
+    [Fact]
+    public void EdgeProxy_WithLeftoverDatabaseConnectionString_Warns()
+    {
+        var logger = new CapturingLogger();
+
+        // 整份設定檔從 Core 複製過來時最常見的殘留——資料庫區塊對 EdgeProxy 完全沒有作用
+        DeploymentValidator.Validate(
+            new DeploymentOptions { Mode = DeploymentMode.EdgeProxy },
+            new LineOptions { ChannelSecret = "", ChannelAccessToken = "", OutboundHere = null },
+            new ViewerOptions(),
+            new IngestOptions(),
+            new EdgeProxyOptions { TargetBaseUrl = "http://10.231.145.94/MSLine" },
+            logger,
+            DatabaseStartupDecision.Default with { HasSqlServerConnectionString = true });
+
+        Assert.Contains(logger.Warnings, w => w.Contains("EdgeProxy 只做轉發"));
+    }
+}

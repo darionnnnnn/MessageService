@@ -198,15 +198,18 @@ public static class DeploymentValidator
                 "可能是從其他主機複製 appsettings 時忘記清掉，請確認是否為刻意保留。");
         }
 
-        // EdgeProxy 只做轉發，不會用到 Line／Ingest／檢視端設定——多半是從其他主機複製
-        // appsettings 忘記清掉，不是錯誤但值得提醒，免得誤以為這些設定在 EdgeProxy 模式下也有作用
+        // EdgeProxy 只做轉發，不會用到 Line／Ingest／檢視端／資料庫設定——多半是從其他主機複製
+        // appsettings 忘記清掉，不是錯誤但值得提醒，免得誤以為這些設定在 EdgeProxy 模式下也有作用。
+        // 資料庫只查得到 SQL Server 連線字串（Sqlite 那條的解析在服務註冊階段，EdgeProxy 已提早
+        // 返回不會走到，這裡拿不到）——涵蓋最常見的「整份設定檔複製過來」情境就夠了
         if (mode is DeploymentMode.EdgeProxy &&
             (!string.IsNullOrWhiteSpace(line.ChannelSecret) || !string.IsNullOrWhiteSpace(line.ChannelAccessToken) ||
              !string.IsNullOrWhiteSpace(ingest.BaseUrl) || !string.IsNullOrWhiteSpace(ingest.ApiKey) ||
-             !string.IsNullOrWhiteSpace(ingest.EdgeBaseUrl) || viewer.Enabled == true))
+             !string.IsNullOrWhiteSpace(ingest.EdgeBaseUrl) || viewer.Enabled == true ||
+             db.HasSqlServerConnectionString))
         {
             logger.LogWarning(
-                "Deployment:Mode=EdgeProxy 只做轉發，不會用到 Line／Ingest／檢視端設定，但偵測到有值——" +
+                "Deployment:Mode=EdgeProxy 只做轉發，不會用到 Line／Ingest／檢視端／資料庫設定，但偵測到有值——" +
                 "可能是從其他主機複製 appsettings 時忘記清掉，請確認是否為刻意保留。");
         }
     }

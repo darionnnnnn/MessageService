@@ -42,7 +42,7 @@
      （`Viewer:Enabled=false`）＋獨立 `Viewer`** 兩台（硬前提：要用 SQL Server，見下一點）
    - webhook 要對外曝露在 DMZ、資料庫在內網連不到 → **Edge + Core** 兩台拆機
    - 想讓檢視端獨立一台、Core 專職資料庫與 ingest → **Edge + Core + Viewer** 三台
-   - 四種角色的能力矩陣、兩台拓撲兩種切法的完整比較見 [DEPLOYMENT-MODES.md](DEPLOYMENT-MODES.md)
+   - 五種角色的能力矩陣、兩台拓撲兩種切法的完整比較見 [DEPLOYMENT-MODES.md](DEPLOYMENT-MODES.md)
 2. **SQL Server 還是 SQLite？**
    - 正式環境、多人同時查詢 → SQL Server：填 `ConnectionStrings:SqlServer` 就好，不用另外設
      `Database:Provider`——沒填就自動用 SQLite、填了就自動用 SQL Server（見
@@ -105,7 +105,7 @@ dotnet publish MessageService.Web -c Release -o C:\Deploy\MessageService
 
 ## Part C：設定站台目錄下的 `appsettings.Production.json`
 
-`deploy/` 目錄下有四份樣板，對應四種角色：
+`deploy/` 目錄下有五份樣板，對應五種角色：
 
 | 樣板 | 角色 | 用在哪台主機 |
 |---|---|---|
@@ -113,6 +113,7 @@ dotnet publish MessageService.Web -c Release -o C:\Deploy\MessageService
 | `deploy/appsettings.Production.Edge.json` | 拆機：Edge | 只收 webhook，透過 ingest API 轉送給 Core |
 | `deploy/appsettings.Production.Core.json` | 拆機：Core | 直連資料庫＋ingest API＋檢視端（兩台拆機時） |
 | `deploy/appsettings.Production.Viewer.json` | 三台拓撲、或兩台拓撲切法 A：Viewer | 純檢視端，不收 webhook、不開 ingest API（見 [DEPLOYMENT-MODES.md](DEPLOYMENT-MODES.md) 的兩台拓撲兩種切法） |
+| `deploy/appsettings.Production.EdgeProxy.json` | Edge 沒有合法 HTTPS 憑證時 | 借用既有憑證的對外伺服器，只把 webhook 原封轉發給 Edge（見下方 Part E1c） |
 
 部署到某台主機時：
 
@@ -131,7 +132,7 @@ dotnet publish MessageService.Web -c Release -o C:\Deploy\MessageService
 **不在發佈成品裡**，重新部署解壓新版本時不會被覆蓋——設定天然存活於重佈之間，不需要每次
 重新填一次。
 
-> `Deployment:Mode` 的合法值是 `AllInOne`／`Edge`／`Core`／`Viewer`；升級前的舊部署若還在用
+> `Deployment:Mode` 的合法值是 `AllInOne`／`Edge`／`Core`／`Viewer`／`EdgeProxy`；升級前的舊部署若還在用
 > `Full`／`Line`／`Db`，不用急著改，程式會自動接受並在 log 記一則提醒，但新部署一律用新名稱。
 
 ### SQL Server：建表
@@ -618,6 +619,6 @@ SQL Server 沒有這個問題，不需要對應的步驟。
 ## 參考文件
 
 - [LINE-BOT-SETUP.md](LINE-BOT-SETUP.md) — LINE Bot 建立與本機測試的完整逐步教學（含疑難排解）
-- [DEPLOYMENT-MODES.md](DEPLOYMENT-MODES.md) — AllInOne／Edge／Core／Viewer 四種角色的架構與設計理由
+- [DEPLOYMENT-MODES.md](DEPLOYMENT-MODES.md) — AllInOne／Edge／Core／Viewer／EdgeProxy 五種角色的架構與設計理由
 - [ENCRYPTION.md](ENCRYPTION.md) — 應用層加密設定
 - [README.md](../README.md) — 完整設定鍵清單、資料表結構

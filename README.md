@@ -31,8 +31,8 @@ MessageService.sln
 
 bot 加入群組後，透過 LINE webhook 接收群組內的訊息並寫入資料庫。職責只有三件事：**收 webhook → 落地資料庫 → 每日清除逾期資料**。
 
-支援四種部署角色（`Deployment:Mode`：`AllInOne`／`Edge`／`Core`／`Viewer`），因應收 webhook 的
-主機未必碰得到資料庫的情況；預設 `AllInOne` 就是下面這張圖。四種角色**功能完全對等**
+支援五種部署角色（`Deployment:Mode`：`AllInOne`／`Edge`／`Core`／`Viewer`／`EdgeProxy`），因應收
+webhook 的主機未必碰得到資料庫的情況；預設 `AllInOne` 就是下面這張圖。前四種角色**功能完全對等**
 （訊息收送、媒體下載、頭貼快取皆已用真實雙行程端到端驗證過，差別只在資料流經過幾台機器），
 媒體下載與頭貼快取獨立於模式、只看 `Line:OutboundHere` 這台主機要不要對外連 LINE，
 詳見 [docs/DEPLOYMENT-MODES.md](docs/DEPLOYMENT-MODES.md)。
@@ -81,7 +81,7 @@ StickerContentBackfillService（啟動時替既有貼圖訊息補出 Pending 內
 
 | 設定鍵 | 說明 |
 |---|---|
-| `Deployment:Mode` | `AllInOne`（預設）／`Edge`／`Core`／`Viewer`（舊名 `Full`／`Line`／`Db` 相容），見 [docs/DEPLOYMENT-MODES.md](docs/DEPLOYMENT-MODES.md) |
+| `Deployment:Mode` | `AllInOne`（預設）／`Edge`／`Core`／`Viewer`／`EdgeProxy`（舊名 `Full`／`Line`／`Db` 相容），見 [docs/DEPLOYMENT-MODES.md](docs/DEPLOYMENT-MODES.md) |
 | `Database:Provider` | `Sqlite`／`SqlServer`，選填。未設定時依 `ConnectionStrings:SqlServer` 有沒有值推導，顯式設定永遠優先，見 [docs/DEPLOYMENT-MODES.md](docs/DEPLOYMENT-MODES.md) |
 | `Database:SqliteFallback` | `bool`，預設 `true`，僅 `Deployment:Mode=AllInOne` 有效。有效 provider 為 SqlServer 時，啟動時探測連線／schema 失敗就改用本機 SQLite 撐起服務；設 `false` 改成寧可啟動失敗 |
 | `ConnectionStrings:SqlServer` / `Sqlite` | 連線字串，`Sqlite` 預設 `Data Source=Db/messages.db`（相對路徑以 ContentRootPath 為基準，第一次啟動自動建立目錄） |

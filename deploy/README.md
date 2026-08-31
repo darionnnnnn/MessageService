@@ -7,7 +7,7 @@
 
 ## appsettings.Production.*.json
 
-四個拓撲各一份樣板，對應 `Deployment:Mode` 的四個值：
+五個拓撲各一份樣板，對應 `Deployment:Mode` 的五個值：
 
 | 檔案 | 拓撲 | 用在哪台主機 |
 |---|---|---|

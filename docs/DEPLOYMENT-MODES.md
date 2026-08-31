@@ -1,12 +1,12 @@
 # 部署角色（Deployment Modes）
 
-> 本文件只講現行的四種角色定義與設定；合併專案的原因、設計決策理由、雙行程端到端驗證紀錄
+> 本文件只講現行的五種角色定義與設定；合併專案的原因、設計決策理由、雙行程端到端驗證紀錄
 > 見 [docs/history/DEPLOYMENT-MODES-DECISIONS.md](history/DEPLOYMENT-MODES-DECISIONS.md)——
 > 非必要不需要讀，避免浪費 token。
 
 `MessageService.Web` 是唯一的可發佈專案，同一份成品可以部署成一台包辦，也可以拆成兩三台，
 由每台主機各自的 `Deployment:Mode` 設定決定角色——不是不同的部署產物，只是設定差異。
-`Deployment:Mode` 的合法值是 `AllInOne`／`Edge`／`Core`／`Viewer`；舊名稱 `Full`／`Line`／`Db`
+`Deployment:Mode` 的合法值是 `AllInOne`／`Edge`／`Core`／`Viewer`／`EdgeProxy`；舊名稱 `Full`／`Line`／`Db`
 仍是相容別名（讀到時 log 記一則提醒，不擋啟動）。
 
 ## 五種角色
@@ -38,8 +38,9 @@ request body 從串流直接複製成位元組轉發，路徑上沒有任何解�
 raw body 算的 HMAC，任何反序列化再序列化都會讓 Edge 驗簽失敗。轉發的標頭只有
 `Content-Type` 與 `X-Line-Signature` 兩個，其餘一律不轉。
 
-其他一切它都不做：不碰資料庫、不緩衝、不落地、不重試、不驗簽、不持有任何金鑰，
-除了 `/healthz` 之外所有路徑都回 404。Edge 不可達時回 502，由 LINE 的 redelivery 重送
+其他一切它都不做：不碰資料庫、不緩衝、不落地、不重試、不驗簽、不持有任何金鑰。
+除了兩支健康檢查探針（`/healthz` 與 `/healthz/ready`，後者在沒有資料庫的模式一律回 200）
+之外，所有路徑都回 404。Edge 不可達時回 502，由 LINE 的 redelivery 重送
 （Edge 端 outbox 與落地端的唯一索引保證重送安全）。
 
 防火牆只需開通 proxy→Edge 單向。`Ingest:AllowedClientIps` 與這條路徑無關——那份白名單

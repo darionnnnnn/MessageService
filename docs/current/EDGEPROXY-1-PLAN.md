@@ -163,3 +163,30 @@ ThrowsWithClearMessage` 保住了 Edge 的既有行為。突變測試（改回�
 順帶釐清一個實務認知：真正會破壞 `X-Line-Signature` 驗簽的不是字串往返（LINE 送的
 一定是合法 UTF-8），而是 **JSON 反序列化再序列化**（空白、鍵順序、跳脫方式都會變）。
 現行實作從 `Request.Body` 直接 `CopyTo` 成 `byte[]`，這條路徑上沒有任何解析，安全。
+
+## 終檢輪
+
+### 文件終檢（獨立 Explore）
+
+契約逐條對照：定案 1~8 全部做到，兩處與文件敘述不符、一處實作缺口，皆已修：
+
+| 發現 | 處置 |
+|---|---|
+| **定案5 的實作缺口**：殘留設定警告漏了 Database（定案明列） | `DeploymentValidator` 加上 `db.HasSqlServerConnectionString` 條件並補測試。Sqlite 連線字串的解析在服務註冊階段、EdgeProxy 已提早返回拿不到，不為此改簽章——涵蓋「整份設定檔複製過來」這個主要情境即可，限制寫進註解 |
+| `deploy/appsettings.Production.EdgeProxy.json` 註解宣稱 Database／Encryption 殘留會 Warning，實際不會 | 上一條補了 SQL Server 連線字串的檢查後，註解改為準確列出實際會警告的範圍 |
+| `DEPLOYMENT-MODES.md`「除了 `/healthz` 之外所有路徑都回 404」與程式碼不符——`/healthz/ready` 在無資料庫的模式也回 200 | 敘述改為「除了兩支健康檢查探針之外」 |
+| 「四種角色」字樣未同步成五種，共 6 處（`DEPLOYMENT-MODES` 前言與合法值、`DEPLOYMENT-GUIDE` 三處與樣板表、`deploy/README` 前言、`README` 兩處） | 全部同步。`README` 的「四種角色**功能完全對等**」改為「**前四種**角色功能完全對等」——EdgeProxy 刻意不對等，不能被這句話涵蓋 |
+
+文件寫作紀律掃描本輪新增段落：無演變敘述違規。
+
+### 程式碼終檢
+
+第一次執行因 session 額度中斷，重跑後結果記於下方。
+
+### 定案8 的字面違反（已於作業A 判定保留，此處覆核）
+
+文件終檢指出 `DeploymentValidator` 把檢視端擋啟動條件從 `!capabilities.HasDatabaseAccess`
+改寫成 `mode is DeploymentMode.Edge`，字面上違反定案8「任何既有分支條件不得改寫語意」。
+覆核結論維持保留：四種既有模式的判定結果完全等價（只有 Edge 的 `HasDatabaseAccess` 是
+false），且不改的話 EdgeProxy 會撞進該 throw 並丟出寫著「Mode=Edge」的錯誤訊息，
+與定案5 直接衝突。判定為「定案8 的例外」而非違反，理由與測試釘記於作業A 落差一。
