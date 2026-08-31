@@ -443,3 +443,17 @@ handler 六處掛滿無漏無重、Reload→`IOptionsMonitor` 串接與原子寫
   觸發條件：實測發現檢視端延遲有感時，改用 `IOptionsMonitor` + change token 而非每次讀 `IConfiguration`。
 - **`LineProfileImage`／`LineSticker` 的 Authorization**：CDN 不需認證，刻意不掛。
 
+## 換模型體檢（Fable，2026-08-31，併 dev 後補做）
+
+實作 agy、終檢 Opus、本節體檢 Fable。對 `91c7984..115d97a` 全 diff 重掃：規劃比對
+（定案 1~16 逐條有對應實作、「明確不做」四項確認未被偷做——antiforgery 只出現在文件）、
+獵 bug（三道 host 防線含尾點／port／IDN／query 附加順序、512KB 上限、節流 flapping、
+哨兵刪陣列、遮罩門檻、DPAPI 原子寫入、DelegatingHandler 動態附標頭、DI 短路與
+AllowAutoRedirect=false 皆逐行查證）、文件稽核（樣板鍵名與程式一致、RFC 5737、
+五種角色字樣同步）、BOM／NUL 掃描乾淨、全量 1027 綠。**無新發現。**
+
+兩條非缺陷觀察（不修）：`LineProfileClient` 以 `ReferenceEquals` 判斷「未被改寫」，
+依賴 `LineImageUrlRewriter` 不改寫時回傳原字串實例（現行成立）；其告警節流用
+`DateTimeOffset.UtcNow` 靜態欄位而非 `TimeProvider`（與 `EdgeProxyForwarderMiddleware`
+慣例不一致，但該路徑無時間敏感測試需求）。
+
