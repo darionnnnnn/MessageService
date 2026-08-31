@@ -60,9 +60,13 @@ public class IpAllowlistMiddleware
 
     private List<IPNetwork> GetAllowedNetworks()
     {
-        var rawEntries = _configuration.GetSection(_options.ConfigSectionName).Get<string[]>() ?? [];
         lock (_lock)
         {
+            // 讀設定放在鎖內：在鎖外讀的話，兩個併發請求可能一個讀到新值、一個讀到舊值，
+            // 而後進鎖的那個會把快取寫回舊值——熱更新在一次請求窗口內被回退。
+            // 若那次更新是「縮小白名單」，被移除的來源在該窗口內仍會被放行
+            var rawEntries = _configuration.GetSection(_options.ConfigSectionName).Get<string[]>() ?? [];
+
             if (_cachedRawEntries.SequenceEqual(rawEntries, StringComparer.Ordinal))
             {
                 return _cachedNetworks;

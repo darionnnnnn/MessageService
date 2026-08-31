@@ -140,5 +140,26 @@ public class EdgeAdminPageTests
         Assert.DoesNotContain("<div class=\"alert-success\">", htmlNotSaved);
         Assert.DoesNotContain("設定已儲存，並立即生效。", htmlNotSaved);
     }
-}
 
+    [Theory]
+    [InlineData("abcd")]            // 長度剛好 4：末四碼＝整串
+    [InlineData("abcde")]
+    [InlineData("abcdef1")]         // 5~7：露出一半以上
+    public void MaskSecret_ShortSecrets_NeverRevealAnyCharacter(string secret)
+    {
+        var masked = EdgeAdminPage.MaskSecret(secret);
+
+        // 遮罩是給人辨認「是不是我設的那把」，不是把金鑰放到畫面上
+        Assert.Equal("••••••••", masked);
+        Assert.DoesNotContain(secret, masked, System.StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void MaskSecret_LongEnoughSecret_RevealsOnlyLastFour()
+    {
+        var masked = EdgeAdminPage.MaskSecret("0123456789abcdef");
+
+        Assert.Equal("••••••••cdef", masked);
+        Assert.DoesNotContain("0123", masked, System.StringComparison.Ordinal);
+    }
+}

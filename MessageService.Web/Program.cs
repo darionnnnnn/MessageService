@@ -40,10 +40,27 @@ var usedLegacyModeName = rawModeValue is not null
 if (deploymentMode is DeploymentMode.Edge)
 {
     var encryptedSettingsPath = EncryptedSettingsFile.ResolvePath(builder.Environment.ContentRootPath);
-    var encryptedSettingsProtector = builder.Services
-        .Where(d => d.ServiceType == typeof(ISettingsProtector))
-        .Select(d => d.ImplementationInstance as ISettingsProtector)
-        .FirstOrDefault() ?? (OperatingSystem.IsWindows() ? new DpapiSettingsProtector() : new PlaintextSettingsProtector());
+    // 這裡不掃 builder.Services 找已註冊的 ISettingsProtector——測試是在 WithWebHostBuilder
+    // 的 callback 裡註冊的，那比這裡晚跑，掃了永遠命中不到。測試改用 EdgeSettingsStore
+    // 建構時的 SetProtector 覆寫（見 EncryptedSettingsSource）。
+    //
+    // 非 Windows 沒有 DPAPI：這條路徑上機密會以明文落地，所以不靜默降級——
+    // 除非顯式設定 EdgeAdmin:AllowPlaintextSettings=true，否則直接擋啟動
+    ISettingsProtector encryptedSettingsProtector;
+    if (OperatingSystem.IsWindows())
+    {
+        encryptedSettingsProtector = new DpapiSettingsProtector();
+    }
+    else if (builder.Configuration.GetValue("EdgeAdmin:AllowPlaintextSettings", false))
+    {
+        encryptedSettingsProtector = new PlaintextSettingsProtector();
+    }
+    else
+    {
+        throw new InvalidOperationException(
+            "Deployment:Mode=Edge 的加密設定檔需要 Windows DPAPI，這個作業系統不支援。" +
+            "若確定要讓設定以明文落地（僅限測試環境），請設定 EdgeAdmin:AllowPlaintextSettings=true。");
+    }
 
     var encryptedSource = new EncryptedSettingsConfigurationSource(encryptedSettingsPath, encryptedSettingsProtector);
     ((IConfigurationBuilder)builder.Configuration).Add(encryptedSource);

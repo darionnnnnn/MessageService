@@ -39,12 +39,16 @@ public static class EdgeAdminEndpoints
                 Saved: saved);
 
             var html = EdgeAdminPage.Render(model);
+            // 頁面帶有機密的末四碼，不能進瀏覽器磁碟快取或中間代理
+            context.Response.Headers.CacheControl = "no-store, no-cache, must-revalidate";
+            context.Response.Headers.Pragma = "no-cache";
             return Results.Content(html, "text/html; charset=utf-8");
         });
 
         endpoints.MapPost("/edge-admin", async (
             HttpContext context,
-            EdgeSettingsStore store) =>
+            EdgeSettingsStore store,
+            IConfiguration configuration) =>
         {
             var form = await context.Request.ReadFormAsync();
 
@@ -73,13 +77,8 @@ public static class EdgeAdminEndpoints
                 updated["Ingest:ApiKey"] = ingestKeyInput;
             }
 
-            // 2. 陣列欄位：先清掉該前綴所有的舊索引鍵，再寫入新項目
-            RemoveArrayPrefix(updated, PrefixIngestIps);
-            var ingestIpList = ParseLines(ingestIpsInput);
-            for (var i = 0; i < ingestIpList.Count; i++)
-            {
-                updated[$"{PrefixIngestIps}:{i}"] = ingestIpList[i];
-            }
+            // 2. 陣列欄位
+            WriteArray(updated, PrefixIngestIps, ParseLines(ingestIpsInput), configuration);
 
             // 3. Webhook 來源限制模式
             var normalizedMode = string.Equals(webhookModeInput, "AllowlistOnly", StringComparison.OrdinalIgnoreCase)
@@ -88,12 +87,7 @@ public static class EdgeAdminEndpoints
             updated["WebhookSource:Mode"] = normalizedMode;
 
             // 4. Webhook 允許來源 IP 陣列
-            RemoveArrayPrefix(updated, PrefixWebhookIps);
-            var webhookIpList = ParseLines(webhookIpsInput);
-            for (var i = 0; i < webhookIpList.Count; i++)
-            {
-                updated[$"{PrefixWebhookIps}:{i}"] = webhookIpList[i];
-            }
+            WriteArray(updated, PrefixWebhookIps, ParseLines(webhookIpsInput), configuration);
 
             // 儲存至加密設定檔並立即觸發 reload
             store.Save(updated);
@@ -101,6 +95,33 @@ public static class EdgeAdminEndpoints
             // PRG (Post-Redirect-Get)
             return Results.Redirect("/edge-admin?saved=true", permanent: false, preserveMethod: false);
         });
+    }
+
+    /// <summary>把陣列欄位寫進加密設定檔。
+    ///
+    /// **不能只寫新項目就算數**：加密來源是「疊在 appsettings 之上」的，設定系統逐鍵合併——
+    /// appsettings 有 3 筆而使用者改成 2 筆時，只寫 `:0`、`:1` 的話 appsettings 的 `:2`
+    /// 仍然存在、仍然生效，被移除的那一筆其實沒被移除（清空整份清單時更嚴重：加密檔
+    /// 完全沒有該前綴的鍵，appsettings 的整份清單原封生效）。
+    ///
+    /// 所以多出來的索引要用**空字串哨兵**覆蓋掉——`IpNetworkParser.ParseAllowedIps` 會略過空白，
+    /// 等同於該筆不存在。覆蓋範圍取「新清單長度」與「目前設定實際看得到的筆數」的較大值。</summary>
+    private static void WriteArray(
+        IDictionary<string, string?> dict, string prefix, IReadOnlyList<string> values, IConfiguration configuration)
+    {
+        RemoveArrayPrefix(dict, prefix);
+
+        for (var i = 0; i < values.Count; i++)
+        {
+            dict[$"{prefix}:{i}"] = values[i];
+        }
+
+        // 合併後（含 appsettings）目前總共有幾筆——這才是要蓋掉的範圍
+        var effectiveCount = configuration.GetSection(prefix).GetChildren().Count();
+        for (var i = values.Count; i < effectiveCount; i++)
+        {
+            dict[$"{prefix}:{i}"] = "";
+        }
     }
 
     private static void RemoveArrayPrefix(IDictionary<string, string?> dict, string prefix)

@@ -348,6 +348,8 @@ webhook 來源限制。委派 agy，逐段驗收。
 | D LINE outbound 經 proxy | agy | 通過（修正一項高風險後） | 986 綠（門檻 968）、零警告 | 見下方 |
 | E 動態設定基礎與熱生效化 | agy | 通過 | 1001 綠（門檻 1000）、零警告；金鑰裂縫與驗簽熱生效兩處突變皆驗證有效 | 無落差 |
 | F 設定頁與 webhook 來源限制 | agy | 通過 | 1021 綠（門檻 1013）、零警告；機密洩漏／陣列殘留／來源限制三處突變皆紅 | 無落差 |
+| G 文件與樣板 | Claude | 通過 | 五份部署樣板 JSON 語法驗證、跨段 grep 無斷鏈 | 無落差 |
+| 終檢修正 | Claude | 通過 | 1027 綠、零警告；B1 修正以突變驗證 | 見「第二階段終檢輪」 |
 
 ### 作業D 的落差：agy 的 host 檢查有 SSRF 繞過（高風險，已修）
 
@@ -396,3 +398,48 @@ GET /line/image/attacker.example%23.line-scdn.net/x
 agy 本段一次過，六個出站點（4 支具名 client＋`HttpIngestSink` 那支＋LINE 兩支的
 Authorization）全部收斂成 DelegatingHandler，無殘留的定死標頭；`IpAllowlistMiddleware`
 的 CIDR 壞值也照規格改成略過該筆＋記警告而非啟動拋例外。
+
+## 第二階段終檢輪
+
+### 文件終檢（獨立 Explore）
+
+定案 9~16 逐條對照：全部做到，三項待修，皆已處理：
+
+| 發現 | 處置 |
+|---|---|
+| **機密遮罩在長度 4~7 時會洩漏**：`secret[^4..]` 在長度剛好 4 時等於整串，5~7 也露出一半以上 | 門檻設在 8，未達門檻只顯示 `••••••••`；補三個短字串的參數化測試 |
+| 定案10b 要求「host 不在允許清單時記一次節流警告」漏做 | `LineProfileClient` 補上：`OutboundVia=EdgeProxy` 但 URL 未被改寫時記警告（十分鐘節流）。沒有這行的話，LINE 換 CDN 網域時症狀只會是「頭貼一直空白」，查不出原因 |
+| 文件紀律：E1f 出現「與升級前行為完全相同」 | 改為現在式陳述 |
+
+### 程式碼終檢（獨立 Explore）
+
+3 高 5 中，逐項查證後處理：
+
+| 級別 | 發現 | 處置 |
+|---|---|---|
+| 高 A1 | **redirect 繞過 host 允許清單**：三道 host 檢查只驗第一次請求的 URL，而 `HttpClientHandler.AllowAutoRedirect` 預設為 true。上游一個 302 就能讓這台公網主機去打內網位址並把回應原樣吐回——允許清單形同虛設 | `ConfigurePrimaryHttpMessageHandler` 關掉自動跟隨。狀態碼本來就透傳，3xx 交給呼叫端 |
+| 高 B1 | **設定頁刪不掉 appsettings 裡的陣列項目**：加密來源疊在 appsettings 之上、逐鍵合併，只寫新項目的話 appsettings 的 `:2` 仍生效。清空整份清單時更嚴重（加密檔沒有該前綴的鍵→整份原封生效）。原測試斷言的是加密檔字典而非生效值，所以綠燈但 bug 存在 | 多出來的索引用**空字串哨兵**覆蓋（解析器會略過空白）；補兩條斷言「合併後真正生效的值」的測試，並改寫原測試的斷言（從「鍵不存在」改為「沒有非空值」——正確行為就是要寫哨兵） |
+| 高 A2 | `/edge-admin` POST 無 CSRF 保護，唯一防線是 IP 白名單 | **本輪不修，列入 BACKLOG**：需要 antiforgery token 與頁面改造，範圍超出本輪；緩解措施（白名單收到單一管理工作站）已在文件。理由與觸發條件記在「明確不做」 |
+| 中 A3 | 設定頁帶機密末四碼卻無 `Cache-Control` | 加 `no-store, no-cache, must-revalidate` |
+| 中 A4／A6 | DPAPI 用 LocalMachine 且無 entropy；`OutboundVia=EdgeProxy` 時 token 以明文 HTTP 過 LAN | **本輪不修，列入 BACKLOG**（附觸發條件） |
+| 中 A5／B2 | `Program.cs` 掃描 `builder.Services` 找 `ISettingsProtector` 是**永遠不會命中的死碼**（測試的註冊在 `WithWebHostBuilder` callback，比它晚跑），連帶讓非 Windows 靜默改用**明文**儲存機密 | 刪掉死碼；非 Windows 改為**擋啟動**，除非顯式設 `EdgeAdmin:AllowPlaintextSettings=true` |
+| 中 B3 | `IpAllowlistMiddleware` 在鎖外讀設定，併發下快取可能被舊值蓋回——若該次更新是「縮小白名單」，被移除的來源在窗口內仍被放行 | 讀取移進鎖內 |
+| 低 B4／T1／T2 | 每請求多一次 configuration binding（熱路徑開銷）；`LineClients_...AndHotReload` 名為熱生效卻沒做 token 輪替；`EmptyAllowlist` 測的是「一筆空字串」而非真的沒設定 | 記入 BACKLOG（效能面）與下輪待補（測試面）——非正確性缺陷，不擋本輪 |
+
+終檢確認無問題的：三條固定路由無法被污染 host、CIDR 解析只有一份（`IpNetworkParser` 共用）、
+handler 六處掛滿無漏無重、Reload→`IOptionsMonitor` 串接與原子寫入成立、
+`Mode=Any` 零行為差異、其餘測試都走真實管線（`WebApplicationFactory` + 只換 primary handler）。
+
+## 明確不做（本輪定案，附觸發條件）
+
+- **`/edge-admin` 的 CSRF 防護**：目前唯一防線是 IP 白名單。攻擊需要管理員的工作站 IP 在白名單內、
+  且該工作站瀏覽了惡意頁面。緩解：白名單收斂到單一管理工作站。
+  觸發條件：白名單要放寬到整個辦公網段時，必須先補 antiforgery token 或 `Origin`／`Sec-Fetch-Site` 檢查。
+- **DPAPI 的 entropy 與檔案 ACL**：LocalMachine scope 表示同機任何使用者都能解開，加密只擋
+  「把檔案複製到別台」。觸發條件：Edge 主機上有其他非受信任的服務或使用者時。
+- **`OutboundVia=EdgeProxy` 的 LAN 段加密**：Bearer token 以明文 HTTP 經過 Edge→proxy。
+  觸發條件：公司政策要求全程加密時——讓 proxy 綁自簽憑證、Edge 端信任它即可。
+- **`IpAllowlistMiddleware` 每請求 binding 的開銷**：檢視端每個頁面／靜態資源請求多一次反射綁定。
+  觸發條件：實測發現檢視端延遲有感時，改用 `IOptionsMonitor` + change token 而非每次讀 `IConfiguration`。
+- **`LineProfileImage`／`LineSticker` 的 Authorization**：CDN 不需認證，刻意不掛。
+

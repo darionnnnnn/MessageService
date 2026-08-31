@@ -28,6 +28,28 @@ public class LineProfileClient : ILineProfileClient
         _logger = logger;
     }
 
+    /// <summary>頭貼網域不在改寫清單時的告警節流時點——每次刷新都會走到，不節流會刷爆 log。</summary>
+    private static DateTimeOffset? _lastUnrewritableWarningAt;
+    private static readonly object _warnLock = new();
+
+    private void WarnUnrewritableImageHost(string pictureUrl)
+    {
+        var now = DateTimeOffset.UtcNow;
+        lock (_warnLock)
+        {
+            if (_lastUnrewritableWarningAt is { } last && now - last < TimeSpan.FromMinutes(10))
+            {
+                return;
+            }
+            _lastUnrewritableWarningAt = now;
+        }
+
+        _logger.LogWarning(
+            "Line:OutboundVia=EdgeProxy，但頭貼網址 {PictureUrl} 的網域不在改寫允許清單內，" +
+            "這次退回直連。若這台沒有對外網路，頭貼會下載失敗——請確認 LINE 是否更換了 CDN 網域。",
+            pictureUrl);
+    }
+
     public async Task<GroupSummary?> GetGroupSummaryAsync(string groupId, string? knownPictureUrl, bool hasPicture, CancellationToken cancellationToken)
     {
         using var response = await _httpClient.GetAsync($"v2/bot/group/{groupId}/summary", cancellationToken);
@@ -89,6 +111,15 @@ public class LineProfileClient : ILineProfileClient
                 ? HttpBaseAddress.Create(_options.OutboundProxyBaseUrl)
                 : null;
             var requestUrl = LineImageUrlRewriter.Rewrite(pictureUrl, _options.OutboundVia, proxyBaseAddress);
+
+            // 設定要走 proxy、URL 卻沒被改寫，代表 LINE 換了頭貼 CDN 的網域、不在改寫器的
+            // 允許清單裡。這時會退回直連（不丟掉頭貼），但 Edge 沒有對外網路的部署會下載失敗——
+            // 沒有這行的話症狀只會是「頭貼一直空白」，查不到原因。每 10 分鐘最多記一次
+            if (_options.OutboundVia == LineOutboundVia.EdgeProxy
+                && ReferenceEquals(requestUrl, pictureUrl))
+            {
+                WarnUnrewritableImageHost(pictureUrl);
+            }
 
             using var response = await _imageHttpClient.GetAsync(requestUrl, cancellationToken);
             response.EnsureSuccessStatusCode();

@@ -140,7 +140,12 @@ public static class MessageServiceCoreServiceCollectionExtensions
             builder.Services.AddHttpClient(EdgeProxyLineForwarder.HttpClientName, client =>
             {
                 client.Timeout = TimeSpan.FromMinutes(10);
-            });
+            })
+            // **絕對不可以自動跟隨 redirect**：轉發器的三道 host 檢查只驗第一次請求的 URL，
+            // 跟隨 302 等於讓上游決定最終連到哪裡——一個 open redirect 就能讓這台公網主機
+            // 去打內網位址並把回應原樣吐回來，允許清單形同虛設。狀態碼本來就會透傳，
+            // 3xx 交給呼叫端自己決定要不要跟
+            .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
 
             return new MessageServiceCoreRegistration(
                 databaseStartupDecision, autoMigrate,

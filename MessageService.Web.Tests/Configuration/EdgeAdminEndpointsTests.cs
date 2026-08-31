@@ -7,6 +7,7 @@ using MessageService.Web.Configuration;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Data.Sqlite;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Xunit;
 
@@ -239,9 +240,17 @@ public class EdgeAdminEndpointsTests : IDisposable
         Assert.Equal("192.0.2.201", readValues["WebhookSource:AllowedIps:0"]);
         Assert.Equal("192.0.2.202", readValues["WebhookSource:AllowedIps:1"]);
 
-        // 斷言沒有殘留第 3 個索引鍵
-        Assert.False(readValues.ContainsKey("Ingest:AllowedClientIps:2"), "Ingest:AllowedClientIps:2 應該已被移除，不應殘留");
-        Assert.False(readValues.ContainsKey("WebhookSource:AllowedIps:2"), "WebhookSource:AllowedIps:2 應該已被移除，不應殘留");
+        // 第 3 個索引不得再有值。加密來源是疊在 appsettings 之上、逐鍵合併的，所以「移除」
+        // 不能只是從加密檔字典刪掉——那樣 appsettings 的同名索引會浮上來繼續生效。
+        // 正確做法是用空字串哨兵蓋掉（IpNetworkParser 會略過空白），所以這裡驗的是
+        // 「沒有非空值」而不是「鍵不存在」。真正生效的合併結果另有
+        // EdgeAdmin_PostShrinksArray_EffectiveConfigurationAlsoShrinks 把關
+        Assert.True(
+            !readValues.TryGetValue("Ingest:AllowedClientIps:2", out var staleIngest) || string.IsNullOrEmpty(staleIngest),
+            "Ingest:AllowedClientIps:2 不應再有值");
+        Assert.True(
+            !readValues.TryGetValue("WebhookSource:AllowedIps:2", out var staleWebhook) || string.IsNullOrEmpty(staleWebhook),
+            "WebhookSource:AllowedIps:2 不應再有值");
     }
 
     [Fact]
@@ -302,5 +311,65 @@ public class EdgeAdminEndpointsTests : IDisposable
         reqNew.Headers.Add("X-Line-Signature", ComputeSignature("rotated-channel-secret", body));
         var resNew = await client.SendAsync(reqNew);
         Assert.Equal(HttpStatusCode.OK, resNew.StatusCode);
+    }
+
+    [Fact]
+    public async Task EdgeAdmin_PostShrinksArray_EffectiveConfigurationAlsoShrinks()
+    {
+        // 加密來源是疊在 appsettings 之上、逐鍵合併的。只寫新項目的話，appsettings 裡
+        // 多出來的索引仍然存在、仍然生效——被移除的那筆其實沒被移除。
+        // 這條斷言的是「合併後真正生效的值」，不是加密檔字典本身
+        using var factory = CreateEdgeFactory(builder =>
+        {
+            builder.UseSetting("Ingest:AllowedClientIps:0", "192.0.2.1/32");
+            builder.UseSetting("Ingest:AllowedClientIps:1", "192.0.2.2/32");
+            builder.UseSetting("Ingest:AllowedClientIps:2", "192.0.2.3/32");
+        });
+        using var client = factory.CreateClient();
+
+        var form = new Dictionary<string, string>
+        {
+            ["ingestAllowedClientIps"] = "192.0.2.1/32\n192.0.2.2/32",
+            ["webhookMode"] = "Any",
+            ["webhookAllowedIps"] = "",
+        };
+        using var content = new FormUrlEncodedContent(form);
+        var response = await client.PostAsync("/edge-admin", content);
+        Assert.True(response.StatusCode is HttpStatusCode.OK or HttpStatusCode.Redirect or HttpStatusCode.SeeOther);
+
+        var configuration = factory.Services.GetRequiredService<IConfiguration>();
+        var effective = configuration.GetSection("Ingest:AllowedClientIps").Get<string[]>() ?? [];
+        var nonEmpty = effective.Where(v => !string.IsNullOrWhiteSpace(v)).ToArray();
+
+        Assert.Equal(["192.0.2.1/32", "192.0.2.2/32"], nonEmpty);
+        Assert.DoesNotContain("192.0.2.3/32", nonEmpty);
+    }
+
+    [Fact]
+    public async Task EdgeAdmin_PostClearsArray_EffectiveConfigurationIsEmpty()
+    {
+        // 清空整份清單是最嚴重的情況：加密檔完全沒有該前綴的鍵，appsettings 的整份清單原封生效
+        using var factory = CreateEdgeFactory(builder =>
+        {
+            builder.UseSetting("Ingest:AllowedClientIps:0", "192.0.2.1/32");
+            builder.UseSetting("Ingest:AllowedClientIps:1", "192.0.2.2/32");
+        });
+        using var client = factory.CreateClient();
+
+        var form = new Dictionary<string, string>
+        {
+            ["ingestAllowedClientIps"] = "",
+            ["webhookMode"] = "Any",
+            ["webhookAllowedIps"] = "",
+        };
+        using var content = new FormUrlEncodedContent(form);
+        await client.PostAsync("/edge-admin", content);
+
+        var configuration = factory.Services.GetRequiredService<IConfiguration>();
+        var effective = (configuration.GetSection("Ingest:AllowedClientIps").Get<string[]>() ?? [])
+            .Where(v => !string.IsNullOrWhiteSpace(v))
+            .ToArray();
+
+        Assert.Empty(effective);
     }
 }

@@ -27,7 +27,11 @@ public static class EdgeAdminPage
             return "";
         }
 
-        if (secret.Length < 4)
+        // 末四碼只有在「露出來也還剩夠多沒露」時才顯示。長度剛好 4 會把整串印出來，
+        // 5~7 也會露出一半以上——遮罩的意義是讓人辨認「是不是我設的那把」，
+        // 不是把金鑰放到畫面上。門檻設在 8：至少要有一半以上仍被遮住
+        const int minLengthToRevealTail = 8;
+        if (secret.Length < minLengthToRevealTail)
         {
             return "••••••••";
         }

@@ -463,7 +463,7 @@ Ingest 允許來源 IP、Webhook 來源限制（模式與允許 IP）。
 要再加一層縱深，可在設定頁把「Webhook 來源限制」改成 `AllowlistOnly` 並填入
 EdgeProxy 的 IP——之後直接打 Edge 的 webhook 請求會被回 403，不會進到簽章驗證。
 
-預設是 `Any`（不限制），不設定就與升級前行為完全相同。
+預設是 `Any`：不檢查來源，webhook 端點對任何來源開放。
 
 ### E2. IIS 上傳大小限制（容易漏掉的一步）
 
