@@ -203,3 +203,114 @@ ThrowsWithClearMessage` 保住了 Edge 的既有行為。突變測試（改回�
 覆核結論維持保留：四種既有模式的判定結果完全等價（只有 Edge 的 `HasDatabaseAccess` 是
 false），且不改的話 EdgeProxy 會撞進該 throw 並丟出寫著「Mode=Edge」的錯誤訊息，
 與定案5 直接衝突。判定為「定案8 的例外」而非違反，理由與測試釘記於作業A 落差一。
+
+---
+
+# 第二階段（使用者擴充需求，2026-08-31 定案）
+
+三項擴充：LINE outbound 可經 EdgeProxy、Edge 極簡設定頁（僅可熱生效的鍵）、
+webhook 來源限制。委派 agy，逐段驗收。
+
+## 定案（第二階段）
+
+9. **拓撲三選（保留環境彈性）**：由兩個既有機制的組合達成，不新增「拓撲」設定——
+   - 全走 proxy：LINE Console 指向 proxy ＋ `Line:OutboundVia=EdgeProxy`
+   - proxy 進、Edge 出：LINE Console 指向 proxy ＋ `Line:OutboundVia=Direct`（預設）
+   - 完全無 proxy：LINE Console 直指 Edge，不部署 proxy
+10. **`Line:OutboundVia`（Edge 端，啟動快照、不進設定頁）**：`Direct`（預設）／`EdgeProxy`。
+    `=EdgeProxy` 時需另設 `Line:OutboundProxyBaseUrl`（proxy 位址，經 `HttpBaseAddress.Create`）。
+    三條 LINE 網域**全有全無**一起切（媒體、名稱／頭貼、貼圖——Edge 出不去時三條都出不去，
+    不做分流）。實作面：只改具名 client 註冊處的 `BaseAddress`（client 內部路徑全是
+    無開頭斜線的相對路徑 `v2/bot/...`，已查證；`??=` 不會覆蓋註冊值），client 類別零改動。
+11. **EdgeProxy 端 LINE 轉發路由（硬契約）**：
+    - 三條固定路由：`/line/api/{**path}`→`https://api.line.me/{path}`、
+      `/line/data/{**path}`→`https://api-data.line.me/{path}`、
+      `/line/sticker/{**path}`→`https://stickershop.line-scdn.net/{path}`。
+      **目標網域寫死在程式裡**——絕不做通用 proxy，路徑之外的任何輸入都不得影響目的地。
+    - 只允許 GET；`Authorization` 標頭透傳（proxy 不儲存 token）；其餘標頭不轉。
+    - **串流轉發**：媒體可達數百 MB，用 `ResponseHeadersRead`＋`Stream.CopyToAsync` 直通，
+      不得整包進記憶體（與 webhook 轉發的 512KB 緩衝策略刻意不同，理由要寫在註解）。
+    - 掛新白名單 `EdgeProxy:AllowedClientIps`（填 Edge 的 IP，**空=全擋**，沿用
+      `IpAllowlistMiddleware`）——這幾條路由在公網上，白名單是硬要求；
+      webhook 轉發路由**不**掛這份白名單（LINE 的來源 IP 不固定）。
+    - 防火牆矩陣變化要進文件：`OutboundVia=EdgeProxy` 需要開通 **edge→proxy** 單向
+      （與 webhook 的 proxy→edge 相反方向，原環境可能沒開）。
+12. **Edge 動態設定基礎（熱生效）**：自訂 `ConfigurationProvider` 啟動時解密
+    `Db\edge-settings.dat`（**raw DPAPI machine scope**——不能用 ASP.NET DataProtection，
+    Edge 上它的金鑰環是 ephemeral、重啟就解不開，實機 log 已見警告）疊在 appsettings 之上，
+    支援 Reload；設定頁存檔→寫檔→Reload→**立即生效**。加密檔沒有的鍵自然回落 appsettings。
+13. **設定頁只收可熱生效的鍵（使用者定案）**：`Line:ChannelSecret`、`Line:ChannelAccessToken`、
+    `Ingest:ApiKey`、`Ingest:AllowedClientIps`、webhook 來源限制（定案15）。
+    消費點從「啟動快照」改「動態讀」：`IOptions`→`IOptionsMonitor.CurrentValue`
+    （LineSignatureValidator、IngestApiKeyMiddleware）；`IpAllowlistMiddleware` 改每請求讀
+    IConfiguration；**出站 `X-Ingest-Key` 統一改為 DelegatingHandler 動態附加**（現況 6 處
+    註冊時 default header＋HttpIngestSink 自帶——不改的話熱換金鑰會出現「入站驗新值、
+    出站送舊值」的裂縫，兩台協調換鑰時必炸）；LINE client 的 `Authorization` 同理改
+    DelegatingHandler。其餘鍵一律不進設定頁。
+14. **極簡設定頁**：簡單 HTML 但排版乾淨（內嵌基本 CSS，不引外部資源、不套 ui-ux-pro-max
+    ——使用者定案）；minimal API 兩支（GET 頁面＋POST 存檔），不進 controller／capability
+    體系；只在 Edge 模式 Map；守門白名單 `EdgeAdmin:AllowedClientIps`（**只能放 appsettings**
+    ——放進加密檔＝設錯一次把自己鎖在門外；空=全擋）。機密欄位只顯示「已設定＋末四碼」，
+    POST 空值＝維持原值，**永不回傳明文**。
+15. **webhook 來源限制（需求3 定案）**：動態設定 `WebhookSource:Mode`（`Any` 預設／
+    `AllowlistOnly`）＋`WebhookSource:AllowedIps`——`AllowlistOnly` 時 Edge 的
+    `/api/line/webhook` 只接受清單內來源（填 proxy 的 IP），其餘回 403。熱生效、進設定頁。
+    放行判斷用 `RemoteIpAddress`（proxy 直連 Edge，不需 forwarded headers）。
+16. **範例資料紀律**：文件、樣板、測試中的位址一律用 RFC 5737（192.0.2.0/24）或
+    `*.example`，不得出現真實環境資料。
+
+## 俯視影響評估（使用者要求，寫規格前先做）
+
+| 影響點 | 判定與對策 |
+|---|---|
+| LINE client 相對路徑 | ✅ 已查證全部無開頭斜線（`v2/bot/...`），proxy 化只動註冊處 BaseAddress；若 agy 動到 client 內路徑要判失敗 |
+| 出站 X-Ingest-Key 六處快照 | ❌ 熱換金鑰的裂縫（見定案13），本輪一併收斂成 DelegatingHandler——**Core 端也受影響**（同一註冊碼路徑），驗收要含 Core 模式出站標頭仍正確 |
+| `IpAllowlistMiddleware` 動態化 | ⚠️ 行為變化外溢：appsettings 預設 `reloadOnChange=true`，改每請求讀後 **Core／Viewer 的白名單改 appsettings 也會熱生效**（現況要重啟）。判定為刻意改善，記進文件；驗收含「三處掛載點行為不變」的既有測試全綠 |
+| `IOptionsMonitor` 引入 | ⚠️ 全專案首次使用——只限定案13 列的消費點，其他地方**不得**跟風改（防止 agy 大面積替換）；`Configure<T>(section)` 已存在，change token 由新 provider 觸發 |
+| `Line:OutboundVia` 誤用 | ⚠️ `Line` 節所有模式都讀得到；非 Edge 模式設 `EdgeProxy` 無意義——啟動驗證記 Warning（比照 `Ingest:Channel` 的同型警告） |
+| BIDIR Pull 交互 | ✅ Edge=Pull＋OutboundVia=EdgeProxy 是合法組合（Edge 完全不主動連 Core、只連 proxy）；心跳（打 Core）不經 proxy，不受影響 |
+| Edge 重佈掉設定 | ⚠️ `Db\edge-settings.dat` 與 outbox.db 同目錄——沿用既有「重佈時 Db\ 要搬出站台目錄」的部署建議，文件提一句即可 |
+| DPAPI 測試 | ⚠️ machine scope 在 CI／他機解不開——加密層抽最小介面，測試用明文替身；DPAPI 實作只做「加密後能解回」的 Windows 整合測試 |
+
+## 作業總覽（第二階段）
+
+### 作業D｜LINE outbound 經 EdgeProxy
+- 定案10＋11。Edge 端：`LineOptions` 加 `OutboundVia`（enum）＋`OutboundProxyBaseUrl`，
+  OutboundHere 區塊的三支具名 client 依 OutboundVia 決定 BaseAddress；啟動驗證
+  （`=EdgeProxy` 而位址空→擋啟動；非 Edge 模式設 EdgeProxy→警告）。
+- EdgeProxy 端：轉發路由＋串流＋`EdgeProxy:AllowedClientIps` 白名單。
+- 驗收：Edge 端三支 client 在兩種 OutboundVia 下的 BaseAddress 形狀（含子應用路徑）；
+  proxy 端真實 host 測試——GET 轉發到寫死網域＋路徑尾段正確、Authorization 透傳、
+  非 GET 405／404、白名單空=403、**大 body 串流**（假 handler 回長串流，斷言 proxy 端
+  記憶體不整包緩衝——以自訂 Stream 斷言未被 ToArray 讀盡即可）；
+  既有 webhook 轉發測試全綠（兩組路由互不干擾）。
+- 測試總數 > 954＋12。
+
+### 作業E｜動態設定基礎與熱生效化
+- 定案12＋13。新 `EncryptedSettingsProvider`（含最小加密介面＋DPAPI 實作）、
+  DelegatingHandler（X-Ingest-Key、LINE Authorization 各一或共用一支，實作自定）、
+  四個消費點改 `IOptionsMonitor`／每請求讀。
+- 驗收：寫入加密檔→Reload→`IOptionsMonitor.CurrentValue` 立即反映；檔案不存在→
+  純 appsettings 行為不變；**熱換 `Ingest:ApiKey` 後：入站驗證用新值、出站標頭同請求即新值**
+  （裂縫回歸釘）；驗簽用新 ChannelSecret 即時生效；Core／AllInOne／Viewer 既有測試全綠
+  （行為不變的驗收）；加密檔內容非明文（不含已知子字串）。
+- 測試總數 > 作業D 結束數＋14。
+
+### 作業F｜極簡設定頁＋webhook 來源限制
+- 定案14＋15。GET/POST minimal API、`EdgeAdmin:AllowedClientIps` 守門、
+  webhook 來源檢查（掛在 webhook 路徑、`Any` 時零行為差異）。
+- 驗收：白名單外 403、空白名單全擋；GET 頁面不含任何機密明文（含末四碼遮罩斷言）；
+  POST 空值不覆蓋既有機密；存檔後不重啟即生效（端到端：改 ChannelSecret→舊簽章 401）；
+  `WebhookSource=AllowlistOnly` 時清單外來源 403、清單內 200，`Any` 時不限；
+  既有 webhook 測試全綠。
+- 測試總數 > 作業E 結束數＋12。
+
+### 作業G｜文件與樣板（Claude 親做）
+- `DEPLOYMENT-MODES`：三種拓撲組合表＋防火牆矩陣（edge→proxy 新方向）；
+  `DEPLOYMENT-GUIDE`：設定頁使用說明、機密改由設定頁管理後「appsettings 填哪些」的改寫；
+  README 設定表；Edge／EdgeProxy 樣板更新。範例位址守定案16。
+
+### 第二階段終檢
+- 跨段 grep：新設定鍵消費點、DelegatingHandler 掛滿六處出站、樣板與程式鍵名一致。
+- 兩個獨立 Explore 審全 diff；NUL／BOM 掃描。
+
