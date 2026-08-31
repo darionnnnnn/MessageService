@@ -26,10 +26,10 @@ public static class DeploymentValidator
             {
                 throw new InvalidOperationException(
                     "Deployment:Mode=EdgeProxy 需要設定 EdgeProxy:TargetBaseUrl（Edge 主機的位址，" +
-                    "例如 http://10.231.145.94/MSLine），否則轉發無處可送。");
+                    "例如 http://192.0.2.10/MSLine），否則轉發無處可送。");
             }
 
-            // 只驗非空不夠：漏打 http:// 這種手滑（例如 "10.231.145.94/MSLine"）不會在啟動時
+            // 只驗非空不夠：漏打 http:// 這種手滑（例如 "192.0.2.10/MSLine"）不會在啟動時
             // 出事，而是第一則 webhook 進來時 CreateClient 才丟 UriFormatException、被轉發的
             // 通用 catch 吃掉回 502——訊息靜默全掉、log 只剩一則被節流的警告，非常難查
             if (!Uri.TryCreate(edgeProxy.TargetBaseUrl.Trim(), UriKind.Absolute, out var target)
@@ -37,7 +37,7 @@ public static class DeploymentValidator
             {
                 throw new InvalidOperationException(
                     $"EdgeProxy:TargetBaseUrl（{edgeProxy.TargetBaseUrl}）不是合法的 http/https 位址——" +
-                    "請確認有帶 scheme，例如 http://10.231.145.94/MSLine。");
+                    "請確認有帶 scheme，例如 http://192.0.2.10/MSLine。");
             }
 
             // 殘留設定只提醒不擋：EdgeProxy 只做轉發，不會用到 Line／Ingest／檢視端／資料庫設定。

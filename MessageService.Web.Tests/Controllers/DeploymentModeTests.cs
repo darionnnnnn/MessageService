@@ -1038,7 +1038,7 @@ public class DeploymentModeTests : IDisposable
         using var factory = CreateFactory(builder =>
         {
             builder.UseSetting("Deployment:Mode", "EdgeProxy");
-            builder.UseSetting("EdgeProxy:TargetBaseUrl", "http://10.231.145.94/MSLine");
+            builder.UseSetting("EdgeProxy:TargetBaseUrl", "http://192.0.2.10/MSLine");
         }, allowLocalhost: false);
 
         var ex = Record.Exception(() => factory.CreateClient());
@@ -1055,7 +1055,7 @@ public class DeploymentModeTests : IDisposable
         using var factory = CreateFactory(builder =>
         {
             builder.UseSetting("Deployment:Mode", "EdgeProxy");
-            builder.UseSetting("EdgeProxy:TargetBaseUrl", "http://10.231.145.94/MSLine");
+            builder.UseSetting("EdgeProxy:TargetBaseUrl", "http://192.0.2.10/MSLine");
         }, allowLocalhost: false);
 
         // 直接斷言「沒註冊」而不是「解析得到」：EdgeProxy 若掉進為 Edge 寫的註冊分支，
@@ -1076,7 +1076,7 @@ public class DeploymentModeTests : IDisposable
         using var factory = CreateFactory(builder =>
         {
             builder.UseSetting("Deployment:Mode", "EdgeProxy");
-            builder.UseSetting("EdgeProxy:TargetBaseUrl", "http://10.231.145.94/MSLine");
+            builder.UseSetting("EdgeProxy:TargetBaseUrl", "http://192.0.2.10/MSLine");
         }, allowLocalhost: false);
 
         using var client = factory.CreateClient();
@@ -1097,7 +1097,7 @@ public class DeploymentModeTests : IDisposable
         using var factory = CreateFactory(builder =>
         {
             builder.UseSetting("Deployment:Mode", "EdgeProxy");
-            builder.UseSetting("EdgeProxy:TargetBaseUrl", "http://10.231.145.94/MSLine");
+            builder.UseSetting("EdgeProxy:TargetBaseUrl", "http://192.0.2.10/MSLine");
         }, allowLocalhost: false);
 
         using var scope = factory.Services.CreateScope();

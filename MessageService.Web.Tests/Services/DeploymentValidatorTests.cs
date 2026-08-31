@@ -547,7 +547,7 @@ public class DeploymentValidatorTests
     {
         var ex = Record.Exception(() => Validate(
             DeploymentMode.EdgeProxy,
-            edgeProxy: new EdgeProxyOptions { TargetBaseUrl = "http://10.231.145.94/MSLine" }));
+            edgeProxy: new EdgeProxyOptions { TargetBaseUrl = "http://192.0.2.10/MSLine" }));
 
         Assert.Null(ex);
     }
@@ -575,7 +575,7 @@ public class DeploymentValidatorTests
             Line(channelSecret: "secret", outboundHere: false, channelAccessToken: "token"),
             new ViewerOptions { Enabled = true },
             new IngestOptions { BaseUrl = "https://core-host", ApiKey = "key", EdgeBaseUrl = "https://edge-host" },
-            new EdgeProxyOptions { TargetBaseUrl = "http://10.231.145.94/MSLine" },
+            new EdgeProxyOptions { TargetBaseUrl = "http://192.0.2.10/MSLine" },
             logger);
 
         Assert.Contains(logger.Warnings, w => w.Contains("EdgeProxy 只做轉發"));
@@ -591,7 +591,7 @@ public class DeploymentValidatorTests
             new LineOptions { ChannelSecret = "", ChannelAccessToken = "", OutboundHere = null },
             new ViewerOptions { Enabled = null },
             new IngestOptions { BaseUrl = null, ApiKey = null, EdgeBaseUrl = null },
-            new EdgeProxyOptions { TargetBaseUrl = "http://10.231.145.94/MSLine" },
+            new EdgeProxyOptions { TargetBaseUrl = "http://192.0.2.10/MSLine" },
             logger);
 
         Assert.DoesNotContain(logger.Warnings, w => w.Contains("EdgeProxy 只做轉發"));
@@ -608,7 +608,7 @@ public class DeploymentValidatorTests
             new LineOptions { ChannelSecret = "", ChannelAccessToken = "", OutboundHere = null },
             new ViewerOptions(),
             new IngestOptions(),
-            new EdgeProxyOptions { TargetBaseUrl = "http://10.231.145.94/MSLine" },
+            new EdgeProxyOptions { TargetBaseUrl = "http://192.0.2.10/MSLine" },
             logger,
             DatabaseStartupDecision.Default with { HasSqlServerConnectionString = true });
 
@@ -629,7 +629,7 @@ public class DeploymentValidatorTests
             new LineOptions { ChannelSecret = "secret", ChannelAccessToken = "", OutboundHere = true },
             new ViewerOptions { Enabled = true },
             new IngestOptions { BaseUrl = "https://core-host", ApiKey = "", EdgeBaseUrl = "https://edge-host" },
-            new EdgeProxyOptions { TargetBaseUrl = "http://10.231.145.94/MSLine" },
+            new EdgeProxyOptions { TargetBaseUrl = "http://192.0.2.10/MSLine" },
             logger,
             DatabaseStartupDecision.Default with
             {
@@ -642,7 +642,7 @@ public class DeploymentValidatorTests
     }
 
     [Theory]
-    [InlineData("10.231.145.94/MSLine")]
+    [InlineData("192.0.2.10/MSLine")]
     [InlineData("ftp://edge-host/MSLine")]
     public void EdgeProxy_MalformedTargetBaseUrl_ThrowsAtStartup(string target)
     {

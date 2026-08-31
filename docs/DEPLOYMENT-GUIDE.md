@@ -380,7 +380,7 @@ LINE 要求 webhook URL 是合法憑證的 HTTPS。Edge 主機在內網、沒有
    那台若還沒跑過 ASP.NET Core 站台，需要先裝一次 .NET 10 Hosting Bundle。
 3. **發行**：用**同一份** MessageService.Web 發行產物，`appsettings.Production.json`
    照 `deploy/appsettings.Production.EdgeProxy.json` 樣板填——只有兩個設定要填：
-   `EdgeProxy:TargetBaseUrl` 指向 Edge（例 `http://10.231.145.94/MSLine`），
+   `EdgeProxy:TargetBaseUrl` 指向 Edge（例 `http://192.0.2.10/MSLine`），
    以及視需要調整的 `EdgeProxy:TimeoutSeconds`。
 4. **防火牆**：只需開通 proxy→Edge 單向。Edge 端的 `Ingest:AllowedClientIps`
    **不用為此加東西**——那份白名單保護的是 `/api/edge/*`，webhook 端點靠簽章驗證。

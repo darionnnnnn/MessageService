@@ -12,7 +12,7 @@ public class EdgeProxyOptions
     /// <summary>轉發請求至 Edge 主機所使用的具名 HttpClient 名稱。</summary>
     public const string HttpClientName = "edge-proxy";
 
-    /// <summary>Edge 主機的位址，例如 http://10.231.145.94/MSLine。</summary>
+    /// <summary>Edge 主機的位址，例如 http://192.0.2.10/MSLine。</summary>
     public string? TargetBaseUrl { get; set; }
 
     /// <summary>轉發請求至 Edge 主機的逾時秒數，預設 10 秒。</summary>
