@@ -93,7 +93,8 @@ public class IngestSinkEquivalenceTests : IDisposable
         using var factory = CreateDbModeFactory(_apiDbPath);
 
         var httpClient = factory.CreateClient();
-        var sink = new HttpIngestSink(httpClient, OptionsFactory.Create(new IngestOptions { ApiKey = ApiKey }), NullLogger<HttpIngestSink>.Instance);
+        httpClient.DefaultRequestHeaders.Add("X-Ingest-Key", ApiKey);
+        var sink = new HttpIngestSink(httpClient, NullLogger<HttpIngestSink>.Instance);
 
         await sink.SubmitAsync(envelope, CancellationToken.None);
 
@@ -142,7 +143,8 @@ public class IngestSinkEquivalenceTests : IDisposable
 
         using var factory = CreateDbModeFactory(_apiDbPath);
         var httpClient = factory.CreateClient();
-        var httpSink = new HttpIngestSink(httpClient, OptionsFactory.Create(new IngestOptions { ApiKey = ApiKey }), NullLogger<HttpIngestSink>.Instance);
+        httpClient.DefaultRequestHeaders.Add("X-Ingest-Key", ApiKey);
+        var httpSink = new HttpIngestSink(httpClient, NullLogger<HttpIngestSink>.Instance);
         await httpSink.SubmitBatchAsync(envelopes, CancellationToken.None);
 
         var directQueryOptions = new DbContextOptionsBuilder<MessageDbContext>().UseSqlite($"Data Source={_directDbPath}").Options;
@@ -198,7 +200,8 @@ public class IngestSinkEquivalenceTests : IDisposable
         // 依賴的保證（見 IIngestSink 介面說明「判定為重複時一樣要回傳既有那筆的 ContentId」）
         using var factory = CreateDbModeFactory(_apiDbPath);
         var httpClient = factory.CreateClient();
-        var httpSink = new HttpIngestSink(httpClient, OptionsFactory.Create(new IngestOptions { ApiKey = ApiKey }), NullLogger<HttpIngestSink>.Instance);
+        httpClient.DefaultRequestHeaders.Add("X-Ingest-Key", ApiKey);
+        var httpSink = new HttpIngestSink(httpClient, NullLogger<HttpIngestSink>.Instance);
 
         var firstHttp = await httpSink.SubmitAsync(envelope, CancellationToken.None);
         var secondHttp = await httpSink.SubmitAsync(envelope, CancellationToken.None);

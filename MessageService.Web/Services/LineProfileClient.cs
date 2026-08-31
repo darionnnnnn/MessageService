@@ -22,8 +22,6 @@ public class LineProfileClient : ILineProfileClient
     {
         _httpClient = httpClientFactory.CreateClient(HttpClientName);
         _httpClient.BaseAddress ??= new Uri("https://api.line.me/");
-        _httpClient.DefaultRequestHeaders.Authorization =
-            new AuthenticationHeaderValue("Bearer", options.Value.ChannelAccessToken);
             
         _imageHttpClient = httpClientFactory.CreateClient(ImageHttpClientName);
         _options = options.Value;

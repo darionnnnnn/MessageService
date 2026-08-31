@@ -4,18 +4,17 @@ using MessageService.Options;
 
 namespace MessageService.Services;
 
-public class LineSignatureValidator(IOptions<LineOptions> options) : ILineSignatureValidator
+public class LineSignatureValidator(IOptionsMonitor<LineOptions> options) : ILineSignatureValidator
 {
-    private readonly LineOptions _options = options.Value;
-
     public bool IsValid(byte[] requestBody, string? signatureHeader)
     {
-        if (string.IsNullOrEmpty(signatureHeader) || string.IsNullOrEmpty(_options.ChannelSecret))
+        var secret = options.CurrentValue.ChannelSecret;
+        if (string.IsNullOrEmpty(signatureHeader) || string.IsNullOrEmpty(secret))
         {
             return false;
         }
 
-        var key = System.Text.Encoding.UTF8.GetBytes(_options.ChannelSecret);
+        var key = System.Text.Encoding.UTF8.GetBytes(secret);
         var hash = HMACSHA256.HashData(key, requestBody);
         var computedSignature = Convert.ToBase64String(hash);
 

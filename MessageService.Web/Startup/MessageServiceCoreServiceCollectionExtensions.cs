@@ -72,6 +72,8 @@ public static class MessageServiceCoreServiceCollectionExtensions
         builder.Services.AddSingleton(TimeProvider.System);
         builder.Services.AddSingleton<ReadinessCache>();
         builder.Services.AddSingleton(ProcessOwnerId.Instance);
+        builder.Services.AddTransient<IngestApiKeyHandler>();
+        builder.Services.AddTransient<LineAuthorizationHandler>();
 
         // 需求2：Database:Provider 顯式設定永遠優先；未設定時依 ConnectionStrings:SqlServer 有沒有值
         // 推導（純推導邏輯見 DatabaseProviderResolver，可單元測試）
@@ -224,31 +226,26 @@ public static class MessageServiceCoreServiceCollectionExtensions
 
             // 只有 Edge（沒有本機資料庫）才需要打這兩支具名 HttpClient；Core 端就算日後
             // Core:OutboundHere=true，走的也是上面的 DbContentWorkSource，不會用到它們。
-            // X-Ingest-Key 在這裡當預設標頭設一次，而不是要求 ApiContentWorkSource／ApiProfileStore
-            // 每個方法自己記得加——這是端到端演練實際踩到的 bug：一開始沒設，兩個類別的
-            // 所有請求都被 IngestApiKeyMiddleware 擋成 401，只有真的起兩個行程互打才測得出來
-            var ingestApiKeyForClient = ingestOptionsRaw.ApiKey ?? "";
+            // X-Ingest-Key 透過 IngestApiKeyHandler 自動附加，確保金鑰更新後即時生效。
             // Pull 模式下 Ingest:BaseUrl 允許留空，這兩支 client 也不會被用到——註冊了反而會在
             // 第一次 CreateClient 時 new Uri("") 炸掉（ChannelAware* 會避開，但心跳等路徑不保證）
             if (ingestOptionsRaw.Channel is not IngestChannel.Pull)
             {
-            builder.Services.AddHttpClient("ingest", client =>
-            {
-                var baseUrl = ingestOptionsRaw.BaseUrl
-                    ?? throw new InvalidOperationException("Ingest:BaseUrl must be set when Deployment:Mode=Edge.");
-                client.BaseAddress = HttpBaseAddress.Create(baseUrl);
-                client.Timeout = TimeSpan.FromSeconds(30);
-                client.DefaultRequestHeaders.Add("X-Ingest-Key", ingestApiKeyForClient);
-            });
-            builder.Services.AddHttpClient("ingest-content", client =>
-            {
-                var baseUrl = ingestOptionsRaw.BaseUrl
-                    ?? throw new InvalidOperationException("Ingest:BaseUrl must be set when Deployment:Mode=Edge.");
-                client.BaseAddress = HttpBaseAddress.Create(baseUrl);
-                // blob 上傳可達數百 MB，比照 LineContentClient 對大檔放寬 timeout 的理由
-                client.Timeout = TimeSpan.FromMinutes(10);
-                client.DefaultRequestHeaders.Add("X-Ingest-Key", ingestApiKeyForClient);
-            });
+                builder.Services.AddHttpClient("ingest", client =>
+                {
+                    var baseUrl = ingestOptionsRaw.BaseUrl
+                        ?? throw new InvalidOperationException("Ingest:BaseUrl must be set when Deployment:Mode=Edge.");
+                    client.BaseAddress = HttpBaseAddress.Create(baseUrl);
+                    client.Timeout = TimeSpan.FromSeconds(30);
+                }).AddHttpMessageHandler<IngestApiKeyHandler>();
+                builder.Services.AddHttpClient("ingest-content", client =>
+                {
+                    var baseUrl = ingestOptionsRaw.BaseUrl
+                        ?? throw new InvalidOperationException("Ingest:BaseUrl must be set when Deployment:Mode=Edge.");
+                    client.BaseAddress = HttpBaseAddress.Create(baseUrl);
+                    // blob 上傳可達數百 MB，比照 LineContentClient 對大檔放寬 timeout 的理由
+                    client.Timeout = TimeSpan.FromMinutes(10);
+                }).AddHttpMessageHandler<IngestApiKeyHandler>();
             }
         }
 
@@ -287,15 +284,13 @@ public static class MessageServiceCoreServiceCollectionExtensions
                 client.BaseAddress = HttpBaseAddress.Create(ingestOptionsRaw.EdgeBaseUrl!);
                 // poll／ack 都是小 JSON 往返，逾時要短——blob 取回另有長逾時的 client，不可共用
                 client.Timeout = TimeSpan.FromSeconds(5);
-                client.DefaultRequestHeaders.Add("X-Ingest-Key", ingestOptionsRaw.ApiKey ?? "");
-            });
+            }).AddHttpMessageHandler<IngestApiKeyHandler>();
             builder.Services.AddHttpClient(EdgePullService.ContentHttpClientName, client =>
             {
                 client.BaseAddress = HttpBaseAddress.Create(ingestOptionsRaw.EdgeBaseUrl!);
                 // blob 可達數百 MB，比照既有 "ingest-content" 對大檔放寬 timeout 的理由
                 client.Timeout = TimeSpan.FromMinutes(10);
-                client.DefaultRequestHeaders.Add("X-Ingest-Key", ingestOptionsRaw.ApiKey ?? "");
-            });
+            }).AddHttpMessageHandler<IngestApiKeyHandler>();
             builder.Services.AddHostedService<EdgePullService>();
         }
 
@@ -325,7 +320,7 @@ public static class MessageServiceCoreServiceCollectionExtensions
                     client.BaseAddress = new Uri(proxyBaseUri, "line/data/");
                 }
                 client.Timeout = TimeSpan.FromMinutes(10);
-            });
+            }).AddHttpMessageHandler<LineAuthorizationHandler>();
             builder.Services.AddHttpClient(LineContentClient.StickerHttpClientName, client =>
             {
                 if (useEdgeProxy && proxyBaseUri is not null)
@@ -339,7 +334,7 @@ public static class MessageServiceCoreServiceCollectionExtensions
                 {
                     client.BaseAddress = new Uri(proxyBaseUri, "line/api/");
                 }
-            });
+            }).AddHttpMessageHandler<LineAuthorizationHandler>();
             builder.Services.AddHttpClient(LineProfileClient.ImageHttpClientName,
                 client => client.MaxResponseContentBufferSize = LineProfileClient.MaxImageSize);
 
@@ -365,7 +360,7 @@ public static class MessageServiceCoreServiceCollectionExtensions
                 client.BaseAddress = HttpBaseAddress.Create(baseUrl);
                 // payload 只有訊息中繼資料（無媒體 blob），不需要比照 LineContentClient 的長 timeout
                 client.Timeout = TimeSpan.FromSeconds(30);
-            });
+            }).AddHttpMessageHandler<IngestApiKeyHandler>();
         }
 
         // outbox 一律是 SQLite（收錄端本機緩衝，跟主資料庫 provider 無關），Migrate() 那段（見

@@ -1,5 +1,6 @@
 using MessageService.Options;
 using MessageService.Services;
+using MessageService.Web.Configuration;
 using MessageService.Web.Startup;
 using NLog.Web;
 
@@ -33,6 +34,27 @@ var deploymentMode = deploymentOptions.Mode;
 var rawModeValue = builder.Configuration["Deployment:Mode"];
 var usedLegacyModeName = rawModeValue is not null
     && new[] { "Full", "Line", "Db" }.Contains(rawModeValue.Trim(), StringComparer.OrdinalIgnoreCase);
+
+// 加密設定檔（Edge 專屬）：疊在 appsettings 之上，支援熱生效。
+// 僅在 Deployment:Mode=Edge 時加入設定來源鏈最後面（優先權最高），並註冊 EdgeSettingsStore 單例供管理設定。
+if (deploymentMode is DeploymentMode.Edge)
+{
+    var encryptedSettingsPath = EncryptedSettingsFile.ResolvePath(builder.Environment.ContentRootPath);
+    var encryptedSettingsProtector = builder.Services
+        .Where(d => d.ServiceType == typeof(ISettingsProtector))
+        .Select(d => d.ImplementationInstance as ISettingsProtector)
+        .FirstOrDefault() ?? (OperatingSystem.IsWindows() ? new DpapiSettingsProtector() : new PlaintextSettingsProtector());
+
+    var encryptedSource = new EncryptedSettingsConfigurationSource(encryptedSettingsPath, encryptedSettingsProtector);
+    ((IConfigurationBuilder)builder.Configuration).Add(encryptedSource);
+
+    builder.Services.AddSingleton(encryptedSettingsProtector);
+    builder.Services.AddSingleton(sp => new EdgeSettingsStore(
+        encryptedSettingsPath,
+        sp.GetRequiredService<ISettingsProtector>(),
+        encryptedSource.Provider,
+        sp.GetRequiredService<ILogger<EdgeSettingsStore>>()));
+}
 
 // 同樣是「容器建好之前就要知道」的原始讀取——各能力是否開啟只取決於模式與這些 override 設定，
 // 不需要等 DI 容器建好；DeploymentCapabilities.Derive 是全站唯一的推導點（見該類別說明）

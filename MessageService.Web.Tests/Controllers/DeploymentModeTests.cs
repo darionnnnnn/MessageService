@@ -13,6 +13,7 @@ using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Http;
 using Microsoft.Extensions.Options;
 
 namespace MessageService.Tests.Controllers;
@@ -218,13 +219,14 @@ public class DeploymentModeTests : IDisposable
     [Theory]
     [InlineData("ingest")]
     [InlineData("ingest-content")]
-    public void LineModeWithOutboundHere_NamedHttpClients_CarryApiKeyHeader(string clientName)
+    public async Task LineModeWithOutboundHere_NamedHttpClients_CarryApiKeyHeader(string clientName)
     {
         // 真的抓過一次的 bug：ApiContentWorkSource／ApiProfileStore 打的請求完全沒帶
         // X-Ingest-Key，全部被 IngestApiKeyMiddleware 擋成 401——起兩個真實行程互打才測出來，
         // 因為其餘測試都是直接呼叫 controller 或用 FakeHttpMessageHandler，沒有一個真的
-        // 經過這裡驗證的 HttpClient 具名註冊本身。修法是在註冊時就把標頭設成預設值，
-        // 這裡直接從 DI 解析具名 client 確認標頭真的在，防止回歸。
+        // 經過這裡驗證的 HttpClient 具名註冊本身。
+        // 改為 DelegatingHandler 後，標頭在 SendAsync 時附加，透過發送請求給自訂 PrimaryHandler 來驗證。
+        HttpRequestMessage? sentRequest = null;
         using var factory = CreateFactory(builder =>
         {
             builder.UseSetting("Deployment:Mode", "Line");
@@ -233,13 +235,31 @@ public class DeploymentModeTests : IDisposable
             builder.UseSetting("Line:ChannelAccessToken", "dummy-token");
             builder.UseSetting("Ingest:BaseUrl", "https://db-host.example");
             builder.UseSetting("Ingest:ApiKey", "the-shared-secret");
+            builder.ConfigureServices(services =>
+            {
+                services.Configure<HttpClientFactoryOptions>(clientName, options =>
+                {
+                    options.HttpMessageHandlerBuilderActions.Add(b =>
+                    {
+                        b.PrimaryHandler = new FakeHttpMessageHandler(req =>
+                        {
+                            sentRequest = req;
+                            return new HttpResponseMessage(HttpStatusCode.OK);
+                        });
+                    });
+                });
+            });
         }, allowLocalhost: false);
 
         using var scope = factory.Services.CreateScope();
         var httpClientFactory = scope.ServiceProvider.GetRequiredService<IHttpClientFactory>();
         var client = httpClientFactory.CreateClient(clientName);
 
-        var headerValues = client.DefaultRequestHeaders.GetValues("X-Ingest-Key");
+        using var request = new HttpRequestMessage(HttpMethod.Get, "test");
+        await client.SendAsync(request);
+
+        Assert.NotNull(sentRequest);
+        var headerValues = sentRequest!.Headers.GetValues("X-Ingest-Key");
         Assert.Equal("the-shared-secret", Assert.Single(headerValues));
     }
 
@@ -592,6 +612,7 @@ public class DeploymentModeTests : IDisposable
             builder.ConfigureServices(services =>
             {
                 services.AddSingleton<IOptions<IngestOptions>>(new OptionsWrapper<IngestOptions>(ingestOptions));
+                services.AddSingleton<IOptionsMonitor<IngestOptions>>(new FakeOptionsMonitor<IngestOptions>(ingestOptions));
             });
         });
         using var client = factory.CreateClient();

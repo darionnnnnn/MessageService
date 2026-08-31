@@ -15,24 +15,25 @@ public record IpAllowlistOptions(string ConfigSectionName, string Label);
 public class IpAllowlistMiddleware
 {
     private readonly RequestDelegate _next;
+    private readonly IConfiguration _configuration;
     private readonly ILogger<IpAllowlistMiddleware> _logger;
     private readonly IpAllowlistOptions _options;
-    private readonly List<IPNetwork> _allowedNetworks;
+
+    private readonly object _lock = new();
+    private string[] _cachedRawEntries = [];
+    private List<IPNetwork> _cachedNetworks = [];
+    private bool _hasWarnedEmpty;
 
     public IpAllowlistMiddleware(
         RequestDelegate next, IConfiguration configuration, ILogger<IpAllowlistMiddleware> logger, IpAllowlistOptions options)
     {
         _next = next;
+        _configuration = configuration;
         _logger = logger;
         _options = options;
-        _allowedNetworks = ParseAllowedIps(configuration.GetSection(options.ConfigSectionName).Get<string[]>() ?? []);
 
-        if (_allowedNetworks.Count == 0)
-        {
-            _logger.LogWarning(
-                "{Label}: {Section} is empty — all requests will be rejected until it is configured",
-                _options.Label, _options.ConfigSectionName);
-        }
+        // 第一次啟動時解析並在為空時記警告
+        GetAllowedNetworks();
     }
 
     public async Task InvokeAsync(HttpContext context)
@@ -53,8 +54,34 @@ public class IpAllowlistMiddleware
 
     private bool IsAllowed(IPAddress remoteIp)
     {
+        var networks = GetAllowedNetworks();
         var normalizedIp = remoteIp.IsIPv4MappedToIPv6 ? remoteIp.MapToIPv4() : remoteIp;
-        return _allowedNetworks.Any(network => network.Contains(normalizedIp));
+        return networks.Any(network => network.Contains(normalizedIp));
+    }
+
+    private List<IPNetwork> GetAllowedNetworks()
+    {
+        var rawEntries = _configuration.GetSection(_options.ConfigSectionName).Get<string[]>() ?? [];
+        lock (_lock)
+        {
+            if (_cachedRawEntries.SequenceEqual(rawEntries, StringComparer.Ordinal))
+            {
+                return _cachedNetworks;
+            }
+
+            _cachedNetworks = ParseAllowedIps(rawEntries);
+            _cachedRawEntries = rawEntries;
+
+            if (_cachedNetworks.Count == 0 && !_hasWarnedEmpty)
+            {
+                _hasWarnedEmpty = true;
+                _logger.LogWarning(
+                    "{Label}: {Section} is empty — all requests will be rejected until it is configured",
+                    _options.Label, _options.ConfigSectionName);
+            }
+
+            return _cachedNetworks;
+        }
     }
 
     private List<IPNetwork> ParseAllowedIps(IReadOnlyList<string> entries)
@@ -62,18 +89,21 @@ public class IpAllowlistMiddleware
         var networks = new List<IPNetwork>();
         foreach (var entry in entries)
         {
+            if (string.IsNullOrWhiteSpace(entry))
+            {
+                continue;
+            }
+
             if (entry.Contains('/'))
             {
                 if (!IPNetwork.TryParse(entry, out var network))
                 {
-                    // .NET 的 IPNetwork.TryParse 要求主機位元全為 0（嚴格 CIDR），「10.1.0.5/24」
-                    // 這種很常見的打字習慣會 parse 失敗——過去這裡直接把整條無聲丟掉，使用者被
-                    // 403 之後 log 只會說「not in AllowedClientIps」，完全查不出是設定寫錯。
-                    // 這是安全設定，寧可啟動失敗也不要一條規則悄悄失效
-                    throw new InvalidOperationException(
-                        $"{_options.Label}: {_options.ConfigSectionName} 有一條 CIDR 網段解析失敗：\"{entry}\"。" +
+                    _logger.LogWarning(
+                        "{Label}: {Section} 有一條 CIDR 網段解析失敗並略過：\"{Entry}\"。" +
                         "IPNetwork 要求主機位元全為 0，例如 \"10.1.0.5/24\" 請改成 \"10.1.0.0/24\"" +
-                        "（若只要允許單一位址則改成 \"10.1.0.5/32\"）。");
+                        "（若只要允許單一位址則改成 \"10.1.0.5/32\"）。",
+                        _options.Label, _options.ConfigSectionName, entry);
+                    continue;
                 }
                 networks.Add(network);
                 continue;
@@ -81,8 +111,10 @@ public class IpAllowlistMiddleware
 
             if (!IPAddress.TryParse(entry, out var address))
             {
-                throw new InvalidOperationException(
-                    $"{_options.Label}: {_options.ConfigSectionName} 有一條設定值不是合法的 IP 或 CIDR 網段：\"{entry}\"。");
+                _logger.LogWarning(
+                    "{Label}: {Section} 有一條設定值不是合法的 IP 或 CIDR 網段並略過：\"{Entry}\"。",
+                    _options.Label, _options.ConfigSectionName, entry);
+                continue;
             }
             networks.Add(new IPNetwork(address, address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork ? 32 : 128));
         }

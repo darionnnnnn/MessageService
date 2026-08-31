@@ -346,6 +346,7 @@ webhook 來源限制。委派 agy，逐段驗收。
 | 作業-階段 | 執行者 | 結果 | 驗收 | 落差與處置 |
 |---|---|---|---|---|
 | D LINE outbound 經 proxy | agy | 通過（修正一項高風險後） | 986 綠（門檻 968）、零警告 | 見下方 |
+| E 動態設定基礎與熱生效化 | agy | 通過 | 1001 綠（門檻 1000）、零警告；金鑰裂縫與驗簽熱生效兩處突變皆驗證有效 | 無落差 |
 
 ### 作業D 的落差：agy 的 host 檢查有 SSRF 繞過（高風險，已修）
 
@@ -375,3 +376,22 @@ GET /line/image/attacker.example%23.line-scdn.net/x
 ——必須以解析後的結果（`Uri.Host`）為準，或先把字元集夾死。這條與本專案既有的
 「`Enum.TryParse` 會把 `"99"` 判成合法列舉」是同一類陷阱：驗證的對象和實際生效的對象
 不是同一個東西。
+
+### 作業E 的突變測試紀錄
+
+| 突變 | 結果 |
+|---|---|
+| 出站 `X-Ingest-Key` 改用啟動快照（重現「入站新、出站舊」的裂縫） | 紅 ✓ |
+| `LineSignatureValidator` 以 per-instance 欄位快取 secret | **綠（存活）** |
+| 同上改為 `static` 欄位快取（＝`IOptions` 單例語意） | 紅 ✓ |
+
+第二個存活後先判等價性：`LineSignatureValidator` 註冊為 **Scoped**，每個請求都是新實例，
+所以 per-instance 快取與「每次讀 `CurrentValue`」在行為上完全等價——是等價突變。
+改用 `static` 欄位（跨請求共用，正是改動前 `IOptions` 的語意）即變紅，確認測試有效。
+
+順帶記一個判斷方式：想驗證「快照 vs 動態」這類改動時，**突變必須跨越該服務的生命週期邊界**
+才有意義——在 Scoped 服務裡加 per-instance 快取什麼都證明不了。
+
+agy 本段一次過，六個出站點（4 支具名 client＋`HttpIngestSink` 那支＋LINE 兩支的
+Authorization）全部收斂成 DelegatingHandler，無殘留的定死標頭；`IpAllowlistMiddleware`
+的 CIDR 壞值也照規格改成略過該筆＋記警告而非啟動拋例外。
