@@ -219,14 +219,35 @@ webhook 來源限制。委派 agy，逐段驗收。
    - 完全無 proxy：LINE Console 直指 Edge，不部署 proxy
 10. **`Line:OutboundVia`（Edge 端，啟動快照、不進設定頁）**：`Direct`（預設）／`EdgeProxy`。
     `=EdgeProxy` 時需另設 `Line:OutboundProxyBaseUrl`（proxy 位址，經 `HttpBaseAddress.Create`）。
-    三條 LINE 網域**全有全無**一起切（媒體、名稱／頭貼、貼圖——Edge 出不去時三條都出不去，
-    不做分流）。實作面：只改具名 client 註冊處的 `BaseAddress`（client 內部路徑全是
-    無開頭斜線的相對路徑 `v2/bot/...`，已查證；`??=` 不會覆蓋註冊值），client 類別零改動。
+    **四支** LINE 具名 client **全有全無**一起切（Edge 出不去時全部都出不去，不做分流）。
+    寫規格前查證的實際形態——分成兩類，處理方式不同：
+
+    | client | 位址形態 | proxy 化做法 |
+    |---|---|---|
+    | `LineContent`（媒體）｜`LineProfile`（名稱） | `BaseAddress` ＋無開頭斜線相對路徑（`v2/bot/...`） | **只改註冊處 BaseAddress**，client 類別零改動（`??=` 不覆蓋註冊值，已查證） |
+    | `LineSticker`（貼圖） | 同上（`BaseAddress` ＋相對路徑） | 同上 |
+    | `LineProfileImage`（頭貼圖檔） | **LINE API 回應裡的絕對 URL**（`_imageHttpClient.GetAsync(pictureUrl)`，網域由 LINE 決定、非固定） | 見定案10b——改 BaseAddress 無效，這是規劃階段漏算的第四條 |
+
+10b. **頭貼圖檔的 proxy 化（定案10 的例外，規格撰寫階段查證後補）**：
+    `LineProfileClient` 下載頭貼用的是 LINE API 回傳的**絕對 URL**，改 `BaseAddress` 完全無效
+    （絕對 URL 會蓋過 BaseAddress）。做法：
+    - proxy 端提供 `/line/image/{host}/{**path}`，把 `{host}` 併回目標網域。
+    - **`{host}` 必須通過寫死的網域字尾允許清單**（`.line-scdn.net`、`.line.me`）才轉發，
+      否則回 403——這是把「目標網域寫死」這條硬契約在動態網域情境下的等價保證，
+      絕不能讓外部輸入決定任意目的地（否則就是開放代理／SSRF）。
+    - Edge 端在 `OutboundVia=EdgeProxy` 時，把絕對 URL 改寫成
+      `{OutboundProxyBaseUrl}line/image/{原 host}{原 PathAndQuery}` 再下載；
+      改寫邏輯抽成可單獨單元測試的純函式（不在 client 裡塞條件分支）。
+    - 原 URL 的 host 不在允許清單時（LINE 換 CDN 網域）**不改寫、直連**——寧可退回直連
+      也不要靜默丟掉頭貼；同時記一次節流過的 Warning 提示要更新清單。
 11. **EdgeProxy 端 LINE 轉發路由（硬契約）**：
-    - 三條固定路由：`/line/api/{**path}`→`https://api.line.me/{path}`、
+    - 三條固定路由（網域寫死在程式裡）：`/line/api/{**path}`→`https://api.line.me/{path}`、
       `/line/data/{**path}`→`https://api-data.line.me/{path}`、
       `/line/sticker/{**path}`→`https://stickershop.line-scdn.net/{path}`。
-      **目標網域寫死在程式裡**——絕不做通用 proxy，路徑之外的任何輸入都不得影響目的地。
+    - 一條動態網域路由：`/line/image/{host}/{**path}`（見定案10b），`{host}` 必須通過
+      **寫死的網域字尾允許清單**才轉發，否則 403。
+    - **路徑之外的任何輸入都不得影響目的地**；`{host}` 是唯一的例外，且被字尾清單夾住。
+      絕不做通用 proxy。
     - 只允許 GET；`Authorization` 標頭透傳（proxy 不儲存 token）；其餘標頭不轉。
     - **串流轉發**：媒體可達數百 MB，用 `ResponseHeadersRead`＋`Stream.CopyToAsync` 直通，
       不得整包進記憶體（與 webhook 轉發的 512KB 緩衝策略刻意不同，理由要寫在註解）。
@@ -263,7 +284,7 @@ webhook 來源限制。委派 agy，逐段驗收。
 
 | 影響點 | 判定與對策 |
 |---|---|
-| LINE client 相對路徑 | ✅ 已查證全部無開頭斜線（`v2/bot/...`），proxy 化只動註冊處 BaseAddress；若 agy 動到 client 內路徑要判失敗 |
+| LINE client 相對路徑 | ⚠️ 三支是 BaseAddress＋相對路徑（只動註冊處即可），**第四支 `LineProfileImage` 用 LINE 回傳的絕對 URL**——規劃階段漏算，寫規格時查證補為定案10b（proxy 端動態網域路由＋字尾允許清單）。教訓：「改 BaseAddress 就好」的前提要對**每一支** client 逐一查證，不能從三支推論到全部 |
 | 出站 X-Ingest-Key 六處快照 | ❌ 熱換金鑰的裂縫（見定案13），本輪一併收斂成 DelegatingHandler——**Core 端也受影響**（同一註冊碼路徑），驗收要含 Core 模式出站標頭仍正確 |
 | `IpAllowlistMiddleware` 動態化 | ⚠️ 行為變化外溢：appsettings 預設 `reloadOnChange=true`，改每請求讀後 **Core／Viewer 的白名單改 appsettings 也會熱生效**（現況要重啟）。判定為刻意改善，記進文件；驗收含「三處掛載點行為不變」的既有測試全綠 |
 | `IOptionsMonitor` 引入 | ⚠️ 全專案首次使用——只限定案13 列的消費點，其他地方**不得**跟風改（防止 agy 大面積替換）；`Configure<T>(section)` 已存在，change token 由新 provider 觸發 |
@@ -275,16 +296,22 @@ webhook 來源限制。委派 agy，逐段驗收。
 ## 作業總覽（第二階段）
 
 ### 作業D｜LINE outbound 經 EdgeProxy
-- 定案10＋11。Edge 端：`LineOptions` 加 `OutboundVia`（enum）＋`OutboundProxyBaseUrl`，
-  OutboundHere 區塊的三支具名 client 依 OutboundVia 決定 BaseAddress；啟動驗證
-  （`=EdgeProxy` 而位址空→擋啟動；非 Edge 模式設 EdgeProxy→警告）。
-- EdgeProxy 端：轉發路由＋串流＋`EdgeProxy:AllowedClientIps` 白名單。
-- 驗收：Edge 端三支 client 在兩種 OutboundVia 下的 BaseAddress 形狀（含子應用路徑）；
-  proxy 端真實 host 測試——GET 轉發到寫死網域＋路徑尾段正確、Authorization 透傳、
-  非 GET 405／404、白名單空=403、**大 body 串流**（假 handler 回長串流，斷言 proxy 端
-  記憶體不整包緩衝——以自訂 Stream 斷言未被 ToArray 讀盡即可）；
-  既有 webhook 轉發測試全綠（兩組路由互不干擾）。
-- 測試總數 > 954＋12。
+- 定案10＋10b＋11。Edge 端：`LineOptions` 加 `OutboundVia`（enum）＋`OutboundProxyBaseUrl`，
+  OutboundHere 區塊的**三支** BaseAddress 型 client 依 OutboundVia 決定 BaseAddress；
+  第四支（頭貼圖檔）走定案10b 的 URL 改寫純函式；啟動驗證（`=EdgeProxy` 而位址空→擋啟動；
+  非 Edge 模式設 EdgeProxy→警告）。
+- EdgeProxy 端：四條轉發路由＋串流＋`EdgeProxy:AllowedClientIps` 白名單。
+- 驗收：
+  - Edge 端三支 client 在兩種 OutboundVia 下的 BaseAddress 形狀（含子應用路徑）。
+  - 頭貼 URL 改寫純函式：`Direct` 時原樣不動；`EdgeProxy` 時改寫成
+    `/line/image/{host}{path}` 且保留 query；**host 不在允許清單時不改寫**（退回直連）。
+  - proxy 端真實 host 測試——四條路由 GET 轉發到正確目標（前三條網域寫死、
+    第四條由 `{host}` 併回）、`Authorization` 透傳、非 GET 不轉發、白名單空=403、
+    **`{host}` 不在字尾允許清單時 403**（開放代理防線，這條一定要有）。
+  - **大 body 串流**：假 handler 回一個「被讀到底就會失敗」的自訂 Stream，
+    斷言 proxy 端沒有整包緩衝。
+  - 既有 webhook 轉發測試全綠（兩組路由互不干擾）。
+- 測試總數 > 954＋14。
 
 ### 作業E｜動態設定基礎與熱生效化
 - 定案12＋13。新 `EncryptedSettingsProvider`（含最小加密介面＋DPAPI 實作）、
