@@ -202,11 +202,12 @@ public class EncryptedSettingsSourceTests : IDisposable
         var path = Path.Combine(_tempDir, "status-check.dat");
         var protector = new PlaintextSettingsProtector();
         var source = new EncryptedSettingsConfigurationSource(path, protector);
-        var provider = source.Provider;
+        // provider 帶著監看這個暫存目錄的 FileSystemWatcher，不釋放的話它會活到測試把目錄
+        // 刪掉之後，在收尾期對著已消失的目錄觸發重載
+        using var provider = source.Provider;
 
         // 尚未建檔前載入：NotFound
         provider.Load();
-        Assert.Equal(EncryptedSettingsLoadStatus.NotFound, provider.LoadStatus);
         Assert.Equal(EncryptedSettingsLoadStatus.NotFound, provider.LoadStatus);
 
         var store = new EdgeSettingsStore(path, protector, provider, NullLogger<EdgeSettingsStore>.Instance);

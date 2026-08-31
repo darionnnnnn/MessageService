@@ -106,6 +106,29 @@ public static class EncryptedSettingsFile
     /// 讀取成功時回傳值字典與 Loaded 狀態；
     /// 解密或反序列化失敗時回傳空字典與 Unreadable 狀態並記錄 Error（避免設定損毀導致站台無法啟動，退回 appsettings）。
     /// </summary>
+    /// <summary>讀檔並對「檔案正被別人占用」重試幾次。
+    ///
+    /// 寫入端是「先寫暫存檔再 File.Move 覆蓋」，而檔案監看的重載跟其他行程的寫入完全沒有
+    /// 協調——重載剛好撞上 Move 的那一瞬間會拿到共用違規。**不重試的話後果不是讀不到這一次，
+    /// 而是整份設定被判成毀損**：生效值退回 appsettings（等於換金鑰的當下退回舊金鑰），
+    /// 而觸發它的那個檔案事件已經用掉了，沒有第二次事件會來修正，這個行程就一直錯到下次
+    /// 寫檔或重啟為止。解密／反序列化失敗不走這裡（那才是真的毀損）。</summary>
+    private static byte[] ReadAllBytesWithRetry(string path)
+    {
+        const int maxAttempts = 3;
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                return File.ReadAllBytes(path);
+            }
+            catch (Exception ex) when (attempt < maxAttempts && ex is IOException or UnauthorizedAccessException)
+            {
+                Thread.Sleep(50 * attempt);
+            }
+        }
+    }
+
     public static EncryptedSettingsReadResult Read(string path, ISettingsProtector protector, ILogger? logger = null)
     {
         ArgumentNullException.ThrowIfNull(path);
@@ -120,7 +143,7 @@ public static class EncryptedSettingsFile
 
         try
         {
-            var ciphertext = File.ReadAllBytes(path);
+            var ciphertext = ReadAllBytesWithRetry(path);
             if (ciphertext.Length == 0)
             {
                 logger?.LogError(
@@ -194,12 +217,16 @@ public static class EncryptedSettingsFile
 public class EncryptedSettingsConfigurationProvider : ConfigurationProvider, IDisposable
 {
     private readonly string _path;
-    private ISettingsProtector _protector;
+    // volatile：watcher 在建構式就啟動，而 protector 可能稍後才被 SetProtector 換掉
+    // （見 EdgeSettingsStore 建構式）——監看回呼是別的執行緒，要保證讀得到最新的那顆
+    private volatile ISettingsProtector _protector;
     private readonly ILogger? _logger;
     private FileSystemWatcher? _watcher;
     private Timer? _debounceTimer;
     private readonly object _lock = new();
-    private bool _disposed;
+    // volatile：Dispose 與監看回呼在不同執行緒，沒有它的話回呼可能讀到過期的 false，
+    // 在 Dispose 之後又建一顆永遠不會被釋放的 debounce Timer
+    private volatile bool _disposed;
     private const int DebounceDelayMs = 300;
 
     public EncryptedSettingsConfigurationProvider(string path, ISettingsProtector protector, ILogger? logger = null)
@@ -347,8 +374,12 @@ public class EncryptedSettingsConfigurationProvider : ConfigurationProvider, IDi
         if (_disposed) return;
         if (disposing)
         {
+            // 先在鎖內標記已釋放再拆 Timer：反過來的話，事件執行緒可以在「Timer 已拆、
+            // _disposed 還沒設 true」的縫隙裡進到鎖內、再建一顆新的 Timer，那顆沒人會釋放，
+            // 300ms 後對著已經拆掉的 host 觸發重載
             lock (_lock)
             {
+                _disposed = true;
                 _debounceTimer?.Dispose();
                 _debounceTimer = null;
             }
