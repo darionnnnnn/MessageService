@@ -9,6 +9,7 @@
 
 | 檔案 | 內容 |
 |---|---|
+| `2026-08-31_OBS-1-PLAN.md` | 2026-08-31 可觀測性輪：主機狀態頁加訊息流活性訊號（`MAX(Groups.LastMessageAt)` ＋ `Monitoring:MessageSilenceWarnHours`，補「轉發鏈中斷時心跳全綠、積壓 0，畫面看不出訊息正在流失」的盲區）、加密設定檔三態與 `FileSystemWatcher`、縮放文件收斂。含「心跳加欄位改採資料面方案」的決策理由、終檢抓到的暫時性 IO 誤判為檔案毀損，以及一條被推翻重寫的部署指引（清空 appsettings 機密會讓搬機後無法從 UI 復原） |
 | `2026-08-31_EDGEPROXY-1-PLAN.md` | 2026-08-31 EdgeProxy 輪：`Deployment:Mode` 第五種角色（借用既有 HTTPS 入口轉發 webhook）、LINE outbound 可改走 proxy 讓 Edge 無需對外網路、Edge 加密設定檔與熱生效、極簡設定頁、webhook 來源限制。含兩階段的定案 1~16、三次終檢（抓到 SSRF 繞過、redirect 繞過、陣列刪不掉三個高風險）與「明確不做」的觸發條件 |
 | `2026-08-28_BIDIR-1-PLAN.md` | 2026-08-28 通道方向彈性化輪：Edge↔Core 四條流（訊息/心跳/媒體/名稱頭貼）支援單向防火牆任一方向、Auto 自動切換與心跳探測恢復的規劃、15+3 條定案、終檢與換模型體檢紀錄 |
 | `CONSOLIDATION-PLAN.md` | 2026-08-13 部署收斂輪：兩專案合併成 `MessageService.Web`、模式改名 `AllInOne`/`Edge`/`Core`/`Viewer`、schema 改用 `Database.Migrate()` 的規劃與執行紀錄 |
