@@ -366,6 +366,40 @@ Edge 就不會開放 `/api/edge` 這組端點。
 設定完成後，在設定頁的「主機狀態」區塊可以看到每台主機目前走的是「推送」還是「輪詢」。
 機制與完整的資料流見 [DEPLOYMENT-MODES.md](DEPLOYMENT-MODES.md) 的「通道方向」。
 
+### E1c. Edge 沒有合法憑證時：借用既有的 HTTPS 入口
+
+LINE 要求 webhook URL 是合法憑證的 HTTPS。Edge 主機在內網、沒有憑證時，不需要為它另外
+申請——在公司已有合法憑證的對外伺服器上多跑一個轉發站台即可。
+
+1. **在對外伺服器建立 application**：IIS 管理員 →既有站台上按右鍵→「加入應用程式」，
+   別名填 `MSLine`（對外 URL 就是 `https://既有網域/MSLine`），實體路徑指向新的發行目錄。
+   沿用既有站台的 443 繫結與憑證，不必新增網域或憑證。
+2. **應用程式集區**：.NET CLR 版本選「沒有 Managed 程式碼」（ASP.NET Core 走 in-process
+   裝載，不需要 CLR），其餘比照 `deploy/Set-AppPool.ps1` 的設定。
+   那台若還沒跑過 ASP.NET Core 站台，需要先裝一次 .NET 10 Hosting Bundle。
+3. **發行**：用**同一份** MessageService.Web 發行產物，`appsettings.Production.json`
+   照 `deploy/appsettings.Production.EdgeProxy.json` 樣板填——只有兩個設定要填：
+   `EdgeProxy:TargetBaseUrl` 指向 Edge（例 `http://10.231.145.94/MSLine`），
+   以及視需要調整的 `EdgeProxy:TimeoutSeconds`。
+4. **防火牆**：只需開通 proxy→Edge 單向。Edge 端的 `Ingest:AllowedClientIps`
+   **不用為此加東西**——那份白名單保護的是 `/api/edge/*`，webhook 端點靠簽章驗證。
+5. **LINE Console**：Webhook URL 改成 `https://既有網域/MSLine/api/line/webhook`，
+   按 Verify 應回成功；並確認「Use webhook」開啟、建議一併開啟 redelivery
+   （轉發鏈多一個節點，它短暫停機時靠 redelivery 補送）。
+
+驗證順序（在對外伺服器上跑）：
+
+```bash
+curl -i -X POST https://既有網域/MSLine/api/line/webhook -H "Content-Type: application/json" -d "{}"
+```
+
+回 **401** 就是整條鏈都通了——proxy 轉發成功、Edge 收到並執行簽章驗證後拒絕這個沒簽章的
+假請求。回 502 表示 proxy 連不到 Edge（查防火牆與 `EdgeProxy:TargetBaseUrl`）；
+回 404 表示 proxy 自己的路由沒對上（查 application 別名與 URL 路徑）。
+
+之後發一則真訊息，Edge 的 log 應出現 `Queued ... to outbox`。
+proxy 本身不回報心跳，設定頁的「主機狀態」看不到它，這是預期行為。
+
 ### E2. IIS 上傳大小限制（容易漏掉的一步）
 
 Core 端會接收 Edge 端轉來的媒體檔案上傳（最大到 `Ingest:MaxContentBytes`，預設 300MB），

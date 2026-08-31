@@ -93,6 +93,8 @@ StickerContentBackfillService（啟動時替既有貼圖訊息補出 Pending 內
 | `Viewer:Enabled` | `bool?`，這台要不要開檢視端（未設定時依模式推導），三台拓撲用 |
 | `Viewer:AllowedClientIps` | 檢視端頁面／API 的 IP 白名單，空白名單視為全拒 |
 | `Ingest:BaseUrl` / `Ingest:ApiKey` | `Edge`／`Core` 拆機用，`AllInOne` 模式不需要 |
+| `EdgeProxy:TargetBaseUrl` | `Deployment:Mode=EdgeProxy` 必填：Edge 主機的位址（例 `http://10.231.145.94/MSLine`），結尾斜線可省略。見 [docs/DEPLOYMENT-MODES.md](docs/DEPLOYMENT-MODES.md) 的「EdgeProxy」 |
+| `EdgeProxy:TimeoutSeconds` | 轉發到 Edge 的逾時秒數（預設 10）。逾時回 502，由 LINE redelivery 重送 |
 | `Ingest:Channel` | Edge 端的通道方向：`Auto`（預設，推送優先、不通則由 Core 輪詢接手並定期探測）／`Push`／`Pull`，見 [docs/DEPLOYMENT-MODES.md](docs/DEPLOYMENT-MODES.md) 的「通道方向」 |
 | `Ingest:EdgeBaseUrl` | Core 端指向 Edge 的位址。**空（預設）＝永不輪詢**，行為與沒有這個功能時相同 |
 | `Ingest:PullIntervalSeconds` / `PullActivationSeconds` | 輪詢間隔與啟動門檻，預設 1／180 秒。門檻只看**推送**心跳，輪詢拉回的不算 |
