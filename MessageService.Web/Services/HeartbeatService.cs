@@ -29,20 +29,7 @@ public class HeartbeatService(
     {
         while (!stoppingToken.IsCancellationRequested)
         {
-            try
-            {
-                await ReportOnceAsync(stoppingToken);
-                if (_failing)
-                {
-                    _failing = false;
-                    _lastFailureLogAt = null;
-                    logger.LogInformation("心跳回報已恢復正常。");
-                }
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                LogFailure(ex);
-            }
+            await TryReportOnceAsync(stoppingToken);
 
             try
             {
@@ -53,6 +40,29 @@ public class HeartbeatService(
                 // 正常停機
             }
         }
+    }
+
+    /// <summary>跑一次回報並套用失敗告警節流。回傳這次是否成功——公開方法讓測試不必跑
+    /// 計時迴圈就能驗證節流行為（比照 OutboxForwarderService.ProcessBatchAsync 的慣例）。</summary>
+    public async Task<bool> TryReportOnceAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            await ReportOnceAsync(cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            LogFailure(ex);
+            return false;
+        }
+
+        if (_failing)
+        {
+            _failing = false;
+            _lastFailureLogAt = null;
+            logger.LogInformation("心跳回報已恢復正常。");
+        }
+        return true;
     }
 
     private void LogFailure(Exception ex)

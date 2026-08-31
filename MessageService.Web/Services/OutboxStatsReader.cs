@@ -10,7 +10,7 @@ public static class OutboxStatsReader
 {
     public static async Task<HeartbeatReport> ComputeAsync(OutboxDbContext outboxDbContext, CancellationToken cancellationToken)
     {
-        var pending = outboxDbContext.Entries.Where(e => e.DeadLetteredAt == null);
+        var pending = outboxDbContext.Entries.WhereDeliverable();
 
         var count = await pending.CountAsync(cancellationToken);
         if (count == 0)

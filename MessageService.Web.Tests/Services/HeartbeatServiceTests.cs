@@ -38,15 +38,40 @@ public class HeartbeatServiceTests : IDisposable
         _connection.Dispose();
     }
 
-    private HeartbeatService CreateService(bool receivesWebhook) =>
+    private sealed class FakeTimeProvider : TimeProvider
+    {
+        public DateTimeOffset Now { get; set; } = DateTimeOffset.UnixEpoch;
+        public override DateTimeOffset GetUtcNow() => Now;
+    }
+
+    private sealed class CountingLogger : Microsoft.Extensions.Logging.ILogger<HeartbeatService>
+    {
+        public int Warnings { get; private set; }
+        public int Infos { get; private set; }
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(Microsoft.Extensions.Logging.LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            Microsoft.Extensions.Logging.LogLevel logLevel, Microsoft.Extensions.Logging.EventId eventId,
+            TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            if (logLevel == Microsoft.Extensions.Logging.LogLevel.Warning) Warnings++;
+            if (logLevel == Microsoft.Extensions.Logging.LogLevel.Information) Infos++;
+        }
+    }
+
+    private HeartbeatService CreateService(
+        bool receivesWebhook, TimeProvider? timeProvider = null,
+        Microsoft.Extensions.Logging.ILogger<HeartbeatService>? logger = null) =>
         new(
             _provider.GetRequiredService<IServiceScopeFactory>(),
             new DeploymentCapabilities(
                 ReceivesWebhook: receivesWebhook, HasDatabaseAccess: true, IngestApiEnabled: false,
                 ViewerEnabled: true, OutboundHere: false, RunsRetention: false, EdgePullApiEnabled: false),
-            TimeProvider.System,
+            timeProvider ?? TimeProvider.System,
             OptionsFactory.Create(new HeartbeatOptions()),
-            NullLogger<HeartbeatService>.Instance);
+            logger ?? NullLogger<HeartbeatService>.Instance);
 
     private async Task SeedOutboxEntryAsync(DateTimeOffset createdAt, DateTimeOffset? deadLetteredAt = null)
     {
@@ -112,5 +137,46 @@ public class HeartbeatServiceTests : IDisposable
 
         var report = Assert.Single(_reporter.Reported);
         Assert.Equal(1, report.OutboxPending); // 死信那筆不計入積壓
+    }
+
+    [Fact]
+    public async Task TryReportOnceAsync_ContinuousFailures_LogOncePlusTenMinuteSummaries()
+    {
+        var time = new FakeTimeProvider();
+        var logger = new CountingLogger();
+        var service = CreateService(receivesWebhook: false, timeProvider: time, logger: logger);
+        _reporter.Failing = true;
+
+        // 單向防火牆（只開通 core→edge）下心跳送不到是穩態——原本每個週期噴一次完整堆疊，
+        // 一天上千筆雜訊；改成轉為失敗記一次、持續期間每 10 分鐘一則摘要
+        for (var i = 0; i < 20; i++)
+        {
+            Assert.False(await service.TryReportOnceAsync(CancellationToken.None));
+        }
+        Assert.Equal(1, logger.Warnings);
+
+        time.Now = time.Now.AddMinutes(11);
+        await service.TryReportOnceAsync(CancellationToken.None);
+        Assert.Equal(2, logger.Warnings);
+    }
+
+    [Fact]
+    public async Task TryReportOnceAsync_Recovery_LogsOnceAndArmsFullLogAgain()
+    {
+        var time = new FakeTimeProvider();
+        var logger = new CountingLogger();
+        var service = CreateService(receivesWebhook: false, timeProvider: time, logger: logger);
+
+        _reporter.Failing = true;
+        await service.TryReportOnceAsync(CancellationToken.None);
+
+        _reporter.Failing = false;
+        Assert.True(await service.TryReportOnceAsync(CancellationToken.None));
+        Assert.Equal(1, logger.Infos);
+
+        // 恢復後再次失敗要重新記完整的一則，不能被舊的節流狀態吃掉
+        _reporter.Failing = true;
+        await service.TryReportOnceAsync(CancellationToken.None);
+        Assert.Equal(2, logger.Warnings);
     }
 }

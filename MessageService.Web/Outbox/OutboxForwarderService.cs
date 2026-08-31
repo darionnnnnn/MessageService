@@ -91,7 +91,7 @@ public class OutboxForwarderService(
         // 只能靠最舊未死信項目的年齡判斷排空是不是卡住了。順著同一個每小時迴圈檢查，
         // 第一個小時內就會被叫出來，不用等到有人發現「怎麼今天都沒新訊息」
         var oldestPendingCreatedAt = await dbContext.Entries
-            .Where(e => e.DeadLetteredAt == null)
+            .WhereDeliverable()
             .OrderBy(e => e.CreatedAt)
             .Select(e => (DateTimeOffset?)e.CreatedAt)
             .FirstOrDefaultAsync(cancellationToken);
