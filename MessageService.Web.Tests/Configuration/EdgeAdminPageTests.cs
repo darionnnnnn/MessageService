@@ -141,6 +141,29 @@ public class EdgeAdminPageTests
         Assert.DoesNotContain("設定已儲存，並立即生效。", htmlNotSaved);
     }
 
+    [Fact]
+    public void Render_IsUnreadableFlag_ControlsDangerAlert()
+    {
+        var modelUnreadable = new EdgeAdminViewModel(
+            LineChannelSecret: null,
+            LineChannelAccessToken: null,
+            IngestApiKey: null,
+            IngestAllowedClientIps: [],
+            WebhookSourceMode: "Any",
+            WebhookSourceAllowedIps: [],
+            Saved: false,
+            IsUnreadable: true);
+
+        var htmlUnreadable = EdgeAdminPage.Render(modelUnreadable);
+        Assert.Contains("<div class=\"alert-danger\">", htmlUnreadable);
+        Assert.Contains("加密設定檔存在但無法解密", htmlUnreadable);
+
+        var modelReadable = modelUnreadable with { IsUnreadable = false };
+        var htmlReadable = EdgeAdminPage.Render(modelReadable);
+        Assert.DoesNotContain("<div class=\"alert-danger\">", htmlReadable);
+        Assert.DoesNotContain("加密設定檔存在但無法解密", htmlReadable);
+    }
+
     [Theory]
     [InlineData("abcd")]            // 長度剛好 4：末四碼＝整串
     [InlineData("abcde")]

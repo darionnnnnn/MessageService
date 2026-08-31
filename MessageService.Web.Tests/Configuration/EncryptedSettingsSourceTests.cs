@@ -143,11 +143,85 @@ public class EncryptedSettingsSourceTests : IDisposable
         Assert.True(File.Exists(path));
         var readBack = EncryptedSettingsFile.Read(path, protector);
 
-        Assert.Equal("secret-123", readBack["Ingest:ApiKey"]);
-        Assert.Equal("192.0.2.1", readBack["Ingest:AllowedClientIps:0"]);
+        Assert.Equal(EncryptedSettingsLoadStatus.Loaded, readBack.Status);
+        Assert.Equal("secret-123", readBack.Values["Ingest:ApiKey"]);
+        Assert.Equal("192.0.2.1", readBack.Values["Ingest:AllowedClientIps:0"]);
 
         // 不應殘留任何 .tmp 檔案
         var tmpFiles = Directory.GetFiles(_tempDir, "*.tmp");
         Assert.Empty(tmpFiles);
+    }
+
+    [Fact]
+    public void Read_NonExistentFile_ReturnsNotFoundStatusAndEmptyDictionary()
+    {
+        var path = Path.Combine(_tempDir, "non-existent.dat");
+        var protector = new PlaintextSettingsProtector();
+
+        var result = EncryptedSettingsFile.Read(path, protector);
+
+        Assert.Equal(EncryptedSettingsLoadStatus.NotFound, result.Status);
+        Assert.Empty(result.Values);
+    }
+
+    [Fact]
+    public void Read_ValidFile_ReturnsLoadedStatusAndCorrectValues()
+    {
+        var path = Path.Combine(_tempDir, "valid-settings.dat");
+        var protector = new PlaintextSettingsProtector();
+        var data = new Dictionary<string, string?>
+        {
+            ["Line:ChannelSecret"] = "secret-abc",
+            ["Ingest:ApiKey"] = "key-xyz"
+        };
+
+        EncryptedSettingsFile.Write(path, data, protector);
+        var result = EncryptedSettingsFile.Read(path, protector);
+
+        Assert.Equal(EncryptedSettingsLoadStatus.Loaded, result.Status);
+        Assert.Equal("secret-abc", result.Values["Line:ChannelSecret"]);
+        Assert.Equal("key-xyz", result.Values["Ingest:ApiKey"]);
+    }
+
+    [Fact]
+    public void Read_CorruptedFile_ReturnsUnreadableStatusAndEmptyDictionary()
+    {
+        var path = Path.Combine(_tempDir, "corrupted.dat");
+        File.WriteAllBytes(path, [0x00, 0x01, 0x02, 0x03, 0xFF, 0xFE]);
+        var protector = new PlaintextSettingsProtector();
+
+        var result = EncryptedSettingsFile.Read(path, protector);
+
+        Assert.Equal(EncryptedSettingsLoadStatus.Unreadable, result.Status);
+        Assert.Empty(result.Values);
+    }
+
+    [Fact]
+    public void Provider_And_Store_ReflectLoadStatusAccurately()
+    {
+        var path = Path.Combine(_tempDir, "status-check.dat");
+        var protector = new PlaintextSettingsProtector();
+        var source = new EncryptedSettingsConfigurationSource(path, protector);
+        // provider 帶著監看這個暫存目錄的 FileSystemWatcher，不釋放的話它會活到測試把目錄
+        // 刪掉之後，在收尾期對著已消失的目錄觸發重載
+        using var provider = source.Provider;
+
+        // 尚未建檔前載入：NotFound
+        provider.Load();
+        Assert.Equal(EncryptedSettingsLoadStatus.NotFound, provider.LoadStatus);
+
+        var store = new EdgeSettingsStore(path, protector, provider, NullLogger<EdgeSettingsStore>.Instance);
+        Assert.Equal(EncryptedSettingsLoadStatus.NotFound, store.LoadStatus);
+
+        // 正常寫入後：Loaded
+        store.Save(new Dictionary<string, string?> { ["Key"] = "Value" });
+        Assert.Equal(EncryptedSettingsLoadStatus.Loaded, provider.LoadStatus);
+        Assert.Equal(EncryptedSettingsLoadStatus.Loaded, store.LoadStatus);
+
+        // 破壞檔案後手動呼叫 Reload：Unreadable
+        File.WriteAllBytes(path, [0xFF, 0xFF, 0xFF]);
+        store.Reload();
+        Assert.Equal(EncryptedSettingsLoadStatus.Unreadable, provider.LoadStatus);
+        Assert.Equal(EncryptedSettingsLoadStatus.Unreadable, store.LoadStatus);
     }
 }

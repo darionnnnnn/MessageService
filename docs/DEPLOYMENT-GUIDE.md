@@ -372,6 +372,9 @@ Edge 就不會開放 `/api/edge` 這組端點。
 LINE 要求 webhook URL 是合法憑證的 HTTPS。Edge 主機在內網、沒有憑證時，不需要為它另外
 申請——在公司已有合法憑證的對外伺服器上多跑一個轉發站台即可。
 
+`EdgeProxy:TargetBaseUrl` 指向誰不限於 Edge：單機的 `AllInOne` 主機在內網、同樣沒有憑證時，
+把它指向那台 `AllInOne` 即可，本節其餘步驟完全相同。
+
 1. **在對外伺服器建立 application**：IIS 管理員 →既有站台上按右鍵→「加入應用程式」，
    別名填 `MSLine`（對外 URL 就是 `https://既有網域/MSLine`），實體路徑指向新的發行目錄。
    沿用既有站台的 443 繫結與憑證，不必新增網域或憑證。
@@ -454,7 +457,29 @@ Ingest 允許來源 IP、Webhook 來源限制（模式與允許 IP）。
 **機密的顯示**：頁面永遠不會回傳明文，已設定的只顯示遮罩與末四碼；
 要改就直接填新值，**留空表示維持原值**（不會被清成空字串）。
 
-加密檔綁這台機器，複製到別台解不開；重佈站台時 `Db\` 目錄要一併保留
+**設定的兩處來源**：第一次啟動前，機密必須放在 `appsettings.Production.json`
+（啟動驗證要求 `Line:ChannelSecret` 等鍵非空，站台起不來就進不了設定頁）。
+之後改由設定頁接管，加密檔的值優先生效，`appsettings` 的那份就不再是實際生效的值。
+
+**不要把 `appsettings` 裡的機密清空**——它是站台的開機備援。加密檔讀不出來時
+（見下一段）設定值會退回 `appsettings`，若那裡是空的，啟動驗證會擋下整個站台，
+`/edge-admin` 也就連不上，只能改檔案救。留著舊值則站台照常啟動、設定頁可以進，
+用新值存一次檔就復原了。
+
+也因此，`appsettings` 裡的機密值與目前實際生效的值不一致是正常狀態：
+盤點設定時以設定頁顯示的末四碼為準，不要以 `appsettings` 的內容為準。
+
+**多工作處理程序**：設定檔有檔案監看，同一台上的其他 worker process 寫入後也會熱生效
+（IIS 重疊回收期間新舊行程並存時同樣適用）。Edge 的負載很輕，仍建議把應用程式集區的
+「工作處理程序最大數目」保持在 1。
+
+**加密檔讀不出來時**：加密檔綁這台機器，複製到別台、或還原映像到不同硬體後就解不開。
+這種情況下設定值退回 `appsettings.json`，設定頁頂端會出現一則紅色警示說明目前的狀況
+（log 也會記一則 Error）。只要 `appsettings` 裡還留著機密（見上一段），站台照常啟動、
+設定頁進得去，重新填一次並存檔就會覆寫成這台機器解得開的新檔。
+退回的舊值多半已經不是 LINE 那邊現在用的那把，這段期間 webhook 會驗簽失敗回 401——
+站台起得來的意義是讓設定頁有得進，不是讓服務照常運作，所以看到警示要儘快處理。
+重佈站台時 `Db\` 目錄要一併保留
 （與 `outbox.db` 同一個目錄，見上方對 `Db\` 的說明）。
 
 ### E1f. 只接受來自 EdgeProxy 的 webhook
@@ -483,6 +508,22 @@ Edge 端的 outbox 排空預設會打 Core 的批次 ingest 端點（`POST /api/
 送整批；如果 Core 還沒升級到有這支端點，Edge 會收到 404 並自動退回逐筆模式（功能不受影響，
 只是吞吐量變低），同時記一則警告 log。升級順序遵照這個原則就不會踩到：先升 Core，
 確認正常後再升 Edge。
+
+### E5. 拓撲轉換：從一種組合換成另一種
+
+台數可以隨需求增減，同一份發行產物不必重新編譯。每種轉換要動的東西：
+
+| 轉換 | 要做什麼 |
+|---|---|
+| AllInOne → 加一台 Viewer | **硬前提：必須先改用 SQL Server**（Viewer 要直連同一顆資料庫，SQLite 是本機檔案不能跨機共用）。原機加 `Viewer:Enabled=false`，新機用 Viewer 樣板、`Database:AutoMigrate=false`（migration 只由一台跑） |
+| AllInOne → 拆成 Edge＋Core | 原機改 `Deployment:Mode=Core`；新機用 Edge 樣板。兩邊 `Ingest:ApiKey` 要一致，Core 端填 `Ingest:AllowedClientIps`。`Line:OutboundHere` 恰好一台設 `true`。原本的 `outbox.db` 留在原機，排空完才停用 |
+| 加一台 EdgeProxy | 新機用 EdgeProxy 樣板填 `EdgeProxy:TargetBaseUrl`，LINE Console 的 Webhook URL 改指 proxy。收 webhook 那台通常不用改設定——除非已啟用 E1f 的 webhook 來源限制，那要把 proxy 的 IP 加進允許清單，否則來源變成 proxy 之後會全被擋 |
+| 拆掉 EdgeProxy | LINE Console 的 Webhook URL 改回直指 Edge／AllInOne；若原本有設 `Line:OutboundVia=EdgeProxy` 要改回 `Direct` 並重啟該台 |
+| 切換 `Line:OutboundVia` | 這個鍵是啟動時讀取的快照，改完**要重啟 Edge** 才生效（設定頁改不到它） |
+| 改 `Ingest:Channel` 方向 | 見 E1b。Edge 設 `Pull` 時，Core 端一定要同時設好 `Ingest:EdgeBaseUrl`，否則兩邊都不主動連線、webhook 會收進 outbox 但永遠不落地 |
+
+轉換過程中訊息不會遺失：進了 outbox 的訊息由重試機制保證送達，尚未進來的靠
+LINE redelivery 補送（轉換時段建議挑訊息量低的時候）。
 
 ---
 
