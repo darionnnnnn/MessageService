@@ -372,4 +372,91 @@ public class EdgeAdminEndpointsTests : IDisposable
 
         Assert.Empty(effective);
     }
+
+    [Fact]
+    public void CorruptedFile_HostBootsNormally_EffectiveSettingsFallbackToAppSettings()
+    {
+        // 寫入毀損檔案
+        var dbDir = Path.Combine(_tempDir, "Db");
+        Directory.CreateDirectory(dbDir);
+        var settingsPath = Path.Combine(dbDir, "edge-settings.dat");
+        File.WriteAllBytes(settingsPath, [0xAA, 0xBB, 0xCC, 0xDD]);
+
+        using var factory = CreateEdgeFactory();
+        var config = factory.Services.GetRequiredService<IConfiguration>();
+        var store = factory.Services.GetRequiredService<EdgeSettingsStore>();
+
+        // 站台能正常啟動，LoadStatus 為 Unreadable
+        Assert.Equal(EncryptedSettingsLoadStatus.Unreadable, store.LoadStatus);
+
+        // 設定值退回 appsettings
+        Assert.Equal("initial-secret", config["Line:ChannelSecret"]);
+        Assert.Equal("initial-key", config["Ingest:ApiKey"]);
+    }
+
+    [Fact]
+    public async Task EdgeAdmin_Get_WithCorruptedFile_ContainsAlertBanner()
+    {
+        var dbDir = Path.Combine(_tempDir, "Db");
+        Directory.CreateDirectory(dbDir);
+        var settingsPath = Path.Combine(dbDir, "edge-settings.dat");
+        File.WriteAllBytes(settingsPath, [0xAA, 0xBB, 0xCC, 0xDD]);
+
+        using var factory = CreateEdgeFactory();
+        using var client = factory.CreateClient();
+
+        var response = await client.GetAsync("/edge-admin");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        var html = await response.Content.ReadAsStringAsync();
+        Assert.Contains("<div class=\"alert-danger\">", html);
+        Assert.Contains("加密設定檔存在但無法解密", html);
+    }
+
+    [Fact]
+    public async Task EdgeAdmin_Get_WithoutSettingsFile_DoesNotContainAlertBanner()
+    {
+        using var factory = CreateEdgeFactory();
+        using var client = factory.CreateClient();
+
+        var response = await client.GetAsync("/edge-admin");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        var html = await response.Content.ReadAsStringAsync();
+        Assert.DoesNotContain("<div class=\"alert-danger\">", html);
+        Assert.DoesNotContain("加密設定檔存在但無法解密", html);
+    }
+
+    [Fact]
+    public async Task EdgeAdmin_Post_WhenInitiallyUnreadable_SucceedsAndRecoversToLoaded()
+    {
+        // 初始為毀損狀態
+        var dbDir = Path.Combine(_tempDir, "Db");
+        Directory.CreateDirectory(dbDir);
+        var settingsPath = Path.Combine(dbDir, "edge-settings.dat");
+        File.WriteAllBytes(settingsPath, [0xAA, 0xBB, 0xCC, 0xDD]);
+
+        using var factory = CreateEdgeFactory();
+        using var client = factory.CreateClient(new WebApplicationFactoryClientOptions
+        {
+            AllowAutoRedirect = false
+        });
+        var store = factory.Services.GetRequiredService<EdgeSettingsStore>();
+        Assert.Equal(EncryptedSettingsLoadStatus.Unreadable, store.LoadStatus);
+
+        // 重新填寫並送出表單
+        var form = new Dictionary<string, string>
+        {
+            ["lineChannelSecret"] = "repaired-secret",
+            ["webhookMode"] = "Any",
+        };
+        using var content = new FormUrlEncodedContent(form);
+        var postRes = await client.PostAsync("/edge-admin", content);
+        Assert.True(postRes.StatusCode is HttpStatusCode.Redirect or HttpStatusCode.Found);
+
+        // 復原後狀態為 Loaded，設定值生效
+        Assert.Equal(EncryptedSettingsLoadStatus.Loaded, store.LoadStatus);
+        var config = factory.Services.GetRequiredService<IConfiguration>();
+        Assert.Equal("repaired-secret", config["Line:ChannelSecret"]);
+    }
 }

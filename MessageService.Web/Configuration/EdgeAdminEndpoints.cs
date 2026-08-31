@@ -17,6 +17,7 @@ public static class EdgeAdminEndpoints
     {
         endpoints.MapGet("/edge-admin", (
             IConfiguration config,
+            EdgeSettingsStore store,
             HttpContext context) =>
         {
             var saved = context.Request.Query.ContainsKey("saved");
@@ -28,6 +29,7 @@ public static class EdgeAdminEndpoints
             var ingestIps = config.GetSection(PrefixIngestIps).Get<string[]>() ?? [];
             var webhookMode = config["WebhookSource:Mode"] ?? "Any";
             var webhookIps = config.GetSection(PrefixWebhookIps).Get<string[]>() ?? [];
+            var isUnreadable = store.LoadStatus == EncryptedSettingsLoadStatus.Unreadable;
 
             var model = new EdgeAdminViewModel(
                 lineSecret,
@@ -36,7 +38,8 @@ public static class EdgeAdminEndpoints
                 ingestIps,
                 webhookMode,
                 webhookIps,
-                Saved: saved);
+                Saved: saved,
+                IsUnreadable: isUnreadable);
 
             var html = EdgeAdminPage.Render(model);
             // 頁面帶有機密的末四碼，不能進瀏覽器磁碟快取或中間代理

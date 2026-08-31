@@ -58,6 +58,34 @@ public class PlaintextSettingsProtector : ISettingsProtector
 }
 
 /// <summary>
+/// 加密設定檔的載入狀態。
+/// </summary>
+public enum EncryptedSettingsLoadStatus
+{
+    /// <summary>
+    /// 設定檔不存在（首次使用或尚未建立設定檔時的正常狀態）。
+    /// </summary>
+    NotFound,
+
+    /// <summary>
+    /// 設定檔讀取與解密成功。
+    /// </summary>
+    Loaded,
+
+    /// <summary>
+    /// 設定檔存在但無法解密或反序列化（常見原因：主機更換或還原映像導致 DPAPI 解不開）。
+    /// </summary>
+    Unreadable
+}
+
+/// <summary>
+/// 加密設定檔讀取結果，包含設定值字典與載入狀態。
+/// </summary>
+public record EncryptedSettingsReadResult(
+    IDictionary<string, string?> Values,
+    EncryptedSettingsLoadStatus Status);
+
+/// <summary>
 /// 負責解析路徑、讀取與不可分割寫入 Edge 加密設定檔的小工具。
 /// </summary>
 public static class EncryptedSettingsFile
@@ -74,17 +102,20 @@ public static class EncryptedSettingsFile
 
     /// <summary>
     /// 讀取加密設定檔。
-    /// 檔案不存在時回傳空字典（不拋例外）；
-    /// 解密或反序列化失敗時回傳空字典並記錄警告（避免設定損毀導致站台無法啟動，退回 appsettings）。
+    /// 檔案不存在時回傳空字典與 NotFound 狀態（不拋例外、不記 log）；
+    /// 讀取成功時回傳值字典與 Loaded 狀態；
+    /// 解密或反序列化失敗時回傳空字典與 Unreadable 狀態並記錄 Error（避免設定損毀導致站台無法啟動，退回 appsettings）。
     /// </summary>
-    public static IDictionary<string, string?> Read(string path, ISettingsProtector protector, ILogger? logger = null)
+    public static EncryptedSettingsReadResult Read(string path, ISettingsProtector protector, ILogger? logger = null)
     {
         ArgumentNullException.ThrowIfNull(path);
         ArgumentNullException.ThrowIfNull(protector);
 
         if (!File.Exists(path))
         {
-            return new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+            return new EncryptedSettingsReadResult(
+                new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase),
+                EncryptedSettingsLoadStatus.NotFound);
         }
 
         try
@@ -92,19 +123,39 @@ public static class EncryptedSettingsFile
             var ciphertext = File.ReadAllBytes(path);
             if (ciphertext.Length == 0)
             {
-                return new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+                logger?.LogError(
+                    "讀取或解密 Edge 加密設定檔失敗（檔案為空）：{Path}。常見原因：主機更換或還原映像導致 DPAPI 解不開。復原方式：在設定頁重新填寫並存檔即可重建，目前將退回使用 appsettings 設定值。",
+                    path);
+                return new EncryptedSettingsReadResult(
+                    new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase),
+                    EncryptedSettingsLoadStatus.Unreadable);
             }
 
             var plaintext = protector.Unprotect(ciphertext);
             var values = JsonSerializer.Deserialize<Dictionary<string, string?>>(plaintext);
-            return values is not null
-                ? new Dictionary<string, string?>(values, StringComparer.OrdinalIgnoreCase)
-                : new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+            if (values is null)
+            {
+                logger?.LogError(
+                    "讀取或反序列化 Edge 加密設定檔失敗（反序列化為 null）：{Path}。常見原因：主機更換或還原映像導致 DPAPI 解不開。復原方式：在設定頁重新填寫並存檔即可重建，目前將退回使用 appsettings 設定值。",
+                    path);
+                return new EncryptedSettingsReadResult(
+                    new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase),
+                    EncryptedSettingsLoadStatus.Unreadable);
+            }
+
+            return new EncryptedSettingsReadResult(
+                new Dictionary<string, string?>(values, StringComparer.OrdinalIgnoreCase),
+                EncryptedSettingsLoadStatus.Loaded);
         }
         catch (Exception ex)
         {
-            logger?.LogWarning(ex, "讀取或解密 Edge 加密設定檔失敗：{Path}，將退回使用 appsettings 設定值", path);
-            return new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+            logger?.LogError(
+                ex,
+                "讀取或解密 Edge 加密設定檔失敗：{Path}。常見原因：主機更換或還原映像導致 DPAPI 解不開。復原方式：在設定頁重新填寫並存檔即可重建，目前將退回使用 appsettings 設定值。",
+                path);
+            return new EncryptedSettingsReadResult(
+                new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase),
+                EncryptedSettingsLoadStatus.Unreadable);
         }
     }
 
@@ -138,19 +189,31 @@ public static class EncryptedSettingsFile
 
 /// <summary>
 /// 加密設定檔的 ConfigurationProvider。
+/// 支援 FileSystemWatcher 監看設定檔變更並即時去抖動熱重載。
 /// </summary>
-public class EncryptedSettingsConfigurationProvider : ConfigurationProvider
+public class EncryptedSettingsConfigurationProvider : ConfigurationProvider, IDisposable
 {
     private readonly string _path;
     private ISettingsProtector _protector;
     private readonly ILogger? _logger;
+    private FileSystemWatcher? _watcher;
+    private Timer? _debounceTimer;
+    private readonly object _lock = new();
+    private bool _disposed;
+    private const int DebounceDelayMs = 300;
 
     public EncryptedSettingsConfigurationProvider(string path, ISettingsProtector protector, ILogger? logger = null)
     {
         _path = path;
         _protector = protector;
         _logger = logger;
+        InitializeWatcher();
     }
+
+    /// <summary>
+    /// 最後一次載入的狀態。
+    /// </summary>
+    public EncryptedSettingsLoadStatus LoadStatus { get; private set; } = EncryptedSettingsLoadStatus.NotFound;
 
     public void SetProtector(ISettingsProtector protector)
     {
@@ -159,9 +222,9 @@ public class EncryptedSettingsConfigurationProvider : ConfigurationProvider
 
     public override void Load()
     {
-        Data = new Dictionary<string, string?>(
-            EncryptedSettingsFile.Read(_path, _protector, _logger),
-            StringComparer.OrdinalIgnoreCase);
+        var result = EncryptedSettingsFile.Read(_path, _protector, _logger);
+        LoadStatus = result.Status;
+        Data = new Dictionary<string, string?>(result.Values, StringComparer.OrdinalIgnoreCase);
     }
 
     /// <summary>
@@ -171,6 +234,144 @@ public class EncryptedSettingsConfigurationProvider : ConfigurationProvider
     {
         Load();
         OnReload();
+    }
+
+    private void InitializeWatcher()
+    {
+        try
+        {
+            var fullPath = Path.GetFullPath(_path);
+            var directory = Path.GetDirectoryName(fullPath);
+            var fileName = Path.GetFileName(fullPath);
+
+            if (string.IsNullOrEmpty(directory) || string.IsNullOrEmpty(fileName))
+            {
+                return;
+            }
+
+            if (!Directory.Exists(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
+
+            _watcher = new FileSystemWatcher(directory, fileName)
+            {
+                NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite | NotifyFilters.CreationTime | NotifyFilters.Size,
+                EnableRaisingEvents = true
+            };
+
+            _watcher.Created += OnFileEvent;
+            _watcher.Changed += OnFileEvent;
+            _watcher.Renamed += OnFileRenamed;
+            _watcher.Error += OnWatcherError;
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning(ex, "初始化設定檔 FileSystemWatcher 失敗：{Path}，將無法即時監看檔案變更", _path);
+        }
+    }
+
+    private void OnFileEvent(object sender, FileSystemEventArgs e)
+    {
+        try
+        {
+            if (string.Equals(Path.GetFileName(e.FullPath), Path.GetFileName(_path), StringComparison.OrdinalIgnoreCase))
+            {
+                TriggerDebouncedReload();
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning(ex, "處理設定檔 FileSystemWatcher 事件失敗：{Path}", _path);
+        }
+    }
+
+    private void OnFileRenamed(object sender, RenamedEventArgs e)
+    {
+        try
+        {
+            if (string.Equals(Path.GetFileName(e.FullPath), Path.GetFileName(_path), StringComparison.OrdinalIgnoreCase))
+            {
+                TriggerDebouncedReload();
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning(ex, "處理設定檔 FileSystemWatcher 檔名變更事件失敗：{Path}", _path);
+        }
+    }
+
+    private void OnWatcherError(object sender, ErrorEventArgs e)
+    {
+        _logger?.LogWarning(e.GetException(), "設定檔 FileSystemWatcher 發生錯誤：{Path}", _path);
+    }
+
+    private void TriggerDebouncedReload()
+    {
+        if (_disposed) return;
+        lock (_lock)
+        {
+            if (_disposed) return;
+            if (_debounceTimer is null)
+            {
+                _debounceTimer = new Timer(OnDebounceTimerElapsed, null, DebounceDelayMs, Timeout.Infinite);
+            }
+            else
+            {
+                _debounceTimer.Change(DebounceDelayMs, Timeout.Infinite);
+            }
+        }
+    }
+
+    private void OnDebounceTimerElapsed(object? state)
+    {
+        if (_disposed) return;
+        try
+        {
+            Reload();
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError(ex, "設定檔變更後重載失敗：{Path}", _path);
+        }
+    }
+
+    public void Dispose()
+    {
+        Dispose(true);
+        GC.SuppressFinalize(this);
+    }
+
+    protected virtual void Dispose(bool disposing)
+    {
+        if (_disposed) return;
+        if (disposing)
+        {
+            lock (_lock)
+            {
+                _debounceTimer?.Dispose();
+                _debounceTimer = null;
+            }
+
+            if (_watcher is not null)
+            {
+                try
+                {
+                    _watcher.EnableRaisingEvents = false;
+                    _watcher.Created -= OnFileEvent;
+                    _watcher.Changed -= OnFileEvent;
+                    _watcher.Renamed -= OnFileRenamed;
+                    _watcher.Error -= OnWatcherError;
+                    _watcher.Dispose();
+                }
+                catch
+                {
+                    // 釋放資源時忽略非預期例外
+                }
+                _watcher = null;
+            }
+        }
+        _disposed = true;
     }
 }
 
@@ -226,9 +427,19 @@ public class EdgeSettingsStore
 
     public string Path => _path;
 
+    /// <summary>
+    /// 目前的載入狀態。
+    /// 有 provider 時回傳 provider 的最後載入狀態（實際生效的那份狀態）；
+    /// provider 為 null 時就地讀取一次檔案取得狀態。
+    /// </summary>
+    public EncryptedSettingsLoadStatus LoadStatus =>
+        _provider is not null
+            ? _provider.LoadStatus
+            : EncryptedSettingsFile.Read(_path, _protector, _logger).Status;
+
     public IDictionary<string, string?> Read()
     {
-        return EncryptedSettingsFile.Read(_path, _protector, _logger);
+        return EncryptedSettingsFile.Read(_path, _protector, _logger).Values;
     }
 
     public void Save(IDictionary<string, string?> values)

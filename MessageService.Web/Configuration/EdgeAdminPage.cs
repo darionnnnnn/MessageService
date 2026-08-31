@@ -12,7 +12,8 @@ public record EdgeAdminViewModel(
     IReadOnlyList<string>? IngestAllowedClientIps,
     string? WebhookSourceMode,
     IReadOnlyList<string>? WebhookSourceAllowedIps,
-    bool Saved = false);
+    bool Saved = false,
+    bool IsUnreadable = false);
 
 /// <summary>
 /// 提供純函式產生 Edge 端管理設定頁 HTML。
@@ -55,6 +56,10 @@ public static class EdgeAdminPage
 
         var webhookIpsText = model.WebhookSourceAllowedIps is not null
             ? string.Join("\n", model.WebhookSourceAllowedIps)
+            : "";
+
+        var unreadableAlertHtml = model.IsUnreadable
+            ? """<div class="alert-danger">加密設定檔存在但無法解密（常見原因：主機更換或還原映像）。目前生效的是 appsettings 的值，重新填寫並存檔即可重建。</div>"""
             : "";
 
         var successAlertHtml = model.Saved
@@ -105,6 +110,15 @@ public static class EdgeAdminPage
             background-color: #d4edda;
             color: #155724;
             border: 1px solid #c3e6cb;
+            padding: 12px 16px;
+            border-radius: 4px;
+            margin-bottom: 20px;
+            font-size: 0.95rem;
+        }
+        .alert-danger {
+            background-color: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
             padding: 12px 16px;
             border-radius: 4px;
             margin-bottom: 20px;
@@ -170,6 +184,7 @@ public static class EdgeAdminPage
 <div class="container">
     <h1>Edge 管理設定</h1>
     <div class="note">儲存後立即生效，不需重啟站台。機密欄位留空表示維持原值不變。</div>
+    {{unreadableAlertHtml}}
     {{successAlertHtml}}
     <form method="post" action="/edge-admin">
         <div class="form-group">

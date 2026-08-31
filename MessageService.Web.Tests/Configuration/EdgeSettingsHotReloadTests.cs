@@ -367,4 +367,122 @@ public class EdgeSettingsHotReloadTests : IDisposable
         Assert.Single(values);
         Assert.Equal("single-key", values[0]);
     }
+
+    [Fact]
+    public async Task ExternalProcessWrite_TriggersWatcherHotReload_IOptionsMonitorUpdates()
+    {
+        var protector = new PlaintextSettingsProtector();
+        using var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
+        {
+            builder.UseContentRoot(_tempDir);
+            builder.UseEnvironment("Testing");
+            builder.UseSetting("Deployment:Mode", "Edge");
+            builder.UseSetting("Line:ChannelSecret", "boot-secret");
+            builder.UseSetting("Line:OutboundHere", "false");
+            builder.UseSetting("Ingest:BaseUrl", "https://core-host.example");
+            builder.UseSetting("Ingest:ApiKey", "the-key");
+            builder.UseSetting("ConnectionStrings:Outbox", $"Data Source={_outboxDbPath}");
+            builder.ConfigureServices(services =>
+            {
+                services.AddSingleton<ISettingsProtector>(protector);
+            });
+        });
+
+        // 確保 factory 啟動並解析 store 與 monitor
+        var store = factory.Services.GetRequiredService<EdgeSettingsStore>();
+        var monitor = factory.Services.GetRequiredService<IOptionsMonitor<LineOptions>>();
+        Assert.Equal("boot-secret", monitor.CurrentValue.ChannelSecret);
+
+        // 模擬其他程序直接寫入設定檔（不呼叫 store.Save 或 store.Reload）
+        var settingsPath = store.Path;
+        EncryptedSettingsFile.Write(settingsPath, new Dictionary<string, string?>
+        {
+            ["Line:ChannelSecret"] = "external-secret"
+        }, protector);
+
+        // 輪詢等待 FileSystemWatcher 與去抖動觸發（上限 5 秒）
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+        var updated = false;
+        while (stopwatch.ElapsedMilliseconds < 5000)
+        {
+            if (monitor.CurrentValue.ChannelSecret == "external-secret")
+            {
+                updated = true;
+                break;
+            }
+            await Task.Delay(50);
+        }
+
+        Assert.True(updated, "外部程序寫入設定檔後，IOptionsMonitor 應在 5 秒內熱重載並取得新值");
+        Assert.Equal(EncryptedSettingsLoadStatus.Loaded, store.LoadStatus);
+    }
+
+    [Fact]
+    public async Task Watcher_ReceivesCorruptedFile_DoesNotCrashHost_FallsBackAndServesRequests()
+    {
+        var protector = new PlaintextSettingsProtector();
+        using var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
+        {
+            builder.UseContentRoot(_tempDir);
+            builder.UseEnvironment("Testing");
+            builder.UseSetting("Deployment:Mode", "Edge");
+            builder.UseSetting("Line:ChannelSecret", "appsettings-secret");
+            builder.UseSetting("Line:OutboundHere", "false");
+            builder.UseSetting("Ingest:BaseUrl", "https://core-host.example");
+            builder.UseSetting("Ingest:ApiKey", "the-key");
+            builder.UseSetting("ConnectionStrings:Outbox", $"Data Source={_outboxDbPath}");
+            builder.ConfigureServices(services =>
+            {
+                services.AddSingleton<ISettingsProtector>(protector);
+            });
+        });
+
+        using var client = factory.CreateClient();
+        using (var scope = factory.Services.CreateScope())
+        {
+            scope.ServiceProvider.GetRequiredService<OutboxDbContext>().Database.EnsureCreated();
+        }
+
+        var store = factory.Services.GetRequiredService<EdgeSettingsStore>();
+        var monitor = factory.Services.GetRequiredService<IOptionsMonitor<LineOptions>>();
+
+        // 先寫入一次有效設定
+        store.Save(new Dictionary<string, string?>
+        {
+            ["Line:ChannelSecret"] = "valid-secret"
+        });
+        Assert.Equal("valid-secret", monitor.CurrentValue.ChannelSecret);
+
+        // 外部直接將檔案覆寫為毀損資料
+        File.WriteAllBytes(store.Path, [0x00, 0x11, 0x22, 0x33, 0x44]);
+
+        // 等待 Watcher 偵測並觸發重載（上限 5 秒）
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+        var reloadedToFallback = false;
+        while (stopwatch.ElapsedMilliseconds < 5000)
+        {
+            if (store.LoadStatus == EncryptedSettingsLoadStatus.Unreadable)
+            {
+                reloadedToFallback = true;
+                break;
+            }
+            await Task.Delay(50);
+        }
+
+        Assert.True(reloadedToFallback, "設定檔毀損後，Watcher 重載應將 LoadStatus 標記為 Unreadable");
+
+        // 毀損後設定值應退回 appsettings
+        Assert.Equal("appsettings-secret", monitor.CurrentValue.ChannelSecret);
+
+        // 站台依然運作正常，HTTP 請求不受影響
+        var payload = "{\"destination\":\"U123\",\"events\":[]}";
+        var body = Encoding.UTF8.GetBytes(payload);
+        using var req = new HttpRequestMessage(HttpMethod.Post, "/api/line/webhook")
+        {
+            Content = new ByteArrayContent(body)
+        };
+        req.Headers.Add("X-Line-Signature", ComputeSignature("appsettings-secret", body));
+        var res = await client.SendAsync(req);
+        Assert.Equal(HttpStatusCode.OK, res.StatusCode);
+    }
 }
