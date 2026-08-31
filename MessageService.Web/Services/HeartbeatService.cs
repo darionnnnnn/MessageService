@@ -12,10 +12,18 @@ namespace MessageService.Services;
 public class HeartbeatService(
     IServiceScopeFactory scopeFactory,
     DeploymentCapabilities capabilities,
+    TimeProvider timeProvider,
     IOptions<HeartbeatOptions> options,
     ILogger<HeartbeatService> logger) : BackgroundService
 {
     private readonly HeartbeatOptions _options = options.Value;
+
+    /// <summary>連續失敗的告警節流時點。單向防火牆拓撲（只開通 core→edge）下，Edge 送不到
+    /// 心跳是**穩態**而不是異常——每個週期噴一次完整堆疊，一天就是上千筆雜訊，真正的問題
+    /// 反而被埋掉。只在轉為失敗時記一次完整堆疊，持續期間每 10 分鐘記一則摘要。</summary>
+    private DateTimeOffset? _lastFailureLogAt;
+
+    private bool _failing;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -24,10 +32,16 @@ public class HeartbeatService(
             try
             {
                 await ReportOnceAsync(stoppingToken);
+                if (_failing)
+                {
+                    _failing = false;
+                    _lastFailureLogAt = null;
+                    logger.LogInformation("心跳回報已恢復正常。");
+                }
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                logger.LogWarning(ex, "Failed to report heartbeat");
+                LogFailure(ex);
             }
 
             try
@@ -38,6 +52,25 @@ public class HeartbeatService(
             {
                 // 正常停機
             }
+        }
+    }
+
+    private void LogFailure(Exception ex)
+    {
+        var now = timeProvider.GetUtcNow();
+        if (!_failing)
+        {
+            _failing = true;
+            _lastFailureLogAt = now;
+            logger.LogWarning(ex,
+                "Failed to report heartbeat；持續失敗期間這則告警每 10 分鐘最多再記一次。");
+            return;
+        }
+
+        if (_lastFailureLogAt is { } last && now - last >= TimeSpan.FromMinutes(10))
+        {
+            _lastFailureLogAt = now;
+            logger.LogWarning("Failed to report heartbeat（仍然失敗）：{Reason}", ex.Message);
         }
     }
 

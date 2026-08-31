@@ -44,6 +44,7 @@ public class HeartbeatServiceTests : IDisposable
             new DeploymentCapabilities(
                 ReceivesWebhook: receivesWebhook, HasDatabaseAccess: true, IngestApiEnabled: false,
                 ViewerEnabled: true, OutboundHere: false, RunsRetention: false, EdgePullApiEnabled: false),
+            TimeProvider.System,
             OptionsFactory.Create(new HeartbeatOptions()),
             NullLogger<HeartbeatService>.Instance);
 

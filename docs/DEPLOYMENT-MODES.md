@@ -124,6 +124,9 @@ Edge 端下載完成的媒體放在記憶體（`Ingest:PullStagingMaxBytes`，�
 
 ### 啟用拉取方向要設定什麼
 
+`Ingest:EdgeBaseUrl` 與 `Ingest:BaseUrl` 都支援 IIS 子應用程式路徑（`http://host/MSLine`），
+結尾斜線由程式補齊。
+
 Edge 端的 `/api/edge` 由既有的 `Ingest:ApiKey` 與 `Ingest:AllowedClientIps` 保護，
 兩層都沿用 ingest 那組設定。**`Ingest:AllowedClientIps` 空清單等於全部拒絕**
 （見 `IpAllowlistMiddleware`），所以啟用拉取方向時 Edge 必須把 Core 的 IP 加進去，

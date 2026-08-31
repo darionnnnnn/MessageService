@@ -203,7 +203,7 @@ public static class MessageServiceCoreServiceCollectionExtensions
             {
                 var baseUrl = ingestOptionsRaw.BaseUrl
                     ?? throw new InvalidOperationException("Ingest:BaseUrl must be set when Deployment:Mode=Edge.");
-                client.BaseAddress = new Uri(baseUrl);
+                client.BaseAddress = HttpBaseAddress.Create(baseUrl);
                 client.Timeout = TimeSpan.FromSeconds(30);
                 client.DefaultRequestHeaders.Add("X-Ingest-Key", ingestApiKeyForClient);
             });
@@ -211,7 +211,7 @@ public static class MessageServiceCoreServiceCollectionExtensions
             {
                 var baseUrl = ingestOptionsRaw.BaseUrl
                     ?? throw new InvalidOperationException("Ingest:BaseUrl must be set when Deployment:Mode=Edge.");
-                client.BaseAddress = new Uri(baseUrl);
+                client.BaseAddress = HttpBaseAddress.Create(baseUrl);
                 // blob 上傳可達數百 MB，比照 LineContentClient 對大檔放寬 timeout 的理由
                 client.Timeout = TimeSpan.FromMinutes(10);
                 client.DefaultRequestHeaders.Add("X-Ingest-Key", ingestApiKeyForClient);
@@ -251,14 +251,14 @@ public static class MessageServiceCoreServiceCollectionExtensions
         {
             builder.Services.AddHttpClient(EdgePullService.HttpClientName, client =>
             {
-                client.BaseAddress = new Uri(ingestOptionsRaw.EdgeBaseUrl!);
+                client.BaseAddress = HttpBaseAddress.Create(ingestOptionsRaw.EdgeBaseUrl!);
                 // poll／ack 都是小 JSON 往返，逾時要短——blob 取回另有長逾時的 client，不可共用
                 client.Timeout = TimeSpan.FromSeconds(5);
                 client.DefaultRequestHeaders.Add("X-Ingest-Key", ingestOptionsRaw.ApiKey ?? "");
             });
             builder.Services.AddHttpClient(EdgePullService.ContentHttpClientName, client =>
             {
-                client.BaseAddress = new Uri(ingestOptionsRaw.EdgeBaseUrl!);
+                client.BaseAddress = HttpBaseAddress.Create(ingestOptionsRaw.EdgeBaseUrl!);
                 // blob 可達數百 MB，比照既有 "ingest-content" 對大檔放寬 timeout 的理由
                 client.Timeout = TimeSpan.FromMinutes(10);
                 client.DefaultRequestHeaders.Add("X-Ingest-Key", ingestOptionsRaw.ApiKey ?? "");
@@ -304,7 +304,7 @@ public static class MessageServiceCoreServiceCollectionExtensions
                 // validator 檢查之前就有東西搶著解析 HttpClient 的異常路徑上才有意義
                 var baseUrl = ingestOptionsRaw.BaseUrl
                     ?? throw new InvalidOperationException("Ingest:BaseUrl must be set when Deployment:Mode=Edge.");
-                client.BaseAddress = new Uri(baseUrl);
+                client.BaseAddress = HttpBaseAddress.Create(baseUrl);
                 // payload 只有訊息中繼資料（無媒體 blob），不需要比照 LineContentClient 的長 timeout
                 client.Timeout = TimeSpan.FromSeconds(30);
             });

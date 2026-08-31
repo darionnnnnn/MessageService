@@ -353,7 +353,9 @@ Core 的 ingest API，Core 沒起來的話 Edge 只是把事件暫存在本機 o
 預設（`Ingest:Channel=Auto`）不需要任何額外設定：Edge 先試推送，不通就自動改由 Core
 輪詢接手；防火牆哪天開通，心跳（每分鐘一次）一送成功就自動升級回推送。要讓它運作，兩端各補一項：
 
-- Core 端加 `Ingest:EdgeBaseUrl`，指向 Edge 主機，例如 `https://edge-host.example/`
+- Core 端加 `Ingest:EdgeBaseUrl`，指向 Edge 主機，例如 `https://edge-host.example/`。
+  站台裝在 IIS 子應用程式底下時要把那段路徑寫進來（`http://edge-host/MSLine`），
+  結尾有沒有斜線都可以，程式會補齊
 - **Edge 端也要設 `Ingest:AllowedClientIps`**，填 Core 主機的內網 IP。這個白名單空清單
   等於全部拒絕，沒設的話 Core 的輪詢一律吃 403
 
