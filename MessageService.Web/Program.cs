@@ -6,6 +6,30 @@ using NLog.Web;
 
 var builder = WebApplication.CreateBuilder(args);
 
+var suffixResult = DeploymentModeFileLocator.Locate(
+    builder.Environment.ContentRootPath,
+    builder.Environment.EnvironmentName);
+
+if (suffixResult.Status == DeploymentModeFileLocatorStatus.Conflict)
+{
+    throw new InvalidOperationException(
+        $"偵測到多個後綴設定檔（{string.Join(", ", suffixResult.ConflictingFiles)}），同一環境只能存在一份後綴設定檔。");
+}
+
+if (suffixResult.Status == DeploymentModeFileLocatorStatus.Found)
+{
+    builder.Configuration.AddJsonFile(suffixResult.FilePath!, optional: false, reloadOnChange: true);
+    DeploymentModeFileLocator.ValidateModeConsistency(
+        suffixResult.Mode!.Value,
+        suffixResult.FileName!,
+        DeploymentModeFileLocator.ReadDeclaredMode(suffixResult.FilePath!));
+    Console.WriteLine($"採用後綴檔 {suffixResult.FileName}，模式 = {suffixResult.Mode}");
+}
+else
+{
+    Console.WriteLine("未找到後綴設定檔，模式來自 Deployment:Mode");
+}
+
 // 合併前 AllowedClientIps 是檢視端與 ingest API 各自一份 appsettings.json 裡的同名 key，
 // 互不影響；合併成單一 appsettings.json 後，這個舊 key 一旦還有值，會被誤以為同時套用到
 // 兩邊——寧可直接擋啟動，也不要讓拆機部署的白名單被悄悄共用（見 docs/history/CONSOLIDATION-PLAN.md）
@@ -26,6 +50,10 @@ builder.Host.UseNLog();
 // convention。
 var deploymentOptions = builder.Configuration.GetSection(DeploymentOptions.SectionName).Get<DeploymentOptions>()
     ?? new DeploymentOptions();
+if (suffixResult.Status == DeploymentModeFileLocatorStatus.Found)
+{
+    deploymentOptions.Mode = suffixResult.Mode!.Value;
+}
 var deploymentMode = deploymentOptions.Mode;
 
 // DeploymentMode.Full/Line/Db 是舊名，跟新名稱共用底層數值——.NET 設定綁定本身就能接受舊名
