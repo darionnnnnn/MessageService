@@ -18,12 +18,13 @@ public class DbProfileStore(MessageDbContext dbContext, FieldCipher cipher, ILog
             .Select(g => new
             {
                 g.UpdatedAt,
+                g.PictureUrl,
                 g.PictureFetchedUrl,
                 HasPicture = g.Picture != null
             })
             .FirstOrDefaultAsync(cancellationToken);
 
-        var groupStale = group is null || group.UpdatedAt < cutoff;
+        var groupStale = group is null || IsStale(group.UpdatedAt, group.PictureUrl, group.HasPicture, cutoff);
         var groupFetchedUrl = group?.PictureFetchedUrl;
         var hasGroupPicture = group?.HasPicture ?? false;
 
@@ -37,14 +38,18 @@ public class DbProfileStore(MessageDbContext dbContext, FieldCipher cipher, ILog
             .Select(m => new
             {
                 m.UpdatedAt,
+                m.PictureUrl,
                 m.PictureFetchedUrl,
                 HasPicture = m.Picture != null
             })
             .FirstOrDefaultAsync(cancellationToken);
 
-        var memberStale = member is null || member.UpdatedAt < cutoff;
+        var memberStale = member is null || IsStale(member.UpdatedAt, member.PictureUrl, member.HasPicture, cutoff);
         return new ProfileStaleness(groupStale, memberStale, groupFetchedUrl, member?.PictureFetchedUrl, hasGroupPicture, member?.HasPicture ?? false);
     }
+
+    private static bool IsStale(DateTimeOffset updatedAt, string? pictureUrl, bool hasPicture, DateTimeOffset cutoff) =>
+        updatedAt < cutoff || (!string.IsNullOrWhiteSpace(pictureUrl) && !hasPicture);
 
     public async Task UpsertGroupAsync(string groupId, GroupSummary summary, CancellationToken cancellationToken)
     {

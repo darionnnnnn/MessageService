@@ -332,4 +332,159 @@ public class ProfileRefreshServiceTests : IDisposable
         await Task.Delay(10);
         await service.ProcessAsync(new ProfileRefreshTask("G_Trigger", null), CancellationToken.None);
     }
+
+    [Fact]
+    public async Task ProcessAsync_GroupPictureDownloadFails_UpsertsNameAndEntersFailureCooldown()
+    {
+        _profileClient.OnGetGroupSummary = groupId => new GroupSummary(groupId, "GroupName", "https://example.com/pic.jpg", PictureDownloadFailed: true);
+        var service = CreateService(new ProfileCacheOptions
+        {
+            RefreshAfter = TimeSpan.FromDays(7),
+            FailureRetryAfter = TimeSpan.FromMilliseconds(50)
+        });
+
+        await service.ProcessAsync(new ProfileRefreshTask("G1", null), CancellationToken.None);
+
+        // 1. 名稱仍然有 upsert 入庫
+        var group = await GetGroupAsync("G1");
+        Assert.NotNull(group);
+        Assert.Equal("GroupName", group!.GroupName);
+        Assert.Equal("https://example.com/pic.jpg", group.PictureUrl);
+        Assert.Null(group.PictureFetchedUrl);
+
+        // 2. 處於失敗冷卻內（50ms），未過期時跳過
+        await service.ProcessAsync(new ProfileRefreshTask("G1", null), CancellationToken.None);
+        Assert.Single(_profileClient.GroupSummaryCalls);
+
+        // 3. 失敗冷卻過期後重試（如果是成功抑制 5 分鐘則此時仍會被跳過）
+        await Task.Delay(100);
+        await service.ProcessAsync(new ProfileRefreshTask("G1", null), CancellationToken.None);
+        Assert.Equal(2, _profileClient.GroupSummaryCalls.Count);
+    }
+
+    [Fact]
+    public async Task ProcessAsync_MemberPictureDownloadFails_UpsertsNameAndEntersFailureCooldown()
+    {
+        using (var scope = _provider.CreateScope())
+        {
+            var dbContext = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+            dbContext.Groups.Add(new Group { GroupId = "G1", GroupName = "Cached", UpdatedAt = DateTimeOffset.UtcNow });
+            await dbContext.SaveChangesAsync();
+        }
+
+        _profileClient.OnGetGroupMemberProfile = (_, userId) => new MemberProfile(userId, "UserName", "https://example.com/pic.jpg", PictureDownloadFailed: true);
+        var service = CreateService(new ProfileCacheOptions
+        {
+            RefreshAfter = TimeSpan.FromDays(7),
+            FailureRetryAfter = TimeSpan.FromMilliseconds(50)
+        });
+
+        await service.ProcessAsync(new ProfileRefreshTask("G1", "U1"), CancellationToken.None);
+
+        // 1. 名稱仍然有 upsert 入庫
+        var member = await GetMemberAsync("G1", "U1");
+        Assert.NotNull(member);
+        Assert.Equal("UserName", member!.DisplayName);
+        Assert.Equal("https://example.com/pic.jpg", member.PictureUrl);
+        Assert.Null(member.PictureFetchedUrl);
+
+        // 2. 處於失敗冷卻內（50ms），未過期時跳過
+        await service.ProcessAsync(new ProfileRefreshTask("G1", "U1"), CancellationToken.None);
+        Assert.Single(_profileClient.MemberProfileCalls);
+
+        // 3. 失敗冷卻過期後重試（如果是成功抑制 5 分鐘則此時仍會被跳過）
+        await Task.Delay(100);
+        await service.ProcessAsync(new ProfileRefreshTask("G1", "U1"), CancellationToken.None);
+        Assert.Equal(2, _profileClient.MemberProfileCalls.Count);
+    }
+
+    private sealed class CapturingLogger : ILogger<ProfileRefreshService>
+    {
+        public List<string> Warnings { get; } = [];
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            if (logLevel == LogLevel.Warning)
+            {
+                Warnings.Add(formatter(state, exception));
+            }
+        }
+    }
+
+    private class ThrowingProfileStore(Func<string, string?, DateTimeOffset, Task<ProfileStaleness>> onGetStaleness) : IProfileStore
+    {
+        public int GetStalenessCallCount { get; private set; }
+
+        public Task<ProfileStaleness> GetStalenessAsync(string groupId, string? userId, DateTimeOffset cutoff, CancellationToken cancellationToken)
+        {
+            GetStalenessCallCount++;
+            return onGetStaleness(groupId, userId, cutoff);
+        }
+
+        public Task UpsertGroupAsync(string groupId, GroupSummary summary, CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task UpsertMemberAsync(string groupId, string userId, MemberProfile profile, CancellationToken cancellationToken) => Task.CompletedTask;
+    }
+
+    [Fact]
+    public async Task ProcessAsync_GetStalenessAsyncThrows_WithUserId_SuppressesGroupAndMemberAndLogsWarning()
+    {
+        var store = new ThrowingProfileStore((_, _, _) =>
+            throw new HttpRequestException("Server error", null, System.Net.HttpStatusCode.InternalServerError));
+        var logger = new CapturingLogger();
+
+        var services = new ServiceCollection();
+        services.AddSingleton<IProfileStore>(store);
+        services.AddSingleton<ILineProfileClient>(_profileClient);
+        var provider = services.BuildServiceProvider();
+
+        var service = new ProfileRefreshService(
+            new FakeProfileRefreshQueue(),
+            provider.GetRequiredService<IServiceScopeFactory>(),
+            OptionsFactory.Create(new ProfileCacheOptions { RefreshAfter = TimeSpan.FromDays(7), FailureRetryAfter = TimeSpan.FromMinutes(10) }),
+            logger);
+
+        // 呼叫不會往外拋例外
+        await service.ProcessAsync(new ProfileRefreshTask("G1", "U1"), CancellationToken.None);
+
+        // 記了含分類字串的 Warning
+        Assert.Single(logger.Warnings);
+        Assert.Contains("查詢名稱／頭貼快取狀態失敗", logger.Warnings[0]);
+        Assert.Contains("HTTP 500", logger.Warnings[0]);
+
+        // Group 與 Member 均進入冷卻，第二次呼叫直接短路，不重打 GetStalenessAsync
+        await service.ProcessAsync(new ProfileRefreshTask("G1", "U1"), CancellationToken.None);
+        Assert.Equal(1, store.GetStalenessCallCount);
+    }
+
+    [Fact]
+    public async Task ProcessAsync_GetStalenessAsyncThrows_WithoutUserId_SuppressesGroupAndLogsWarning()
+    {
+        var store = new ThrowingProfileStore((_, _, _) =>
+            throw new HttpRequestException("DNS failed", new System.Net.Sockets.SocketException((int)System.Net.Sockets.SocketError.HostNotFound)));
+        var logger = new CapturingLogger();
+
+        var services = new ServiceCollection();
+        services.AddSingleton<IProfileStore>(store);
+        services.AddSingleton<ILineProfileClient>(_profileClient);
+        var provider = services.BuildServiceProvider();
+
+        var service = new ProfileRefreshService(
+            new FakeProfileRefreshQueue(),
+            provider.GetRequiredService<IServiceScopeFactory>(),
+            OptionsFactory.Create(new ProfileCacheOptions { RefreshAfter = TimeSpan.FromDays(7), FailureRetryAfter = TimeSpan.FromMinutes(10) }),
+            logger);
+
+        // 呼叫不會往外拋例外
+        await service.ProcessAsync(new ProfileRefreshTask("G1", null), CancellationToken.None);
+
+        // 記了含分類字串的 Warning
+        Assert.Single(logger.Warnings);
+        Assert.Contains("查詢名稱／頭貼快取狀態失敗", logger.Warnings[0]);
+        Assert.Contains("DNS 解析失敗", logger.Warnings[0]);
+
+        // Group 進入冷卻，第二次呼叫直接短路
+        await service.ProcessAsync(new ProfileRefreshTask("G1", null), CancellationToken.None);
+        Assert.Equal(1, store.GetStalenessCallCount);
+    }
 }

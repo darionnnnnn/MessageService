@@ -71,7 +71,23 @@ public class ProfileRefreshService(
 
         // 一次查完群組與成員的 staleness——TTL 判斷一定要在打 LINE API 之前完成才省得到配額，
         // 這也是 IProfileStore 把 staleness 跟 upsert 拆成兩支方法的理由
-        var staleness = await profileStore.GetStalenessAsync(task.GroupId, task.UserId, cutoff, cancellationToken);
+        ProfileStaleness staleness;
+        try
+        {
+            staleness = await profileStore.GetStalenessAsync(task.GroupId, task.UserId, cutoff, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            RecordFailure(task.GroupId);
+            if (task.UserId is not null)
+            {
+                RecordFailure(MemberKey(task.GroupId, task.UserId));
+            }
+
+            logger.LogWarning(ex, "查詢名稱／頭貼快取狀態失敗 (group {GroupId}, user {UserId}); backing off: {FailureReason}",
+                task.GroupId, task.UserId, OutboundFailureClassifier.Classify(ex, targetHost));
+            return;
+        }
 
         if (!groupSuppressed)
         {
@@ -157,7 +173,14 @@ public class ProfileRefreshService(
         }
 
         await profileStore.UpsertGroupAsync(groupId, summary, cancellationToken);
-        Suppress(groupId, DateTimeOffset.UtcNow + SuppressWindow);
+        if (summary.PictureDownloadFailed)
+        {
+            RecordFailure(groupId);
+        }
+        else
+        {
+            Suppress(groupId, DateTimeOffset.UtcNow + SuppressWindow);
+        }
     }
 
     private async Task RefreshMemberAsync(
@@ -184,6 +207,13 @@ public class ProfileRefreshService(
         }
 
         await profileStore.UpsertMemberAsync(groupId, userId, profile, cancellationToken);
-        Suppress(MemberKey(groupId, userId), DateTimeOffset.UtcNow + SuppressWindow);
+        if (profile.PictureDownloadFailed)
+        {
+            RecordFailure(MemberKey(groupId, userId));
+        }
+        else
+        {
+            Suppress(MemberKey(groupId, userId), DateTimeOffset.UtcNow + SuppressWindow);
+        }
     }
 }

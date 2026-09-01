@@ -471,4 +471,181 @@ public class DbProfileStoreTests : IDisposable
         Assert.Empty(_dbContext.ChangeTracker.Entries<Group>());
         Assert.Empty(_dbContext.ChangeTracker.Entries<GroupMember>());
     }
+
+    [Fact]
+    public async Task GetStalenessAsync_Group_FreshUpdatedAt_WithPictureUrl_NoPictureInChildTable_IsStale()
+    {
+        var cipher = CreateCipher(false);
+        var store = new DbProfileStore(_dbContext, cipher, NullLogger<DbProfileStore>.Instance);
+
+        var group = new Group
+        {
+            GroupId = "g1",
+            GroupName = "Group 1",
+            PictureUrl = "https://example.com/pic1",
+            UpdatedAt = DateTimeOffset.UtcNow
+        };
+        _dbContext.Groups.Add(group);
+        await _dbContext.SaveChangesAsync();
+        _dbContext.ChangeTracker.Clear();
+
+        var staleness = await store.GetStalenessAsync("g1", null, DateTimeOffset.UtcNow.AddMinutes(-5), CancellationToken.None);
+
+        Assert.True(staleness.GroupStale);
+        Assert.False(staleness.HasGroupPicture);
+    }
+
+    [Fact]
+    public async Task GetStalenessAsync_Group_FreshUpdatedAt_NullPictureUrl_NoPictureInChildTable_IsNotStale()
+    {
+        var cipher = CreateCipher(false);
+        var store = new DbProfileStore(_dbContext, cipher, NullLogger<DbProfileStore>.Instance);
+
+        var group = new Group
+        {
+            GroupId = "g1",
+            GroupName = "Group 1",
+            PictureUrl = null,
+            UpdatedAt = DateTimeOffset.UtcNow
+        };
+        _dbContext.Groups.Add(group);
+        await _dbContext.SaveChangesAsync();
+        _dbContext.ChangeTracker.Clear();
+
+        var staleness = await store.GetStalenessAsync("g1", null, DateTimeOffset.UtcNow.AddMinutes(-5), CancellationToken.None);
+
+        Assert.False(staleness.GroupStale);
+        Assert.False(staleness.HasGroupPicture);
+    }
+
+    [Fact]
+    public async Task GetStalenessAsync_Group_FreshUpdatedAt_WithPictureUrl_WithPictureInChildTable_IsNotStale()
+    {
+        var cipher = CreateCipher(false);
+        var store = new DbProfileStore(_dbContext, cipher, NullLogger<DbProfileStore>.Instance);
+
+        var group = new Group
+        {
+            GroupId = "g1",
+            GroupName = "Group 1",
+            PictureUrl = "https://example.com/pic1",
+            PictureFetchedUrl = "https://example.com/pic1",
+            UpdatedAt = DateTimeOffset.UtcNow,
+            Picture = new GroupPicture { GroupId = "g1", Content = [1, 2, 3] }
+        };
+        _dbContext.Groups.Add(group);
+        await _dbContext.SaveChangesAsync();
+        _dbContext.ChangeTracker.Clear();
+
+        var staleness = await store.GetStalenessAsync("g1", null, DateTimeOffset.UtcNow.AddMinutes(-5), CancellationToken.None);
+
+        Assert.False(staleness.GroupStale);
+        Assert.True(staleness.HasGroupPicture);
+    }
+
+    [Fact]
+    public async Task GetStalenessAsync_Member_FreshUpdatedAt_WithPictureUrl_NoPictureInChildTable_IsStale()
+    {
+        var cipher = CreateCipher(false);
+        var store = new DbProfileStore(_dbContext, cipher, NullLogger<DbProfileStore>.Instance);
+
+        var member = new GroupMember
+        {
+            GroupId = "g1",
+            UserId = "u1",
+            DisplayName = "User 1",
+            PictureUrl = "https://example.com/pic2",
+            UpdatedAt = DateTimeOffset.UtcNow
+        };
+        _dbContext.GroupMembers.Add(member);
+        await _dbContext.SaveChangesAsync();
+        _dbContext.ChangeTracker.Clear();
+
+        var staleness = await store.GetStalenessAsync("g1", "u1", DateTimeOffset.UtcNow.AddMinutes(-5), CancellationToken.None);
+
+        Assert.True(staleness.MemberStale);
+        Assert.False(staleness.HasMemberPicture);
+    }
+
+    [Fact]
+    public async Task GetStalenessAsync_Member_FreshUpdatedAt_NullPictureUrl_NoPictureInChildTable_IsNotStale()
+    {
+        var cipher = CreateCipher(false);
+        var store = new DbProfileStore(_dbContext, cipher, NullLogger<DbProfileStore>.Instance);
+
+        var member = new GroupMember
+        {
+            GroupId = "g1",
+            UserId = "u1",
+            DisplayName = "User 1",
+            PictureUrl = null,
+            UpdatedAt = DateTimeOffset.UtcNow
+        };
+        _dbContext.GroupMembers.Add(member);
+        await _dbContext.SaveChangesAsync();
+        _dbContext.ChangeTracker.Clear();
+
+        var staleness = await store.GetStalenessAsync("g1", "u1", DateTimeOffset.UtcNow.AddMinutes(-5), CancellationToken.None);
+
+        Assert.False(staleness.MemberStale);
+        Assert.False(staleness.HasMemberPicture);
+    }
+
+    [Fact]
+    public async Task GetStalenessAsync_Member_FreshUpdatedAt_WithPictureUrl_WithPictureInChildTable_IsNotStale()
+    {
+        var cipher = CreateCipher(false);
+        var store = new DbProfileStore(_dbContext, cipher, NullLogger<DbProfileStore>.Instance);
+
+        var member = new GroupMember
+        {
+            GroupId = "g1",
+            UserId = "u1",
+            DisplayName = "User 1",
+            PictureUrl = "https://example.com/pic2",
+            PictureFetchedUrl = "https://example.com/pic2",
+            UpdatedAt = DateTimeOffset.UtcNow,
+            Picture = new GroupMemberPicture { GroupId = "g1", UserId = "u1", Content = [4, 5, 6] }
+        };
+        _dbContext.GroupMembers.Add(member);
+        await _dbContext.SaveChangesAsync();
+        _dbContext.ChangeTracker.Clear();
+
+        var staleness = await store.GetStalenessAsync("g1", "u1", DateTimeOffset.UtcNow.AddMinutes(-5), CancellationToken.None);
+
+        Assert.False(staleness.MemberStale);
+        Assert.True(staleness.HasMemberPicture);
+    }
+
+    [Fact]
+    public async Task GetStalenessAsync_GroupAndMember_WhitespacePictureUrl_NoPictureInChildTable_IsNotStale()
+    {
+        var cipher = CreateCipher(false);
+        var store = new DbProfileStore(_dbContext, cipher, NullLogger<DbProfileStore>.Instance);
+
+        var group = new Group
+        {
+            GroupId = "g1",
+            GroupName = "Group 1",
+            PictureUrl = "   ",
+            UpdatedAt = DateTimeOffset.UtcNow
+        };
+        var member = new GroupMember
+        {
+            GroupId = "g1",
+            UserId = "u1",
+            DisplayName = "User 1",
+            PictureUrl = "   ",
+            UpdatedAt = DateTimeOffset.UtcNow
+        };
+        _dbContext.Groups.Add(group);
+        _dbContext.GroupMembers.Add(member);
+        await _dbContext.SaveChangesAsync();
+        _dbContext.ChangeTracker.Clear();
+
+        var staleness = await store.GetStalenessAsync("g1", "u1", DateTimeOffset.UtcNow.AddMinutes(-5), CancellationToken.None);
+
+        Assert.False(staleness.GroupStale);
+        Assert.False(staleness.MemberStale);
+    }
 }

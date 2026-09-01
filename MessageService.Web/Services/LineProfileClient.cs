@@ -64,14 +64,15 @@ public class LineProfileClient : ILineProfileClient
         var root = document.RootElement;
 
         var pictureUrl = root.TryGetProperty("pictureUrl", out var picture) ? picture.GetString() : null;
-        var (bytes, contentType) = await DownloadPictureAsync(pictureUrl, knownPictureUrl, hasPicture, cancellationToken);
+        var (bytes, contentType, downloadFailed) = await DownloadPictureAsync(pictureUrl, knownPictureUrl, hasPicture, cancellationToken);
 
         return new GroupSummary(
             root.GetProperty("groupId").GetString() ?? groupId,
             root.TryGetProperty("groupName", out var name) ? name.GetString() : null,
             pictureUrl,
             bytes,
-            contentType);
+            contentType,
+            downloadFailed);
     }
 
     public async Task<MemberProfile?> GetGroupMemberProfileAsync(string groupId, string userId, string? knownPictureUrl, bool hasPicture, CancellationToken cancellationToken)
@@ -88,21 +89,22 @@ public class LineProfileClient : ILineProfileClient
         var root = document.RootElement;
 
         var pictureUrl = root.TryGetProperty("pictureUrl", out var picture) ? picture.GetString() : null;
-        var (bytes, contentType) = await DownloadPictureAsync(pictureUrl, knownPictureUrl, hasPicture, cancellationToken);
+        var (bytes, contentType, downloadFailed) = await DownloadPictureAsync(pictureUrl, knownPictureUrl, hasPicture, cancellationToken);
 
         return new MemberProfile(
             root.GetProperty("userId").GetString() ?? userId,
             root.TryGetProperty("displayName", out var name) ? name.GetString() : null,
             pictureUrl,
             bytes,
-            contentType);
+            contentType,
+            downloadFailed);
     }
     
-    private async Task<(byte[]? Bytes, string? ContentType)> DownloadPictureAsync(string? pictureUrl, string? knownPictureUrl, bool hasPicture, CancellationToken cancellationToken)
+    private async Task<(byte[]? Bytes, string? ContentType, bool DownloadFailed)> DownloadPictureAsync(string? pictureUrl, string? knownPictureUrl, bool hasPicture, CancellationToken cancellationToken)
     {
         if (pictureUrl == null || (pictureUrl == knownPictureUrl && hasPicture))
         {
-            return (null, null);
+            return (null, null, false);
         }
 
         string? requestUrl = null;
@@ -128,25 +130,27 @@ public class LineProfileClient : ILineProfileClient
             var contentLength = response.Content.Headers.ContentLength;
             if (contentLength > MaxImageSize)
             {
+                // 回報成失敗是刻意的：頭貼缺圖會讓這筆持續判定為 stale（見 DbProfileStore 的
+                // staleness 判定），回報成功只會讓同一張過大的圖每 5 分鐘被重抓一次
                 _logger.LogWarning("Profile picture for {PictureUrl} is too large ({Size} bytes), skipping download", pictureUrl, contentLength);
-                return (null, null);
+                return (null, null, true);
             }
             
             var bytes = await response.Content.ReadAsByteArrayAsync(cancellationToken);
             if (bytes.Length > MaxImageSize)
             {
                 _logger.LogWarning("Profile picture for {PictureUrl} is too large ({Size} bytes) after reading, skipping", pictureUrl, bytes.Length);
-                return (null, null);
+                return (null, null, true);
             }
             
-            return (bytes, response.Content.Headers.ContentType?.MediaType);
+            return (bytes, response.Content.Headers.ContentType?.MediaType, false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             var targetHost = requestUrl ?? pictureUrl;
             _logger.LogWarning(ex, "Failed to download profile picture from {PictureUrl}: {FailureReason}",
                 pictureUrl, OutboundFailureClassifier.Classify(ex, targetHost));
-            return (null, null);
+            return (null, null, true);
         }
     }
 }

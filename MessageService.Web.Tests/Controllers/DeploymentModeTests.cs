@@ -480,11 +480,11 @@ public class DeploymentModeTests : IDisposable
 
         // upsert 群組與成員
         var groupResponse = await client.PostAsJsonAsync("/api/ingest/profiles/group",
-            new GroupSummary("Gprof", "測試群組", "https://example/g.png"));
+            new GroupSummary("Gprof", "測試群組", "https://example/g.png", [1, 2, 3]));
         Assert.Equal(HttpStatusCode.NoContent, groupResponse.StatusCode);
 
         var memberResponse = await client.PostAsJsonAsync("/api/ingest/profiles/member",
-            new MemberUpsertRequest("Gprof", new MemberProfile("Uprof", "測試成員", "https://example/u.png")));
+            new MemberUpsertRequest("Gprof", new MemberProfile("Uprof", "測試成員", "https://example/u.png", [4, 5, 6])));
         Assert.Equal(HttpStatusCode.NoContent, memberResponse.StatusCode);
 
         // 剛更新過，用「很久以前」當 cutoff 應該判定為新鮮（不需要刷新）

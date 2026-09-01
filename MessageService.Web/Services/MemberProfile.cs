@@ -1,3 +1,9 @@
 namespace MessageService.Services;
 
-public record MemberProfile(string UserId, string? DisplayName, string? PictureUrl, byte[]? PictureBytes = null, string? PictureContentType = null);
+public record MemberProfile(
+    string UserId,
+    string? DisplayName,
+    string? PictureUrl,
+    byte[]? PictureBytes = null,
+    string? PictureContentType = null,
+    bool PictureDownloadFailed = false);
