@@ -45,6 +45,14 @@ raw body 算的 HMAC，任何反序列化再序列化都會讓 Edge 驗簽失敗
 所有路徑都回 404。Edge 不可達時回 502，由 LINE 的 redelivery 重送
 （Edge 端 outbox 與落地端的唯一索引保證重送安全）。
 
+### Edge 的管理面
+
+Edge 主機提供 `/edge-admin`（受 `EdgeAdmin:AllowedClientIps` 保護），三個分頁：**設定**
+（免重啟改機密與白名單）、**連線測試**（對 LINE 的 `v2/bot/info` 發一次請求，直連與經
+EdgeProxy 都走同一顆按鈕，可用暫時的 token 只測不存）、**錯誤排查**（本機最近 200 則
+Warning 以上、今日 log 檔尾、以及 EdgeProxy 那台的同一份緩衝）。操作細節見
+[DEPLOYMENT-GUIDE.md](DEPLOYMENT-GUIDE.md) 的 E1e。
+
 ### 三種拓撲組合
 
 Edge 與 EdgeProxy 的關係由兩個設定決定，可以組出三種環境：
@@ -122,7 +130,7 @@ Edge 與 EdgeProxy 的關係由兩個設定決定，可以組出三種環境：
 
 ## 設定鍵升級對照
 
-合併專案時把幾個容易設錯的地方順手修正，既有 `appsettings.Production.json` 大多不用改
+合併專案時把幾個容易設錯的地方順手修正，既有站台設定檔大多不用改
 （模式名稱有別名相容），但白名單 key 是硬性拆分（沒有相容別名，設錯會直接擋啟動）：
 
 | 舊 key（合併前兩個專案各自的 `appsettings.json`） | 新 key | 相容性 |

@@ -19,7 +19,8 @@ public static class ProxyAdminEndpoints
         {
             context.Response.Headers.CacheControl = "no-store";
 
-            var processStartTimeUtc = new DateTimeOffset(Process.GetCurrentProcess().StartTime.ToUniversalTime(), TimeSpan.Zero);
+            using var process = Process.GetCurrentProcess();
+            var processStartTimeUtc = new DateTimeOffset(process.StartTime.ToUniversalTime(), TimeSpan.Zero);
             var response = new ProxyAdminErrorsResponse(
                 MachineName: Environment.MachineName,
                 ProcessStartTimeUtc: processStartTimeUtc,

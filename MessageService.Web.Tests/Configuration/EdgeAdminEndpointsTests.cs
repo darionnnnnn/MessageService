@@ -537,73 +537,6 @@ public class EdgeAdminEndpointsTests : IDisposable
     }
 
     [Fact]
-    public async Task EdgeAdmin_Get_WhenTodayLogDoesNotExist_DisplaysNoLogMessageAndReturns200()
-    {
-        using var factory = CreateEdgeFactory();
-        using var client = factory.CreateClient();
-
-        var response = await client.GetAsync("/edge-admin");
-
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        var html = await response.Content.ReadAsStringAsync();
-        Assert.Contains("今天尚無 log 檔", html);
-    }
-
-    [Fact]
-    public async Task EdgeAdmin_Get_WhenTodayLogExists_DisplaysLogContentInPre()
-    {
-        var logsDir = Path.Combine(_tempDir, "logs");
-        Directory.CreateDirectory(logsDir);
-        var todayStr = DateTime.Now.ToString("yyyy-MM-dd");
-        var logFile = Path.Combine(logsDir, $"messageservice-{todayStr}.log");
-        await File.WriteAllTextAsync(logFile, "2026-09-01 10:00:00|INFO|App|Service started <script>\n2026-09-01 10:01:00|WARN|App|Disk check\n", Encoding.UTF8);
-
-        using var factory = CreateEdgeFactory();
-        using var client = factory.CreateClient();
-
-        var response = await client.GetAsync("/edge-admin");
-
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        var html = await response.Content.ReadAsStringAsync();
-        Assert.Contains("<pre class=\"log-pre\">", html);
-        Assert.Contains("2026-09-01 10:00:00|INFO|App|Service started &lt;script&gt;", html);
-        Assert.Contains("2026-09-01 10:01:00|WARN|App|Disk check", html);
-        Assert.DoesNotContain("<script>", html);
-    }
-
-    [Fact]
-    public async Task EdgeAdmin_Get_WhenTodayLogHasMoreThan100Lines_DisplaysLast100Lines()
-    {
-        var logsDir = Path.Combine(_tempDir, "logs");
-        Directory.CreateDirectory(logsDir);
-        var todayStr = DateTime.Now.ToString("yyyy-MM-dd");
-        var logFile = Path.Combine(logsDir, $"messageservice-{todayStr}.log");
-
-        var sb = new StringBuilder();
-        for (var i = 1; i <= 150; i++)
-        {
-            sb.AppendLine($"Log line #{i:D3}");
-        }
-        await File.WriteAllTextAsync(logFile, sb.ToString(), Encoding.UTF8);
-
-        using var factory = CreateEdgeFactory();
-        using var client = factory.CreateClient();
-
-        var response = await client.GetAsync("/edge-admin");
-
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        var html = await response.Content.ReadAsStringAsync();
-
-        // 包含第 150 行與第 51 行（最後 100 行）
-        Assert.Contains("Log line #150", html);
-        Assert.Contains("Log line #051", html);
-
-        // 不包含前 50 行（如第 1 行與第 50 行）
-        Assert.DoesNotContain("Log line #001", html);
-        Assert.DoesNotContain("Log line #050", html);
-    }
-
-    [Fact]
     public async Task EdgeAdmin_Get_WhenNotUsingEdgeProxy_DisplaysNotUsingEdgeProxy()
     {
         using var factory = CreateEdgeFactory(builder =>
@@ -990,5 +923,78 @@ public class EdgeAdminEndpointsTests : IDisposable
         var response = await client.PostAsync("/edge-admin/test-line", new FormUrlEncodedContent(form));
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
     }
-}
 
+    [Fact]
+    public void ReadLogTail_WhenFileMissing_ReturnsNoLogMessage()
+    {
+        var missing = Path.Combine(_tempDir, "logs", "messageservice-1999-01-01.log");
+
+        var (content, error) = EdgeAdminEndpoints.ReadLogTail(missing);
+
+        Assert.Null(content);
+        Assert.Equal("今天尚無 log 檔", error);
+    }
+
+    [Fact]
+    public void ReadLogTail_WhenFileExists_ReturnsContent()
+    {
+        var path = Path.Combine(_tempDir, "sample.log");
+        File.WriteAllText(
+            path,
+            "2026-09-01 10:00:00|INFO|App|Service started <script>" + Environment.NewLine
+                + "2026-09-01 10:01:00|WARN|App|Disk check" + Environment.NewLine,
+            Encoding.UTF8);
+
+        var (content, error) = EdgeAdminEndpoints.ReadLogTail(path);
+
+        Assert.Null(error);
+        Assert.Contains("Service started <script>", content);
+        Assert.Contains("Disk check", content);
+    }
+
+    [Fact]
+    public void ReadLogTail_WhenMoreThan100Lines_KeepsLast100()
+    {
+        var path = Path.Combine(_tempDir, "long.log");
+        var sb = new StringBuilder();
+        for (var i = 1; i <= 150; i++)
+        {
+            sb.AppendLine($"Log line #{i:D3}");
+        }
+        File.WriteAllText(path, sb.ToString(), Encoding.UTF8);
+
+        var (content, error) = EdgeAdminEndpoints.ReadLogTail(path);
+
+        Assert.Null(error);
+        Assert.Contains("Log line #150", content);
+        Assert.Contains("Log line #051", content);
+        Assert.DoesNotContain("Log line #050", content);
+    }
+
+    [Fact]
+    public void ReadLogTail_WhenFileCannotBeOpened_ReturnsErrorInsteadOfThrowing()
+    {
+        // 檔案存在但開不起來（別的行程獨佔）時要顯示原因，不能讓整頁炸掉
+        var path = Path.Combine(_tempDir, "locked.log");
+        File.WriteAllText(path, "line", Encoding.UTF8);
+        using var exclusive = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.None);
+
+        var (content, error) = EdgeAdminEndpoints.ReadLogTail(path);
+
+        Assert.Null(content);
+        Assert.StartsWith("無法讀取 log 檔：", error);
+    }
+
+    [Fact]
+    public async Task EdgeAdmin_Get_RendersTodayLogSection()
+    {
+        using var factory = CreateEdgeFactory();
+        using var client = factory.CreateClient();
+
+        var response = await client.GetAsync("/edge-admin");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var html = await response.Content.ReadAsStringAsync();
+        Assert.Contains("今日 log 檔尾", html);
+    }
+}

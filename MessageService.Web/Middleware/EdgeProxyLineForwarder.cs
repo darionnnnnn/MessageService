@@ -140,7 +140,10 @@ public class EdgeProxyLineForwarder(
             return;
         }
 
-        // query string 要一併轉發
+        // query string 要一併轉發。記 log 時只留這個不含 query 的版本——LINE 的內容 URL 會把
+        // 短期存取權杖放在 query 上，而失敗訊息現在會經 /proxy-admin/errors 送到 Edge 的設定頁顯示
+        var targetUrlForLog = targetUrl;
+
         var queryString = context.Request.QueryString.Value;
         if (!string.IsNullOrEmpty(queryString))
         {
@@ -195,7 +198,7 @@ public class EdgeProxyLineForwarder(
         catch (Exception ex)
         {
             // 轉發失敗（連線失敗、逾時）-> 回 502
-            logger.LogWarning(ex, "轉發 LINE outbound 請求至 {TargetUrl} 失敗", targetUrl);
+            logger.LogWarning(ex, "轉發 LINE outbound 請求至 {TargetUrl} 失敗", targetUrlForLog);
             if (!context.Response.HasStarted)
             {
                 context.Response.StatusCode = StatusCodes.Status502BadGateway;

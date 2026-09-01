@@ -30,9 +30,13 @@ public sealed class LogRingBuffer
     /// </summary>
     public IReadOnlyList<LogBufferEntry> Snapshot()
     {
+        LogBufferEntry[] snapshot;
         lock (_lock)
         {
-            return _entries.Reverse().ToList();
+            snapshot = _entries.ToArray();
         }
+
+        Array.Reverse(snapshot);
+        return snapshot;
     }
 }

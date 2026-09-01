@@ -14,9 +14,16 @@ public sealed class RingBufferLoggerProvider : ILoggerProvider
         _buffer = buffer ?? throw new ArgumentNullException(nameof(buffer));
     }
 
+    /// <summary>IP 白名單的拒絕訊息不進緩衝：EdgeProxy 在公網上，任何來源打一輪
+    /// /line 或 /proxy-admin 就能用幾百則 Warning 把真正的轉發錯誤擠出這 200 筆，
+    /// 等於讓外部決定管理者看得到什麼。這類記錄在 NLog 的 log 檔裡仍然完整。</summary>
+    private static readonly string ExcludedCategory = typeof(Middleware.IpAllowlistMiddleware).FullName!;
+
     public ILogger CreateLogger(string categoryName)
     {
-        return new RingBufferLogger(categoryName, _buffer);
+        return string.Equals(categoryName, ExcludedCategory, StringComparison.Ordinal)
+            ? Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance
+            : new RingBufferLogger(categoryName, _buffer);
     }
 
     public void Dispose()

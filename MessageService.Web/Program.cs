@@ -24,11 +24,27 @@ if (suffixResult.Status == DeploymentModeFileLocatorStatus.Found)
         suffixResult.Mode!.Value,
         suffixResult.FileName!,
         DeploymentModeFileLocator.ReadDeclaredMode(suffixResult.FilePath!));
+
+    // 後綴模式要寫回設定鏈，不能只改下面那個區域變數：Configure<DeploymentOptions> 綁的是
+    // 設定鏈，後綴檔沒寫 Deployment:Mode（本機制的正常用法）時，所有透過 IOptions 讀模式的
+    // 元件（EdgeChannelState、心跳回報、EdgeController）會讀到基底 appsettings.json 的舊值
+    builder.Configuration.AddInMemoryCollection(
+        [new KeyValuePair<string, string?>("Deployment:Mode", suffixResult.Mode!.Value.ToString())]);
+
     Console.WriteLine($"採用後綴檔 {suffixResult.FileName}，模式 = {suffixResult.Mode}");
 }
 else
 {
     Console.WriteLine("未找到後綴設定檔，模式來自 Deployment:Mode");
+
+    // 放了後綴檔卻拼錯模式名（或用了舊名）時最難查：現象是「明明放了 Edge 設定檔卻起成
+    // AllInOne」。靜默退回舊制之前先把看到的檔案與合法後綴印出來
+    foreach (var ignored in suffixResult.IgnoredFiles)
+    {
+        Console.WriteLine(
+            $"忽略 {ignored}：模式後綴必須是 AllInOne／Edge／Core／Viewer／EdgeProxy 其中之一" +
+            "（舊名 Full／Line／Db 只能寫在 Deployment:Mode，不能當檔名後綴）。");
+    }
 }
 
 // 合併前 AllowedClientIps 是檢視端與 ingest API 各自一份 appsettings.json 裡的同名 key，
@@ -69,7 +85,9 @@ if (deploymentMode is DeploymentMode.Edge or DeploymentMode.EdgeProxy)
 // （Enum.TryParse 認名稱、不認底層值），這裡另外偵測「用的是舊名」純粹是為了記一行提醒用的
 // Warning（見 ValidateMessageServiceStartup），不影響任何實際行為
 var rawModeValue = builder.Configuration["Deployment:Mode"];
-var usedLegacyModeName = rawModeValue is not null
+// 後綴檔生效時模式來源是檔名，設定鏈上殘留的舊名不是實際來源，記 Warning 只會誤導排查
+var usedLegacyModeName = suffixResult.Status != DeploymentModeFileLocatorStatus.Found
+    && rawModeValue is not null
     && new[] { "Full", "Line", "Db" }.Contains(rawModeValue.Trim(), StringComparer.OrdinalIgnoreCase);
 
 // 加密設定檔（Edge 專屬）：疊在 appsettings 之上，支援熱生效。

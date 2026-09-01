@@ -127,12 +127,13 @@ public static class EdgeAdminPage
 
     public static string RenderProxyErrors(IReadOnlyList<LogBufferEntry>? entries, string? statusMessage)
     {
-        if (!string.IsNullOrEmpty(statusMessage))
-        {
-            return $"""<div class="status-msg">{WebUtility.HtmlEncode(statusMessage)}</div>""";
-        }
+        // statusMessage 有兩種：拉不到時的原因（此時 entries 為 null，只顯示訊息），
+        // 以及拉到時的來源主機名（此時訊息與表格一起顯示）
+        var statusHtml = string.IsNullOrEmpty(statusMessage)
+            ? ""
+            : $"""<div class="status-msg">{WebUtility.HtmlEncode(statusMessage)}</div>""";
 
-        return RenderLogEntriesTable(entries);
+        return entries is null ? statusHtml : statusHtml + RenderLogEntriesTable(entries);
     }
 
     public static string RenderConnectionTab(bool outboundHere, LineConnectivityTestResult? testResult)

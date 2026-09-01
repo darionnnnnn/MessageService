@@ -129,9 +129,41 @@
 | 作業-階段 | 執行者 | 結果 | 驗收 | 落差與處置 |
 |---|---|---|---|---|
 | A1 | agy | 完成 | 1081 綠（基準 1045） | 驗收抓到規格自身的洞：一致性檢查若讀「整條設定鏈」，會因基底 appsettings.json 本來就宣告 `Mode: AllInOne` 而讓「後綴檔不寫模式鍵」（本機制的正常用法）誤判成不一致、擋住啟動。改成只讀後綴檔本身宣告的值（`ReadDeclaredMode`），並補 3 筆測試釘住。Claude 手改。 |
-| A2 | Claude | — | — | — |
+| A2 | Claude | 完成 | — | — |
 | B1+B2 | agy | 完成 | 1152 綠（+27） | 兩處手改：(1) `LineConnectivityTester` 多了一個沒人用的 `IOptions` 建構子與私有 `StaticOptionsMonitor`（規格外的抽象），刪除；(2) GET 與 test-line POST 各寫一份檢視模型組法（逐字相近區塊），抽成 `BuildViewModelAsync` 單一來源。`LineAuthorizationHandler` 改成「已有 Authorization 就不覆寫」，兩個方向都有測試釘住。 |
 | C1 | agy | 完成 | 1102 綠（+21） | 無落差。agy 另補了「Edge/EdgeProxy 才註冊、其他模式不註冊」的 DI 整合測試，超出規格但正確，保留。 |
 | C2 | agy | 完成 | 1110 綠（+8） | 無落差。白名單掛在全域轉發之前、沿用 `EdgeProxy:AllowedClientIps`、未引入金鑰，四類情境（允許/拒絕/空清單/非 EdgeProxy 404）皆走真實管線斷言。 |
 | C3 | agy | 完成 | 1125 綠（+15） | CSS-only radio 分頁、三區塊皆逸出、既有表單測試零刪除零放寬。落差一項：GET handler 把 `LogRingBuffer` 宣告成可選參數（`= null`）並用 `?.`，是規格沒要求的防禦——Edge 模式一定註冊得到，可選化只會讓緩衝解析失敗時靜默顯示空表。改成必要相依，測試仍全綠（Claude 手改）。 |
-| C4 | Claude | — | — | — |
+| C4 | Claude | 完成 | — | — |
+| 終檢 | Explore×2 | 完成 | 1159 綠 | 見下節 |
+
+## 併回前終檢（兩個獨立 Explore：程式碼、文件契約）
+
+### 已修（本輪處理）
+
+| 嚴重度 | 發現 | 處置 |
+|---|---|---|
+| 高 | 後綴模式只寫進 Program.cs 的區域變數，`Configure<DeploymentOptions>` 綁的是設定鏈——後綴檔不寫 `Deployment:Mode`（本機制的正常用法）時，`EdgeChannelState`、兩個心跳回報、`EdgeController` 全部讀到基底 appsettings 的舊模式。既有測試與 deploy 樣板（樣板剛好都寫了 Mode）雙重掩蓋。 | 後綴模式改用 `AddInMemoryCollection` 寫回設定鏈；新增 `DeploymentModeSuffixStartupTests` 三條啟動整合測試（含突變驗證：拿掉修正後該測試確實紅） |
+| 中 | 後綴檔優先權高於環境變數與命令列，規劃要求「做不到就在文件註明」但沒寫 | DEPLOYMENT-GUIDE Part C 補明 |
+| 中 | 讀 log 用 `ContentRootPath`，NLog 寫的是 `${basedir}`；非 IIS 情境會分岔成「永遠顯示今天尚無 log 檔」 | 改用 `AppContext.BaseDirectory`，路徑集中成單一方法並註明與 nlog.config 的對應 |
+| 中 | 環形緩衝可被外部灌爆：EdgeProxy 在公網上，任何來源打一輪就產生數百則白名單拒絕 Warning，把真正的轉發錯誤擠出 200 筆 | `IpAllowlistMiddleware` 的分類不進緩衝（NLog 檔案仍完整記錄） |
+| 中 | EdgeProxy 轉發失敗的 Warning 記了含 query string 的目標 URL，而 LINE 內容 URL 的 query 帶短期權杖——這些訊息現在會經 API 送到 Edge 頁面顯示 | log 只記不含 query 的 URL |
+| 中 | 拼錯或用舊名的後綴檔（`appsettings.Production.Edg.json`／`.Line.json`）被靜默忽略，症狀是「放了 Edge 設定檔卻起成 AllInOne」 | 忽略的檔案回報給呼叫端並在啟動時印出提醒與合法後綴清單；補兩條測試 |
+| 中 | 後綴生效時，設定鏈上殘留的舊模式名仍會記「你在用舊名」Warning，指向已不生效的值 | 後綴生效時不記該 Warning |
+| 低 | `LineConnectivityTester` 的 `BaseAddress ??=` 會在「設定走 EdgeProxy 但 client 沒 proxy 位址」時偷偷直連 LINE，把斷掉的鏈報成通的 | EdgeProxy 拓撲下 BaseAddress 為 null 直接回報失敗並說明原因 |
+| 低 | `Process.GetCurrentProcess()` 未 Dispose；`Snapshot()` 在鎖內做配置；快取標頭三行重複；`ProxyAdminErrorsResponse.MachineName` 無消費者 | 依序修正；主機名改顯示在 EdgeProxy 錯誤區塊，成為真正的消費點 |
+| 中 | log 檔尾的三條整合測試依賴共用的 `logs\` 目錄，而 NLog 在測試執行期間就會寫出當天的檔案（全套並行跑時會偽紅） | 讀檔邏輯改成吃路徑，改寫成四條單元測試（含檔案被獨佔時回錯誤不炸頁），保留一條「區塊有渲染」的整合測試 |
+| — | 文件：DEPLOYMENT-GUIDE 最快路徑仍教「改名成 appsettings.Production.json」、Part C 標題與定調句、`EdgeAdmin:AllowedClientIps`／機密「只能放在 appsettings.Production.json」等處與新機制矛盾；ENCRYPTION／LINE-BOT-SETUP／DEPLOYMENT-MODES／README 同型過時 | 統一用語為「站台設定檔」（`appsettings.Production.<模式>.json`）並在 Part C 定義；逐處修正。README 補後綴來源、`/proxy-admin/errors` 走 `EdgeProxy:AllowedClientIps`、`EdgeAdmin` 白名單涵蓋三分頁與測試端點；DEPLOYMENT-MODES 補「Edge 的管理面」一節（C4 原本只做了一半） |
+
+### 查證後不採納
+
+- **終檢說「缺 `/edge-admin/test-line` 非白名單 IP 的測試」**：實際已有 `EdgeAdmin_TestLine_DisallowedClientIp_Returns403`，誤判。
+- **`ValidateModeConsistency` 接受舊名別名算一致**（後綴 `Edge`＋檔內 `"Line"` 不擋）：契約沒寫，屬實作的語意擴張，但與專案「舊名相容」的既有原則一致，保留並在此記錄。
+
+### 遞延（未做，理由）
+
+- **`/proxy-admin/errors` 另立 `ProxyAdmin:AllowedClientIps`**：目前與 `/line` 共用同一把鍵，代表「能用 outbound proxy 的主機都讀得到錯誤緩衝」。拆鍵是新增使用者可見設定、且會動到升級路徑，本輪不加；實務上兩者的授權對象都是 Edge 那台。
+- **錯誤排查資料改成只在該分頁請求時才取**：目前 CSS-only 分頁使得 GET 一律付「拉 proxy（上限 5 秒）＋掃 log 檔」的成本，`test-line` 最壞 15 秒。改法要動到分頁結構（改為 query string 分頁或前端 fetch），本輪不做。
+- **log 檔尾改為從檔尾反向讀固定 byte 窗**：目前是整檔掃描只留最後 100 行，日誌長到數百 MB 時每次 GET 都全檔讀。
+- **`/edge-admin` 兩個 POST 沒有 antiforgery**：既有問題（存檔端點本來就沒有），本輪新端點沿用同一形狀；要補應兩個一起補。
+- **現行文件的寫作紀律違規**（ENCRYPTION／DEPLOYMENT-MODES／README 若干處出現「本輪」「原本」「改成」）：皆為本輪之前的既有債，未在本輪改動範圍內。

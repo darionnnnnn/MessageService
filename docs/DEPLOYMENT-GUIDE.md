@@ -8,7 +8,8 @@
 [ENCRYPTION.md](ENCRYPTION.md)。
 
 **只有一個可發佈專案（`MessageService.Web`），只需要 `dotnet publish` 一次**——不管部署成
-一台還是拆成兩三台，成品完全一樣，差別只在每台主機的 `appsettings.Production.json` 內容。
+一台還是拆成兩三台，成品完全一樣，差別只在每台主機的站台設定檔內容（檔名帶部署角色後綴，
+見 [Part C](#partc設定站台目錄下的站台設定檔)）。
 
 ---
 
@@ -18,8 +19,8 @@
 文件：
 
 1. `dotnet publish MessageService.Web -c Release -o C:\Deploy\MessageService`
-2. 複製 `deploy/appsettings.Production.AllInOne.json` 到站台目錄，改名
-   `appsettings.Production.json`
+2. 複製 `deploy/appsettings.Production.AllInOne.json` 到站台目錄，**檔名原樣保留**
+   （檔名後綴就是這台的部署角色）
 3. 填三個值：`Line:ChannelSecret`、`Line:ChannelAccessToken`、`Viewer:AllowedClientIps`
 4. IIS 建站台（應用程式集區選「沒有 Managed Code」）指到該目錄，跑
    `deploy\Set-AppPool.ps1 -AppPoolName "你的集區名稱" -SiteName "你的網站名稱"`
@@ -93,7 +94,7 @@
 dotnet publish MessageService.Web -c Release -o C:\Deploy\MessageService
 ```
 
-每台主機都用**同一份成品**，差別只在站台目錄下各自的 `appsettings.Production.json`。
+每台主機都用**同一份成品**，差別只在站台目錄下各自的站台設定檔。
 
 > **重佈方式注意**：SQLite 資料庫檔案預設放在站台目錄下的 `Db\` 子資料夾。上面這種
 > `dotnet publish -o` 覆蓋式重佈只覆蓋程式檔、不刪多餘檔案，`Db\` 與
@@ -103,7 +104,10 @@ dotnet publish MessageService.Web -c Release -o C:\Deploy\MessageService
 
 ---
 
-## Part C：設定站台目錄下的 `appsettings.Production.json`
+## Part C：設定站台目錄下的站台設定檔
+
+本文所稱**站台設定檔**，是站台目錄下那份 `appsettings.Production.<模式>.json`
+（升級前的舊部署則是無後綴的 `appsettings.Production.json`，仍然支援，見下方對照表）。
 
 `deploy/` 目錄下有五份樣板，對應五種角色：
 
@@ -144,6 +148,10 @@ dotnet publish MessageService.Web -c Release -o C:\Deploy\MessageService
 | 後綴檔內另外寫了 `Deployment:Mode` 且與後綴不一致 | **擋啟動**，錯誤訊息列出兩個值 |
 | 兩份以上後綴檔 | **擋啟動**，錯誤訊息列出找到的檔名 |
 | 一份都沒有 | 走 `appsettings.Production.json` ＋ `Deployment:Mode`（既有部署不受影響） |
+
+後綴檔位於設定鏈最上層，**也高於環境變數與命令列參數**——原本用 `Deployment__Mode`
+之類環境變數覆寫設定的部署，改用後綴檔後那些環境變數會失效。唯一比後綴檔優先權更高的是
+Edge 的加密設定檔 `Db\edge-settings.dat`。
 
 合法後綴是 `AllInOne`／`Edge`／`Core`／`Viewer`／`EdgeProxy` 五個（不分大小寫）。舊名
 `Full`／`Line`／`Db` 只在 `Deployment:Mode` 鍵上相容，**不能當檔名後綴**；後綴位置寫其他字串
@@ -300,7 +308,7 @@ dotnet ef database update --project MessageService.Data --context SqlServerMessa
    - 實體路徑指到 `C:\Deploy\MessageService`（同一份成品，每台主機都指到這裡或各自的副本）
    - 繫結：HTTPS，port 443（或自訂），選好剛才準備的憑證
    - 套用剛建立的應用程式集區
-3. 確認站台目錄下已經放好這台主機專屬的 `appsettings.Production.json`（見 Part C）
+3. 確認站台目錄下已經放好這台主機專屬的站台設定檔（見 Part C）
 
 ### D3. 資料夾權限
 
@@ -398,8 +406,8 @@ LINE 要求 webhook URL 是合法憑證的 HTTPS。Edge 主機在內網、沒有
 2. **應用程式集區**：.NET CLR 版本選「沒有 Managed 程式碼」（ASP.NET Core 走 in-process
    裝載，不需要 CLR），其餘比照 `deploy/Set-AppPool.ps1` 的設定。
    那台若還沒跑過 ASP.NET Core 站台，需要先裝一次 .NET 10 Hosting Bundle。
-3. **發行**：用**同一份** MessageService.Web 發行產物，`appsettings.Production.json`
-   照 `deploy/appsettings.Production.EdgeProxy.json` 樣板填——只有兩個設定要填：
+3. **發行**：用**同一份** MessageService.Web 發行產物，站台設定檔直接用
+   `deploy/appsettings.Production.EdgeProxy.json` 樣板（檔名原樣保留）填——只有兩個設定要填：
    `EdgeProxy:TargetBaseUrl` 指向 Edge（例 `http://192.0.2.10/MSLine`），
    以及視需要調整的 `EdgeProxy:TimeoutSeconds`。
 4. **防火牆**：只需開通 proxy→Edge 單向。Edge 端的 `Ingest:AllowedClientIps`
@@ -458,7 +466,7 @@ Edge 提供一個極簡設定頁 `/edge-admin`，分三個分頁：**設定**、
 **設定**分頁可以在不重啟站台的情況下改幾個常動的設定，存檔後**立即生效**。設定值以
 DPAPI（機器層級）加密後存在 `Db\edge-settings.dat`，優先權高於 `appsettings.json`。
 
-**開啟方式**：在 `appsettings.Production.json` 加白名單（**這個鍵只能放在這裡**）：
+**開啟方式**：在站台設定檔（`appsettings.Production.Edge.json`）加白名單（**這個鍵只能放在這裡**）：
 
 ```json
 "EdgeAdmin": { "AllowedClientIps": [ "192.0.2.50/32" ] }
@@ -475,7 +483,7 @@ Ingest 允許來源 IP、Webhook 來源限制（模式與允許 IP）。
 **機密的顯示**：頁面永遠不會回傳明文，已設定的只顯示遮罩與末四碼；
 要改就直接填新值，**留空表示維持原值**（不會被清成空字串）。
 
-**設定的兩處來源**：第一次啟動前，機密必須放在 `appsettings.Production.json`
+**設定的兩處來源**：第一次啟動前，機密必須放在站台設定檔
 （啟動驗證要求 `Line:ChannelSecret` 等鍵非空，站台起不來就進不了設定頁）。
 之後改由設定頁接管，加密檔的值優先生效，`appsettings` 的那份就不再是實際生效的值。
 

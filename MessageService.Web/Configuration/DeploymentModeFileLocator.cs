@@ -29,26 +29,32 @@ public sealed class DeploymentModeFileLocatorResult
     public DeploymentMode? Mode { get; }
     public IReadOnlyList<string> ConflictingFiles { get; }
 
+    /// <summary>檔名長得像後綴檔、但模式段解析不出來的檔案（拼錯或用了舊名）。
+    /// 這些檔案不影響判別結果，但要讓呼叫端有機會提醒——否則「放了設定檔卻起成 AllInOne」無從查起。</summary>
+    public IReadOnlyList<string> IgnoredFiles { get; }
+
     private DeploymentModeFileLocatorResult(
         DeploymentModeFileLocatorStatus status,
         string? filePath,
         DeploymentMode? mode,
-        IReadOnlyList<string> conflictingFiles)
+        IReadOnlyList<string> conflictingFiles,
+        IReadOnlyList<string> ignoredFiles)
     {
         Status = status;
         FilePath = filePath;
         Mode = mode;
         ConflictingFiles = conflictingFiles;
+        IgnoredFiles = ignoredFiles;
     }
 
-    public static DeploymentModeFileLocatorResult None() =>
-        new(DeploymentModeFileLocatorStatus.None, null, null, Array.Empty<string>());
+    public static DeploymentModeFileLocatorResult None(IReadOnlyList<string>? ignoredFiles = null) =>
+        new(DeploymentModeFileLocatorStatus.None, null, null, [], ignoredFiles ?? []);
 
     public static DeploymentModeFileLocatorResult Found(string filePath, DeploymentMode mode) =>
-        new(DeploymentModeFileLocatorStatus.Found, filePath, mode, Array.Empty<string>());
+        new(DeploymentModeFileLocatorStatus.Found, filePath, mode, [], []);
 
     public static DeploymentModeFileLocatorResult Conflict(IReadOnlyList<string> conflictingFiles) =>
-        new(DeploymentModeFileLocatorStatus.Conflict, null, null, conflictingFiles);
+        new(DeploymentModeFileLocatorStatus.Conflict, null, null, conflictingFiles, []);
 }
 
 /// <summary>
@@ -80,6 +86,7 @@ public static class DeploymentModeFileLocator
 
         var files = Directory.GetFiles(directoryPath, "*.json", SearchOption.TopDirectoryOnly);
         var matches = new List<(string FilePath, string FileName, DeploymentMode Mode)>();
+        var ignored = new List<string>();
 
         foreach (var file in files)
         {
@@ -100,11 +107,15 @@ public static class DeploymentModeFileLocator
             {
                 matches.Add((file, fileName, mode));
             }
+            else
+            {
+                ignored.Add(fileName);
+            }
         }
 
         if (matches.Count == 0)
         {
-            return DeploymentModeFileLocatorResult.None();
+            return DeploymentModeFileLocatorResult.None(ignored);
         }
 
         if (matches.Count == 1)
@@ -127,6 +138,7 @@ public static class DeploymentModeFileLocator
     {
         if (!string.IsNullOrWhiteSpace(candidate) &&
             !int.TryParse(candidate, out _) &&
+            !candidate.Contains(',') &&
             !LegacyModeNames.Contains(candidate) &&
             Enum.TryParse<DeploymentMode>(candidate, ignoreCase: true, out mode) &&
             Enum.IsDefined(typeof(DeploymentMode), mode))

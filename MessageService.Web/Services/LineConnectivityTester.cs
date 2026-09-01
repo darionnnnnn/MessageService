@@ -41,7 +41,24 @@ public class LineConnectivityTester(IHttpClientFactory httpClientFactory, IOptio
         try
         {
             var client = httpClientFactory.CreateClient(LineProfileClient.HttpClientName);
-            client.BaseAddress ??= new Uri("https://api.line.me/");
+
+            // EdgeProxy 拓撲下 BaseAddress 必須已被改寫成 proxy 位址；此時補直連的 fallback
+            // 會讓「proxy 沒生效」變成一次成功的直連測試，把斷掉的鏈報成通的
+            if (client.BaseAddress is null)
+            {
+                if (monitor.CurrentValue.OutboundVia is LineOutboundVia.EdgeProxy)
+                {
+                    return new LineConnectivityTestResult(
+                        Success: false,
+                        BotDisplayName: null,
+                        ErrorMessage: "設定為經由 EdgeProxy，但 LINE 具名 client 沒有 proxy 位址"
+                            + "（多半是 Line:OutboundProxyBaseUrl 空白，或改過設定後尚未重啟站台）",
+                        Via: via);
+                }
+
+                // 直連拓撲：具名 client 本來就不設 BaseAddress，由呼叫端補（見 LineProfileClient）
+                client.BaseAddress = new Uri("https://api.line.me/");
+            }
 
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             cts.CancelAfter(TimeSpan.FromSeconds(10));

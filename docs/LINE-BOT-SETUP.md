@@ -111,7 +111,7 @@ dotnet user-secrets list
 ```
 
 **正式環境**把這兩個值（連同連線字串等其他機密）寫進站台目錄的
-`appsettings.Production.json`——該檔不進版控、發佈成品也不含它，重佈不會被覆蓋。
+站台設定檔（`appsettings.Production.<模式>.json`）——該檔不進版控、發佈成品也不含它，重佈不會被覆蓋。
 完整做法見 [DEPLOYMENT-GUIDE.md](DEPLOYMENT-GUIDE.md) 的 Part C 與 `deploy/` 目錄的樣板。
 
 ---

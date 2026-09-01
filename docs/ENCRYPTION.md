@@ -174,11 +174,11 @@ AES-GCM 解密」就是任何人連打幾次搜尋就能觸發的記憶體與 CP
 ## 部署檢查清單
 
 1. 產生一把金鑰，每一台直連資料庫的主機（`AllInOne`／`Core`／`Viewer`，見上方拓撲說明）的
-   `appsettings.Production.json` 都設成完全一樣的 `Encryption:Key`。
+   站台設定檔（`appsettings.Production.<模式>.json`）都設成完全一樣的 `Encryption:Key`。
 2. 這些主機都設 `Encryption:Enabled=true`；`Edge` 主機維持 `false`。
 3. 先在測試環境驗證：送一則訊息、上傳一張圖片，確認檢視端顯示正常、資料庫裡的
    `Text`／`Content` 欄位是看不懂的密文。
 4. 妥善保管金鑰——遺失金鑰等於遺失所有已加密的訊息與媒體，沒有復原機制。
-5. 金鑰不要進版本控制——`appsettings.Production.json` 本身就不進 repo（見
-   `deploy/README.md`），把實際金鑰值直接寫在部署到各主機的那份 `appsettings.Production.json`
+5. 金鑰不要進版本控制——站台設定檔本身就不進 repo（見
+   `deploy/README.md`），把實際金鑰值直接寫在部署到各主機的那份站台設定檔
    裡即可，不需要額外透過環境變數或密鑰管理服務覆蓋。

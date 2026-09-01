@@ -262,4 +262,29 @@ public class DeploymentModeFileLocatorTests : IDisposable
             "appsettings.Production.Edge.json",
             DeploymentModeFileLocator.ReadDeclaredMode(path));
     }
+
+    [Fact]
+    public void Locate_WhenSuffixLooksLikeModeButUnparsable_ReportsItAsIgnored()
+    {
+        // 拼錯或用舊名時會靜默退回舊制，最難查的失敗形狀；至少要讓呼叫端拿得到檔名去提醒
+        File.WriteAllText(Path.Combine(_tempDir, "appsettings.Production.Edg.json"), "{}");
+        File.WriteAllText(Path.Combine(_tempDir, "appsettings.Production.Line.json"), "{}");
+
+        var result = DeploymentModeFileLocator.Locate(_tempDir, "Production");
+
+        Assert.Equal(DeploymentModeFileLocatorStatus.None, result.Status);
+        Assert.Contains("appsettings.Production.Edg.json", result.IgnoredFiles);
+        Assert.Contains("appsettings.Production.Line.json", result.IgnoredFiles);
+    }
+
+    [Fact]
+    public void Locate_WhenSuffixIsCommaJoinedModes_IsIgnored()
+    {
+        // Enum.TryParse 會把 "Edge,Core" 解成合成值，不能讓它變成合法後綴
+        File.WriteAllText(Path.Combine(_tempDir, "appsettings.Production.Edge,Core.json"), "{}");
+
+        var result = DeploymentModeFileLocator.Locate(_tempDir, "Production");
+
+        Assert.Equal(DeploymentModeFileLocatorStatus.None, result.Status);
+    }
 }

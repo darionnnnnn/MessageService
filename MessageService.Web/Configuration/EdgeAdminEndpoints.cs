@@ -30,19 +30,14 @@ public static class EdgeAdminEndpoints
             EdgeSettingsStore store,
             HttpContext context,
             IHttpClientFactory httpClientFactory,
-            IHostEnvironment hostEnvironment,
             LogRingBuffer ringBuffer,
             DeploymentCapabilities capabilities) =>
         {
             var model = await BuildViewModelAsync(
-                config, store, httpClientFactory, hostEnvironment, ringBuffer, capabilities,
+                config, store, httpClientFactory, ringBuffer, capabilities,
                 saved: context.Request.Query.ContainsKey("saved"));
 
-            var html = EdgeAdminPage.Render(model);
-            // 頁面帶有機密的末四碼，不能進瀏覽器磁碟快取或中間代理
-            context.Response.Headers.CacheControl = "no-store, no-cache, must-revalidate";
-            context.Response.Headers.Pragma = "no-cache";
-            return Results.Content(html, "text/html; charset=utf-8");
+            return RenderPage(context, model);
         });
 
         endpoints.MapPost("/edge-admin/test-line", async (
@@ -52,7 +47,6 @@ public static class EdgeAdminEndpoints
             IHttpClientFactory httpClientFactory,
             IOptionsMonitor<LineOptions> lineOptionsMonitor,
             DeploymentCapabilities capabilities,
-            IHostEnvironment hostEnvironment,
             LogRingBuffer ringBuffer) =>
         {
             // OutboundHere=false 的主機根本沒有 LINE 具名 client，直接渲染頁面上的說明即可
@@ -68,13 +62,10 @@ public static class EdgeAdminEndpoints
             }
 
             var model = await BuildViewModelAsync(
-                config, store, httpClientFactory, hostEnvironment, ringBuffer, capabilities,
+                config, store, httpClientFactory, ringBuffer, capabilities,
                 saved: false, lineTestResult: testResult, activeTab: "connection");
 
-            var html = EdgeAdminPage.Render(model);
-            context.Response.Headers.CacheControl = "no-store, no-cache, must-revalidate";
-            context.Response.Headers.Pragma = "no-cache";
-            return Results.Content(html, "text/html; charset=utf-8");
+            return RenderPage(context, model);
         });
 
         endpoints.MapPost("/edge-admin", async (
@@ -182,12 +173,19 @@ public static class EdgeAdminEndpoints
             .ToList();
     }
 
+    /// <summary>頁面帶有機密的末四碼，不能進瀏覽器磁碟快取或中間代理。</summary>
+    private static IResult RenderPage(HttpContext context, EdgeAdminViewModel model)
+    {
+        context.Response.Headers.CacheControl = "no-store, no-cache, must-revalidate";
+        context.Response.Headers.Pragma = "no-cache";
+        return Results.Content(EdgeAdminPage.Render(model), "text/html; charset=utf-8");
+    }
+
     /// <summary>GET 與連線測試 POST 都要渲染同一張頁面，檢視模型的組法只寫這一份。</summary>
     private static async Task<EdgeAdminViewModel> BuildViewModelAsync(
         IConfiguration config,
         EdgeSettingsStore store,
         IHttpClientFactory httpClientFactory,
-        IHostEnvironment hostEnvironment,
         LogRingBuffer ringBuffer,
         DeploymentCapabilities capabilities,
         bool saved,
@@ -196,7 +194,7 @@ public static class EdgeAdminEndpoints
     {
         // 錯誤排查：本機緩衝快照、今日 log 檔尾、EdgeProxy 端錯誤
         var localErrors = ringBuffer.Snapshot();
-        var (todayLogContent, todayLogErrorMessage) = ReadTodayLogTail(hostEnvironment.ContentRootPath);
+        var (todayLogContent, todayLogErrorMessage) = ReadTodayLogTail();
         var (proxyErrors, proxyStatusMessage) = await FetchProxyErrorsAsync(httpClientFactory, config);
 
         return new EdgeAdminViewModel(
@@ -219,11 +217,20 @@ public static class EdgeAdminEndpoints
             ActiveTab: activeTab);
     }
 
-    private static (string? Content, string? ErrorMessage) ReadTodayLogTail(string contentRootPath)
-    {
-        var todayStr = DateTime.Now.ToString("yyyy-MM-dd");
-        var targetPath = Path.Combine(contentRootPath, "logs", $"messageservice-{todayStr}.log");
+    /// <summary>log 檔名與位置的唯一真值來源，對應 nlog.config 的
+    /// <c>${basedir}/logs/messageservice-${shortdate}.log</c>——改一邊要記得改另一邊。
+    /// 用 AppContext.BaseDirectory 而不是 ContentRoot：NLog 的 ${basedir} 是組件目錄，
+    /// 兩者在 IIS 發佈下相同，但 dotnet run 或自訂 --contentRoot 時會分岔，
+    /// 分岔的症狀是頁面永遠顯示「今天尚無 log 檔」。</summary>
+    private static string TodayLogPath() =>
+        Path.Combine(AppContext.BaseDirectory, "logs", $"messageservice-{DateTime.Now:yyyy-MM-dd}.log");
 
+    private static (string? Content, string? ErrorMessage) ReadTodayLogTail() => ReadLogTail(TodayLogPath());
+
+    /// <summary>吃路徑的版本：測試要驗「檔案不存在」「超過 100 行只留尾巴」時不能用實際的
+    /// log 目錄——NLog 在測試執行期間就會在那裡寫出當天的檔案。</summary>
+    public static (string? Content, string? ErrorMessage) ReadLogTail(string targetPath)
+    {
         if (!File.Exists(targetPath))
         {
             return (null, "今天尚無 log 檔");
@@ -287,7 +294,8 @@ public static class EdgeAdminEndpoints
                 return (null, "無法連上 EdgeProxy：回應內容為空——請直接查看該主機的 logs 目錄");
             }
 
-            return (data.Entries, null);
+            // 主機名回填進區塊標題，讓管理者確認拉到的是哪一台 proxy（多台 proxy 或改過設定時會用到）
+            return (data.Entries, $"來源主機：{data.MachineName}");
         }
         catch (Exception ex)
         {
