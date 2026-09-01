@@ -11,8 +11,8 @@ namespace MessageService.Web.Tests.Services;
 
 public class LineProfileClientTests
 {
-    private static IOptions<LineOptions> CreateOptions() => 
-        Microsoft.Extensions.Options.Options.Create(new LineOptions { ChannelAccessToken = "test-token" });
+    private static IOptionsMonitor<LineOptions> CreateOptions(LineOptions? options = null) => 
+        new FakeOptionsMonitor<LineOptions>(options ?? new LineOptions { ChannelAccessToken = "test-token" });
 
     [Fact]
     public async Task GetGroupSummaryAsync_DownloadsPicture_WhenValidPictureUrl()
@@ -204,5 +204,54 @@ public class LineProfileClientTests
         Assert.NotNull(summary);
         Assert.Null(summary!.PictureBytes);
         Assert.True(summary.PictureDownloadFailed);
+    }
+
+    [Fact]
+    public async Task DownloadPictureAsync_HotReloads_WhenOptionsChange()
+    {
+        var monitor = new FakeOptionsMonitor<LineOptions>(new LineOptions
+        {
+            OutboundVia = LineOutboundVia.Direct
+        });
+
+        var requestedUrls = new List<string>();
+        var handler = new FakeHttpMessageHandler(req =>
+        {
+            requestedUrls.Add(req.RequestUri!.ToString());
+            if (req.RequestUri.AbsolutePath.Contains("/v2/bot/group/123/summary"))
+            {
+                var content = new StringContent("{\"groupId\":\"123\", \"groupName\":\"Test Group\", \"pictureUrl\":\"https://profile.line-scdn.net/pic.jpg\"}");
+                return new HttpResponseMessage(HttpStatusCode.OK) { Content = content };
+            }
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent([1, 2, 3]) };
+        });
+
+        var factory = new FakeHttpClientFactory(handler);
+        var client = new LineProfileClient(factory, monitor, NullLogger<LineProfileClient>.Instance);
+
+        // 1. Direct -> requests original picture URL directly
+        await client.GetGroupSummaryAsync("123", null, false, CancellationToken.None);
+        Assert.Contains("https://profile.line-scdn.net/pic.jpg", requestedUrls);
+
+        // 2. Change to EdgeProxy
+        requestedUrls.Clear();
+        monitor.CurrentValue = new LineOptions
+        {
+            OutboundVia = LineOutboundVia.EdgeProxy,
+            OutboundProxyBaseUrl = "https://proxy.example/MSLine/"
+        };
+
+        await client.GetGroupSummaryAsync("123", null, false, CancellationToken.None);
+        Assert.Contains("https://proxy.example/MSLine/line/image/profile.line-scdn.net/pic.jpg", requestedUrls);
+
+        // 3. Change back to Direct
+        requestedUrls.Clear();
+        monitor.CurrentValue = new LineOptions
+        {
+            OutboundVia = LineOutboundVia.Direct
+        };
+
+        await client.GetGroupSummaryAsync("123", null, false, CancellationToken.None);
+        Assert.Contains("https://profile.line-scdn.net/pic.jpg", requestedUrls);
     }
 }

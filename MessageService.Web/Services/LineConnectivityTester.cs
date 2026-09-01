@@ -52,7 +52,7 @@ public class LineConnectivityTester(IHttpClientFactory httpClientFactory, IOptio
                         Success: false,
                         BotDisplayName: null,
                         ErrorMessage: "設定為經由 EdgeProxy，但 LINE 具名 client 沒有 proxy 位址"
-                            + "（多半是 Line:OutboundProxyBaseUrl 空白，或改過設定後尚未重啟站台）",
+                            + "（多半是 Line:OutboundProxyBaseUrl 為空）",
                         Via: via);
                 }
 

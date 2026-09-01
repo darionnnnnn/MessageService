@@ -6,6 +6,7 @@ using MessageService.Services;
 using MessageService.Web.Middleware;
 using MessageService.Web.Services;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 
 namespace MessageService.Web.Startup;
 
@@ -312,35 +313,29 @@ public static class MessageServiceCoreServiceCollectionExtensions
 
             builder.Services.AddScoped<ILineContentClient, LineContentClient>();
             builder.Services.AddScoped<ILineProfileClient, LineProfileClient>();
-            var lineOptions = builder.Configuration.GetSection(LineOptions.SectionName).Get<LineOptions>()
-                ?? new LineOptions();
-            var useEdgeProxy = lineOptions.OutboundVia is LineOutboundVia.EdgeProxy;
-            Uri? proxyBaseUri = useEdgeProxy && !string.IsNullOrWhiteSpace(lineOptions.OutboundProxyBaseUrl)
-                ? HttpBaseAddress.Create(lineOptions.OutboundProxyBaseUrl)
-                : null;
+            static void ConfigureLineClient(IServiceProvider sp, HttpClient client, string relativeSegment)
+            {
+                var options = sp.GetRequiredService<IOptionsMonitor<LineOptions>>().CurrentValue;
+                if (options.OutboundVia is LineOutboundVia.EdgeProxy && !string.IsNullOrWhiteSpace(options.OutboundProxyBaseUrl))
+                {
+                    var proxyBaseUri = HttpBaseAddress.Create(options.OutboundProxyBaseUrl);
+                    client.BaseAddress = new Uri(proxyBaseUri, relativeSegment);
+                }
+            }
 
             // 影片/檔案原檔可達數百 MB，預設 100 秒 timeout 不夠
-            builder.Services.AddHttpClient(LineContentClient.HttpClientName, client =>
+            builder.Services.AddHttpClient(LineContentClient.HttpClientName, (sp, client) =>
             {
-                if (useEdgeProxy && proxyBaseUri is not null)
-                {
-                    client.BaseAddress = new Uri(proxyBaseUri, "line/data/");
-                }
+                ConfigureLineClient(sp, client, "line/data/");
                 client.Timeout = TimeSpan.FromMinutes(10);
             }).AddHttpMessageHandler<LineAuthorizationHandler>();
-            builder.Services.AddHttpClient(LineContentClient.StickerHttpClientName, client =>
+            builder.Services.AddHttpClient(LineContentClient.StickerHttpClientName, (sp, client) =>
             {
-                if (useEdgeProxy && proxyBaseUri is not null)
-                {
-                    client.BaseAddress = new Uri(proxyBaseUri, "line/sticker/");
-                }
+                ConfigureLineClient(sp, client, "line/sticker/");
             });
-            builder.Services.AddHttpClient(LineProfileClient.HttpClientName, client =>
+            builder.Services.AddHttpClient(LineProfileClient.HttpClientName, (sp, client) =>
             {
-                if (useEdgeProxy && proxyBaseUri is not null)
-                {
-                    client.BaseAddress = new Uri(proxyBaseUri, "line/api/");
-                }
+                ConfigureLineClient(sp, client, "line/api/");
             }).AddHttpMessageHandler<LineAuthorizationHandler>();
             builder.Services.AddHttpClient(LineProfileClient.ImageHttpClientName,
                 client => client.MaxResponseContentBufferSize = LineProfileClient.MaxImageSize);

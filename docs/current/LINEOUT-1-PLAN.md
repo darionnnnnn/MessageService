@@ -120,6 +120,6 @@ log 與設定頁就能辨識問題類別**。使用者定案：四個待決全�
 | A1+A2 | agy | 完成 | 1169 綠（+10） | 無落差。啟動提示選了 `DeploymentValidator` 那條路（沿用該處既有 logger）。四個既有測試檔的改動都只是建構式簽章跟上（多注入 logger），無斷言放寬。 |
 | A3 | agy | 完成 | 1186 綠（+17） | 首次委派零輸出零 diff（已知的假成功形狀），重派後成功；期間發現兩個 agy 殘留行程與新的一起在改 repo，已清掉舊的。三處手改：(1)(2) 兩個背景服務都加了「可選相依 `IOptions<LineOptions>? = null` ＋ 欄位 fallback」且同時又在 scope 內解析一次（規格明文禁止的形狀＋雙路徑），改為只留 scope 解析；(3) 兩個服務各寫一份「依 OutboundVia 推導 host」，抽成 `HttpBaseAddress.ResolveOutboundHost` 單一真值來源。另修掉分類器中規格外的防禦（以型別名字串比對判 TLS、host 解析的多重猜測分支）。 |
 | B | agy | 完成 | 1200 綠（+14） | 缺圖 stale 判定抽成共用私有方法、反例（無 PictureUrl 不觸發）有測試。手改一項：agy 讓「頭貼過大跳過」兩條路徑回報成功，配上 B1 後同一張過大的圖會每 5 分鐘被重抓一次（B1 讓它永遠 stale）——改為回報失敗走 10 分鐘冷卻，並補一筆測試釘住。 |
-| C | agy | — | — | — |
+| C | agy | 完成 | 1205 綠（+5） | 無落差。三個 client 的改寫決策抽成共用本地函式（未寫三份）；`LineProfileClient` 的頭貼改寫同步改吃 `IOptionsMonitor`；連線測試那句「尚未重啟站台」已改掉。熱更新雙向（Direct↔EdgeProxy）有測試。 |
 | D | agy | — | — | — |
 | 文件同步 | Claude | — | — | — |

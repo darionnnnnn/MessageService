@@ -15,16 +15,16 @@ public class LineProfileClient : ILineProfileClient
 
     private readonly HttpClient _httpClient;
     private readonly HttpClient _imageHttpClient;
-    private readonly LineOptions _options;
+    private readonly IOptionsMonitor<LineOptions> _optionsMonitor;
     private readonly ILogger<LineProfileClient> _logger;
 
-    public LineProfileClient(IHttpClientFactory httpClientFactory, IOptions<LineOptions> options, ILogger<LineProfileClient> logger)
+    public LineProfileClient(IHttpClientFactory httpClientFactory, IOptionsMonitor<LineOptions> optionsMonitor, ILogger<LineProfileClient> logger)
     {
         _httpClient = httpClientFactory.CreateClient(HttpClientName);
         _httpClient.BaseAddress ??= new Uri("https://api.line.me/");
             
         _imageHttpClient = httpClientFactory.CreateClient(ImageHttpClientName);
-        _options = options.Value;
+        _optionsMonitor = optionsMonitor;
         _logger = logger;
     }
 
@@ -110,15 +110,16 @@ public class LineProfileClient : ILineProfileClient
         string? requestUrl = null;
         try
         {
-            var proxyBaseAddress = !string.IsNullOrWhiteSpace(_options.OutboundProxyBaseUrl)
-                ? HttpBaseAddress.Create(_options.OutboundProxyBaseUrl)
+            var options = _optionsMonitor.CurrentValue;
+            var proxyBaseAddress = !string.IsNullOrWhiteSpace(options.OutboundProxyBaseUrl)
+                ? HttpBaseAddress.Create(options.OutboundProxyBaseUrl)
                 : null;
-            requestUrl = LineImageUrlRewriter.Rewrite(pictureUrl, _options.OutboundVia, proxyBaseAddress);
+            requestUrl = LineImageUrlRewriter.Rewrite(pictureUrl, options.OutboundVia, proxyBaseAddress);
 
             // 設定要走 proxy、URL 卻沒被改寫，代表 LINE 換了頭貼 CDN 的網域、不在改寫器的
             // 允許清單裡。這時會退回直連（不丟掉頭貼），但 Edge 沒有對外網路的部署會下載失敗——
             // 沒有這行的話症狀只會是「頭貼一直空白」，查不到原因。每 10 分鐘最多記一次
-            if (_options.OutboundVia == LineOutboundVia.EdgeProxy
+            if (options.OutboundVia == LineOutboundVia.EdgeProxy
                 && ReferenceEquals(requestUrl, pictureUrl))
             {
                 WarnUnrewritableImageHost(pictureUrl);
