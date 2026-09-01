@@ -4,6 +4,7 @@ using MessageService.Middleware;
 using MessageService.Options;
 using MessageService.Services;
 using MessageService.Web.Configuration;
+using MessageService.Web.Diagnostics;
 using MessageService.Web.Middleware;
 using MessageService.Web.Services;
 using Microsoft.AspNetCore.HttpOverrides;
@@ -165,6 +166,11 @@ public static class MessageServiceRequestPipelineExtensions
         if (deploymentMode is DeploymentMode.EdgeProxy)
         {
             app.UseWhen(
+                context => context.Request.Path.StartsWithSegments("/proxy-admin"),
+                proxyAdminPipeline => proxyAdminPipeline.UseMiddleware<IpAllowlistMiddleware>(
+                    new IpAllowlistOptions("EdgeProxy:AllowedClientIps", "proxy-admin")));
+
+            app.UseWhen(
                 context => context.Request.Path.StartsWithSegments("/line"),
                 lineProxyPipeline =>
                 {
@@ -182,6 +188,11 @@ public static class MessageServiceRequestPipelineExtensions
         if (deploymentMode is DeploymentMode.Edge)
         {
             app.MapEdgeAdminEndpoints();
+        }
+
+        if (deploymentMode is DeploymentMode.EdgeProxy)
+        {
+            app.MapProxyAdminEndpoints();
         }
 
         if (capabilities.ViewerEnabled)
