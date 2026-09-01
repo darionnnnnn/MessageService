@@ -79,7 +79,8 @@ public class LineConnectivityTester(IHttpClientFactory httpClientFactory, IOptio
                         // 忽略 JSON 解析例外
                     }
 
-                    return (true, displayName ?? "");
+                    // 契約是「成功要顯示 bot 名稱」；LINE 回應缺名稱時至少別讓說明欄空白
+                    return (true, string.IsNullOrEmpty(displayName) ? "連線成功" : displayName);
                 }
 
                 var ex = new HttpRequestException($"HTTP {(int)response.StatusCode}", null, response.StatusCode);

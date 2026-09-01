@@ -1,6 +1,6 @@
 # EDGEOPS-1：模式後綴判別＋LINE 連通測試＋錯誤排查分頁
 
-狀態：規劃定稿，待實作。
+狀態：全案完成（含收尾體檢，體檢記錄見 LINEOUT-1 PLAN 的體檢輪修正——兩輪合併體檢）。
 
 ## 背景與定案
 
@@ -163,7 +163,13 @@
 ### 遞延（未做，理由）
 
 - **`/proxy-admin/errors` 另立 `ProxyAdmin:AllowedClientIps`**：目前與 `/line` 共用同一把鍵，代表「能用 outbound proxy 的主機都讀得到錯誤緩衝」。拆鍵是新增使用者可見設定、且會動到升級路徑，本輪不加；實務上兩者的授權對象都是 Edge 那台。
-- **錯誤排查資料改成只在該分頁請求時才取**：目前 CSS-only 分頁使得 GET 一律付「拉 proxy（上限 5 秒）＋掃 log 檔」的成本，`test-line` 最壞 15 秒。改法要動到分頁結構（改為 query string 分頁或前端 fetch），本輪不做。
+- **錯誤排查資料改成只在該分頁請求時才取**：目前 CSS-only 分頁使得 GET 一律付「拉 proxy（上限 5 秒）＋掃 log 檔」的成本；LINEOUT-1 把 test-line 擴成四目標循序後最壞約 45 秒。改法要動到分頁結構（改為 query string 分頁或前端 fetch），本輪不做。
 - **log 檔尾改為從檔尾反向讀固定 byte 窗**：目前是整檔掃描只留最後 100 行，日誌長到數百 MB 時每次 GET 都全檔讀。
 - **`/edge-admin` 兩個 POST 沒有 antiforgery**：既有問題（存檔端點本來就沒有），本輪新端點沿用同一形狀；要補應兩個一起補。
 - **現行文件的寫作紀律違規**（ENCRYPTION／DEPLOYMENT-MODES／README 若干處出現「本輪」「原本」「改成」）：皆為本輪之前的既有債，未在本輪改動範圍內。
+
+## 體檢交接
+
+- 實作方：agy（gemini-3.7-flash-high）實作、Claude Opus 5 規劃/驗收/終檢手改。
+- 體檢方：Claude Fable 5（使用者切換模型後執行收尾）。
+- 兩輪皆直接做在 dev（無 feature 分支），體檢對象 `origin/dev..dev`。

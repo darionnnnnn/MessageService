@@ -291,7 +291,11 @@ channel secret 不正確。重新從 **Basic settings** 分頁複製（不要複
 
 ### 媒體一直卡在 Pending
 
-- 看 log 有沒有 `Download attempt ... failed`：多半是 access token 錯誤或過期
+- 看 log 有沒有 `Download attempt ... failed`：訊息尾端的分類字串會直接說是哪一類——
+  `401` ＝ token 無效；`Line:ChannelAccessToken 為空` ＝ token 沒填；
+  `連線逾時`／`網路無法到達`／`DNS 解析失敗` ＝ 防火牆或網路（訊息附實際打向的 host）
+- Edge 主機可直接用 `/edge-admin` 的連線測試分頁一鍵驗四個 LINE 網域的連通性
+- 完全沒有失敗 log、訊息卻都有進來 → 查 log 有沒有 `此主機不做 LINE outbound`（`Line:OutboundHere` 設定問題）
 - 影片/語音需要等 LINE 轉檔，預設最多輪詢 5 秒 × 24 次（2 分鐘）；大檔可能需要調高 `ContentDownload:TranscodingMaxPolls`
 - 服務重啟時會自動把殘留的 Pending 重新排入下載佇列（log 會出現 `Requeued N pending content downloads from previous run`），所以中途斷掉不會永久遺失
 

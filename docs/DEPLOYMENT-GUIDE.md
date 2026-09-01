@@ -477,8 +477,9 @@ DPAPI（機器層級）加密後存在 `Db\edge-settings.dat`，優先權高於 
 
 **能改的設定**：LINE Channel Secret／Channel Access Token、Ingest 共用金鑰、
 Ingest 允許來源 IP、Webhook 來源限制（模式與允許 IP）。
-其餘設定（部署模式、通道方向、各種逾時）仍在 `appsettings.json`——
-它們決定啟動時要註冊哪些服務，本來就不可能熱生效。
+其餘設定（部署模式、各種逾時）仍在 `appsettings.json`——它們決定啟動時要註冊哪些服務，
+本來就不可能熱生效。例外是 `Line:OutboundVia`／`Line:OutboundProxyBaseUrl`：改檔案即對
+outbound client 生效，不需重啟。
 
 **機密的顯示**：頁面永遠不會回傳明文，已設定的只顯示遮罩與末四碼；
 要改就直接填新值，**留空表示維持原值**（不會被清成空字串）。
@@ -497,15 +498,34 @@ Ingest 允許來源 IP、Webhook 來源限制（模式與允許 IP）。
 
 #### 連線測試分頁
 
-對 LINE 官方的 `v2/bot/info` 發一次請求，驗證憑證與整條 outbound 路徑。兩個按鈕：
+一次 POST 對 LINE outbound 用到的**四個網域**各發一個請求，回一張四列表格
+（用途／目標／結果／說明／經由）：
+
+| 用途 | 網域 | 判準 |
+|---|---|---|
+| 名稱查詢 | `api.line.me`（`GET v2/bot/info`，帶 token） | 2xx 才算成功——這列同時驗 token |
+| 媒體內容 | `api-data.line.me` | 收到任何 HTTP 回應＝可達（404 也算通，重點是 TCP/TLS 到得了） |
+| 貼圖 | `stickershop.line-scdn.net` | 同上 |
+| 頭貼 CDN | `profile.line-scdn.net` | 同上 |
+
+後三列若回 403／502／503／504 會標成失敗——那代表鏈路被擋（proxy 白名單、或 proxy 連不到
+LINE），不是「可達」。防火牆要開的就是這四個網域的 443 出站。
+
+兩個按鈕：
 
 - **測試目前生效的 Token**：用這台主機現在生效的 `Line:ChannelAccessToken`。
 - **用這個 Token 測試（不儲存）**：填一把候選 token 先驗證再決定要不要存；這條路徑
-  **不會寫入加密檔**。
+  **不會寫入加密檔**，且**只影響「名稱查詢」那一列**（其餘三列不吃 token）。
 
-結果會標明「經由」：`Direct`（Edge 自己連 LINE）或 `EdgeProxy(<BaseUrl>)`
-（`Line:OutboundVia=EdgeProxy` 時，等同於一次跑完 E1d 那條 curl 的整條鏈）。
-`Line:OutboundHere` 推導為 false 的主機沒有 LINE outbound，這個分頁只顯示說明、沒有按鈕。
+每列標明「經由」：`Direct`（這台自己連 LINE）或 `EdgeProxy(<BaseUrl>)`。走 EdgeProxy 時
+目標欄顯示的是 **proxy 的 host**（實際連的就是它）；此時後三列只證明「這台到 proxy 通」，
+proxy 到 LINE 的四個洞要在 proxy 那台驗證。`Line:OutboundHere` 推導為 false 的主機沒有
+LINE outbound，這個分頁只顯示說明、沒有按鈕。
+
+排查小抄（log 位於 `logs\messageservice-*.log`，錯誤排查分頁也看得到 Warning 以上）：
+`Line:ChannelAccessToken 為空` ＝ token 沒填；`401` ＝ token 無效；`網路無法到達`／
+`連線逾時`／`連線被拒`／`DNS 解析失敗` ＝ 網路或防火牆，訊息會附實際打向的 host；
+`此主機不做 LINE outbound`／`工作正被丟棄` ＝ `Line:OutboundHere` 設定問題，與網路無關。
 
 #### 錯誤排查分頁
 
@@ -569,8 +589,8 @@ Edge 端的 outbox 排空預設會打 Core 的批次 ingest 端點（`POST /api/
 | AllInOne → 加一台 Viewer | **硬前提：必須先改用 SQL Server**（Viewer 要直連同一顆資料庫，SQLite 是本機檔案不能跨機共用）。原機加 `Viewer:Enabled=false`，新機用 Viewer 樣板、`Database:AutoMigrate=false`（migration 只由一台跑） |
 | AllInOne → 拆成 Edge＋Core | 原機改 `Deployment:Mode=Core`；新機用 Edge 樣板。兩邊 `Ingest:ApiKey` 要一致，Core 端填 `Ingest:AllowedClientIps`。`Line:OutboundHere` 恰好一台設 `true`。原本的 `outbox.db` 留在原機，排空完才停用 |
 | 加一台 EdgeProxy | 新機用 EdgeProxy 樣板填 `EdgeProxy:TargetBaseUrl`，LINE Console 的 Webhook URL 改指 proxy。收 webhook 那台通常不用改設定——除非已啟用 E1f 的 webhook 來源限制，那要把 proxy 的 IP 加進允許清單，否則來源變成 proxy 之後會全被擋 |
-| 拆掉 EdgeProxy | LINE Console 的 Webhook URL 改回直指 Edge／AllInOne；若原本有設 `Line:OutboundVia=EdgeProxy` 要改回 `Direct` 並重啟該台 |
-| 切換 `Line:OutboundVia` | 這個鍵是啟動時讀取的快照，改完**要重啟 Edge** 才生效（設定頁改不到它） |
+| 拆掉 EdgeProxy | LINE Console 的 Webhook URL 改回直指 Edge／AllInOne；若原本有設 `Line:OutboundVia=EdgeProxy` 要改回 `Direct` |
+| 切換 `Line:OutboundVia` | 改設定檔即對 outbound client 生效（連同 `Line:OutboundProxyBaseUrl`），不需重啟；但啟動驗證不會重跑，且設定頁改不到它 |
 | 改 `Ingest:Channel` 方向 | 見 E1b。Edge 設 `Pull` 時，Core 端一定要同時設好 `Ingest:EdgeBaseUrl`，否則兩邊都不主動連線、webhook 會收進 outbox 但永遠不落地 |
 
 轉換過程中訊息不會遺失：進了 outbox 的訊息由重試機制保證送達，尚未進來的靠

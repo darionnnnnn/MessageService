@@ -292,4 +292,23 @@ public class RingBufferLoggerTests : IDisposable
         var buffer = factory.Services.GetService<LogRingBuffer>();
         Assert.Null(buffer);
     }
+
+    [Fact]
+    public void RingBufferLoggerProvider_IpAllowlistCategory_DoesNotEnterBuffer()
+    {
+        // EdgeProxy 在公網上，任何來源打一輪就能用白名單拒絕 Warning 灌爆 200 筆緩衝，
+        // 把真正的錯誤擠掉——這個分類必須被排除（NLog 檔案照記，只是不進網頁緩衝）
+        var buffer = new LogRingBuffer();
+        using var provider = new RingBufferLoggerProvider(buffer);
+
+        var excluded = provider.CreateLogger(typeof(MessageService.Web.Middleware.IpAllowlistMiddleware).FullName!);
+        excluded.LogWarning("rejected");
+
+        var normal = provider.CreateLogger("MessageService.Anything");
+        normal.LogWarning("real problem");
+
+        var snapshot = buffer.Snapshot();
+        Assert.Single(snapshot);
+        Assert.Equal("real problem", snapshot[0].Message);
+    }
 }

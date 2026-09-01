@@ -75,7 +75,7 @@ public class LineConnectivityTesterTests
     }
 
     [Fact]
-    public async Task TestConnectivityAsync_200WithEmptyJson_ReturnsEmptyDisplayName()
+    public async Task TestConnectivityAsync_200WithEmptyJson_ShowsFallbackSuccessText()
     {
         var factory = CreateFactory(req =>
         {
@@ -96,7 +96,7 @@ public class LineConnectivityTesterTests
 
         var result = results.First(r => r.Purpose == "名稱查詢");
         Assert.True(result.Success);
-        Assert.Equal("", result.Description);
+        Assert.Equal("連線成功", result.Description);
     }
 
     [Fact]
@@ -457,5 +457,41 @@ public class LineConnectivityTesterTests
         Assert.NotNull(receivedRequest);
         Assert.Equal("Bearer", receivedRequest!.Headers.Authorization?.Scheme);
         Assert.Equal("configured-token", receivedRequest.Headers.Authorization?.Parameter);
+    }
+
+    [Fact]
+    public async Task TestConnectivityAsync_EdgeProxyTopology_TargetShowsProxyHostNotLineDomain()
+    {
+        // 走 EdgeProxy 時實際連的是 proxy——Target 顯示 LINE 的網域會讓人去開錯誤的防火牆洞
+        var factory = CreateFactory(_ => new HttpResponseMessage(HttpStatusCode.OK));
+        var options = new LineOptions
+        {
+            OutboundVia = LineOutboundVia.EdgeProxy,
+            OutboundProxyBaseUrl = "https://proxy.example/MSLine/"
+        };
+        var tester = new LineConnectivityTester(factory, new FakeOptionsMonitor<LineOptions>(options));
+
+        var results = await tester.TestConnectivityAsync();
+
+        Assert.Equal(4, results.Count);
+        Assert.All(results, r => Assert.Equal("proxy.example", r.Target));
+    }
+
+    [Fact]
+    public async Task TestConnectivityAsync_OnlyNameQueryUsesStrictSuccess()
+    {
+        // StrictSuccess 決定頁面顯示「成功／失敗」還是「可達／不可達」——
+        // 只有名稱查詢那列以 2xx 為判準，其餘三列是連通性判準
+        var factory = CreateFactory(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("{\"displayName\":\"bot\"}", Encoding.UTF8, "application/json")
+        });
+        var tester = new LineConnectivityTester(
+            factory, new FakeOptionsMonitor<LineOptions>(new LineOptions { OutboundVia = LineOutboundVia.Direct }));
+
+        var results = await tester.TestConnectivityAsync();
+
+        Assert.True(results[0].StrictSuccess);
+        Assert.All(results.Skip(1), r => Assert.False(r.StrictSuccess));
     }
 }

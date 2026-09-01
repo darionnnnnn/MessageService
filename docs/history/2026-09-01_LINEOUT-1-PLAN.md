@@ -1,6 +1,6 @@
 # LINEOUT-1：LINE outbound 取數診斷性修正
 
-狀態：規劃定稿，待實作。基線：dev@3b8a1c8（EDGEOPS-1 終檢後，1159 綠，尚未收尾）。
+狀態：全案完成（含收尾體檢）。基線：dev@3b8a1c8（EDGEOPS-1 終檢後，1159 綠，尚未收尾）。
 
 ## 背景與定案
 
@@ -122,7 +122,7 @@ log 與設定頁就能辨識問題類別**。使用者定案：四個待決全�
 | B | agy | 完成 | 1200 綠（+14） | 缺圖 stale 判定抽成共用私有方法、反例（無 PictureUrl 不觸發）有測試。手改一項：agy 讓「頭貼過大跳過」兩條路徑回報成功，配上 B1 後同一張過大的圖會每 5 分鐘被重抓一次（B1 讓它永遠 stale）——改為回報失敗走 10 分鐘冷卻，並補一筆測試釘住。 |
 | C | agy | 完成 | 1205 綠（+5） | 無落差。三個 client 的改寫決策抽成共用本地函式（未寫三份）；`LineProfileClient` 的頭貼改寫同步改吃 `IOptionsMonitor`；連線測試那句「尚未重啟站台」已改掉。熱更新雙向（Direct↔EdgeProxy）有測試。 |
 | D | agy | 完成 | 1216 綠（+11） | 四筆共用同一個 `TestTargetAsync`，判定用既有分類器。手改一項：三個「有回應即可達」的判定寫了三份逐字相同的 lambda，收斂成單一 `ReachableOnAnyResponse`。 |
-| 文件同步 | Claude | 待辦 | — | 收尾時處理 |
+| 文件同步 | Claude | 完成（收尾輪） | — | 見體檢輪修正 |
 | 終檢 | Explore×2 | 完成 | 1225 綠 | 見下節 |
 
 ## 併回前終檢（兩個獨立 Explore：程式碼、診斷可用性）
@@ -155,3 +155,27 @@ log 與設定頁就能辨識問題類別**。使用者定案：四個待決全�
 - 全量測試：**1225 綠 / 0 失敗 / 0 略過**（本輪起點 1159，共 +66）。
 - 建置 0 警告 0 錯誤；改動檔案皆無 BOM 與 NUL 汙染。
 - 文件同步（README／DEPLOYMENT-GUIDE 的排查段）尚未做，留給收尾流程。
+
+## 體檢交接
+
+- 實作方：agy（gemini-3.7-flash-high）實作、Claude Opus 5 規劃/驗收/終檢手改（規劃文件由 Fable 5 撰寫）。
+- 體檢方：Claude Fable 5（使用者切換模型後執行收尾）。
+- 兩輪皆直接做在 dev（無 feature 分支），體檢對象 `origin/dev..dev`。
+
+## 體檢輪修正（收尾，Fable 5 換模型體檢）
+
+獨立 Explore 掃 `origin/dev..dev` 全 diff（兩輪合併範圍）＋體檢方親掃兩個終檢手改 commit。
+
+| 發現 | 修正 |
+|---|---|
+| 三個關鍵行為沒有測試釘住：EdgeProxy 拓撲下連線測試的 Target 顯示 proxy host（終檢標「高」的修正，回退不會紅）、`StrictSuccess` 決定「成功／可達」顯示、環形緩衝排除 `IpAllowlistMiddleware` 的防灌 | 各補一筆測試（+3，1225→1228 綠） |
+| 名稱查詢成功但 LINE 回應缺 `displayName`／`basicId` 時說明欄空白（違反「成功顯示 bot 名稱」契約的邊角） | 補「連線成功」預設字樣，更新既有斷言 |
+| `IsStale` 的永久失敗例外有一個狹窄取捨沒記錄：成功下載過之後 blob 被外力清掉（DB 還原）時不再自癒 | 補進 `DbProfileStore` 註解（不改邏輯——分辨兩種情況需要新欄位與 migration，不值得） |
+| **文件同步整輪欠帳**（PLAN 自標待辦）＋兩輪交界造成的過時：DEPLOYMENT-GUIDE E1e 仍寫單目標測試、`OutboundVia` 仍寫「要重啟」（與作業 C 直接矛盾）、四個 LINE 網域清單全站無處可查、`PictureFetchedUrl` 雙語意未記、README 測試清單缺兩輪 | 全部補齊：E1e 改四列表格＋四網域清單＋排查小抄；拓撲遷移表與熱生效定調句改寫；DEPLOYMENT-MODES 管理面一節更新；README 兩處 `PictureFetchedUrl`、測試清單補「部署與診斷」段；LINE-BOT-SETUP 疑難排解補分類字串線索 |
+| CLAUDE.md 無測試基線與「不要做」清單，而兩輪有三個被重複退回的形狀 | 新增「開發紀律」節：基線 1225+、可選相依 fallback 禁令、顯示字串判斷禁令、TimeProvider 注入 |
+
+已驗證無誤的部分：`ApplyPictureMetadata` 與永久失敗寫入 `PictureFetchedUrl` 不互相干擾（成功路徑必有 blob，`!hasPicture` 擋住）；`PicturePermanentlyUnavailable` 旗標經 `ApiProfileStore`→`IngestController` 序列化不遺失（拆機拓撲安全）；`PictureUrl` 全站只有 `DbProfileStore` 一個寫入點；`TimeProvider` 已在 DI 註冊。
+
+值得記錄未處理：`test-line` 最壞耗時已從 15 秒變約 45 秒（四目標循序 ×10s＋拉 proxy 5s），下輪評估按需取數時要用這個數字。
+
+結尾：**1228 綠**（基線 1225 +3），建置 0 警告。

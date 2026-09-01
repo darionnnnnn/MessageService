@@ -53,7 +53,11 @@ public class DbProfileStore(MessageDbContext dbContext, FieldCipher cipher, ILog
     /// <summary>除了 TTL，還要把「LINE 說有頭貼、我們卻沒有圖」算成過期——不然頭貼下載失敗後
     /// 名稱的 UpdatedAt 已更新，這筆要等滿一整個 RefreshAfter 才會再試一次圖。
     /// 例外是 PictureFetchedUrl 已經等於目前的網址：那代表這個網址試過而且永久拿不到
-    /// （檔案超過上限、404），再判為過期就會變成無限期的每 10 分鐘重抓。</summary>
+    /// （檔案超過上限、404），再判為過期就會變成無限期的每 10 分鐘重抓。
+    ///
+    /// 取捨：成功下載過（FetchedUrl == PictureUrl）之後 blob 若被外力清掉（DB 還原、手動刪列），
+    /// 這條例外會讓它不再自癒——那種情況只能等 TTL 或換頭貼。權衡過：把「試過拿不到」
+    /// 從「blob 被外力弄丟」分出來需要新欄位，不值得為這個狹窄場景加 migration。</summary>
     private static bool IsStale(
         DateTimeOffset updatedAt, string? pictureUrl, string? pictureFetchedUrl, bool hasPicture, DateTimeOffset cutoff) =>
         updatedAt < cutoff
