@@ -5,6 +5,7 @@ using MessageService.Options;
 using MessageService.Services;
 using MessageService.Tests.TestSupport;
 using MessageService.Web.Services;
+using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
 
 namespace MessageService.Web.Tests.Services;
@@ -214,7 +215,7 @@ public class LineConnectivityTesterTests
             return new HttpResponseMessage(HttpStatusCode.OK);
         });
 
-        var authHandler = new LineAuthorizationHandler(monitor)
+        var authHandler = new LineAuthorizationHandler(monitor, NullLogger<LineAuthorizationHandler>.Instance)
         {
             InnerHandler = innerHandler
         };
@@ -243,7 +244,7 @@ public class LineConnectivityTesterTests
             return new HttpResponseMessage(HttpStatusCode.OK);
         });
 
-        var authHandler = new LineAuthorizationHandler(monitor)
+        var authHandler = new LineAuthorizationHandler(monitor, NullLogger<LineAuthorizationHandler>.Instance)
         {
             InnerHandler = innerHandler
         };

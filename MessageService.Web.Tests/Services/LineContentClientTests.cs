@@ -3,6 +3,7 @@ using System.Net.Http.Headers;
 using MessageService.Options;
 using MessageService.Services;
 using MessageService.Tests.TestSupport;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 
 namespace MessageService.Tests.Services;
@@ -15,7 +16,8 @@ public class LineContentClientTests
     {
         handler = new FakeHttpMessageHandler(responder);
         var authHandler = new MessageService.Web.Services.LineAuthorizationHandler(
-            new FakeOptionsMonitor<LineOptions>(new LineOptions { ChannelAccessToken = "test-token" }))
+            new FakeOptionsMonitor<LineOptions>(new LineOptions { ChannelAccessToken = "test-token" }),
+            NullLogger<MessageService.Web.Services.LineAuthorizationHandler>.Instance)
         {
             InnerHandler = handler
         };

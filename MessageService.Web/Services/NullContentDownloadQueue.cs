@@ -1,4 +1,5 @@
 using System.Runtime.CompilerServices;
+using Microsoft.Extensions.Logging;
 
 namespace MessageService.Services;
 
@@ -9,16 +10,26 @@ namespace MessageService.Services;
 /// 用捨棄實作取代真的 Channel 是刻意的：ContentDownloadQueue 是 Channel.CreateUnbounded，
 /// 若這台主機仍會被 IIngestSink／IngestController 呼叫 Enqueue 卻沒有背景服務消費，
 /// 會無上限累積造成記憶體洩漏。</summary>
-public class NullContentDownloadQueue : IContentDownloadQueue
+public class NullContentDownloadQueue(ILogger<NullContentDownloadQueue> logger) : IContentDownloadQueue
 {
+    private int _warned;
+
     public void Enqueue(long messageContentId)
     {
-        // 刻意什麼都不做
+        LogWarningOnce();
     }
 
     public void EnqueueDelayed(long messageContentId, TimeSpan delay, CancellationToken cancellationToken)
     {
-        // 刻意什麼都不做——理論上不會被呼叫（沒有 ContentDownloadService 在跑）
+        LogWarningOnce();
+    }
+
+    private void LogWarningOnce()
+    {
+        if (Interlocked.Exchange(ref _warned, 1) == 0)
+        {
+            logger.LogWarning("這台主機的 Line:OutboundHere 為 false，媒體下載的工作正被丟棄，由其他主機負責；若這台應該要下載，請檢查 Line:OutboundHere 設定。");
+        }
     }
 
 #pragma warning disable CS1998 // 沒有 await 是刻意的——永遠不產出任何項目
@@ -28,3 +39,4 @@ public class NullContentDownloadQueue : IContentDownloadQueue
     }
 #pragma warning restore CS1998
 }
+

@@ -1,5 +1,6 @@
 using MessageService.Services;
 using MessageService.Tests.TestSupport;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace MessageService.Tests.Services;
 
@@ -73,7 +74,9 @@ public class IngestSideEffectsTests
     {
         // 「這台主機不接手」的情境用 Null 實作而不是傳 null 參考——這裡確認 Null 實作
         // 搭配 IngestSideEffects 呼叫不會出任何錯，符合 Program.cs 依 OutboundHere 換實作的設計
-        IngestSideEffects.Apply(Envelope(), new IngestResult(42), new NullContentDownloadQueue(), new NullProfileRefreshQueue());
+        IngestSideEffects.Apply(Envelope(), new IngestResult(42),
+            new NullContentDownloadQueue(NullLogger<NullContentDownloadQueue>.Instance),
+            new NullProfileRefreshQueue(NullLogger<NullProfileRefreshQueue>.Instance));
         // 沒有拋例外就是通過；Null 實作本身的行為由 NullContentDownloadQueueTests 驗證
     }
 }

@@ -174,6 +174,12 @@ public static class DeploymentValidator
                 "Line:OutboundHere=false，否則兩台會重複下載同一批媒體內容。", mode);
         }
 
+        if (!capabilities.OutboundHere)
+        {
+            logger.LogInformation(
+                "此主機不做 LINE outbound（Line:OutboundHere=false 或依部署模式推導），媒體下載與頭貼刷新由其他主機負責。");
+        }
+
         // AllInOne 模式關掉媒體下載／頭貼快取是可疑的設定組合（單機部署通常沒有理由要這樣做），
         // 但不是錯誤——只記警告，不擋啟動
         if (mode is DeploymentMode.AllInOne && !capabilities.OutboundHere)

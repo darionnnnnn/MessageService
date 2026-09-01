@@ -13,6 +13,7 @@ public class DeploymentValidatorTests
     {
         public List<string> Warnings { get; } = [];
         public List<string> Errors { get; } = [];
+        public List<string> Infos { get; } = [];
         public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
         public bool IsEnabled(LogLevel logLevel) => true;
         public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
@@ -24,6 +25,10 @@ public class DeploymentValidatorTests
             else if (logLevel == LogLevel.Error)
             {
                 Errors.Add(formatter(state, exception));
+            }
+            else if (logLevel == LogLevel.Information)
+            {
+                Infos.Add(formatter(state, exception));
             }
         }
     }
@@ -243,6 +248,22 @@ public class DeploymentValidatorTests
             logger);
 
         Assert.DoesNotContain(logger.Warnings, w => w.Contains("重複下載"));
+    }
+
+    [Fact]
+    public void OutboundHereFalse_LogsInformation()
+    {
+        var logger = new CapturingLogger();
+
+        DeploymentValidator.Validate(
+            new DeploymentOptions { Mode = DeploymentMode.Edge },
+            Line(channelSecret: "secret", outboundHere: false),
+            new ViewerOptions(),
+            new IngestOptions { BaseUrl = "https://core-host", ApiKey = "key" },
+            new EdgeProxyOptions(),
+            logger);
+
+        Assert.Contains(logger.Infos, i => i.Contains("此主機不做 LINE outbound"));
     }
 
     // ==== Stage 2：新舊模式名稱等價、Viewer 模式、Core+檢視端組合 ====
