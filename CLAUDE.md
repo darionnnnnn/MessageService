@@ -62,7 +62,8 @@ SQL 端的 `x => x + 1`，讀出來加一再寫回在併發下會遺失計數。
 
 ## 開發紀律（重複踩過才寫進來的）
 
-- 測試基線：**1225+ 綠**（`dotnet test`）。改完必須全綠且測試數不減。
+- 測試基線：**1257+ 綠**（`dotnet test`）。改完必須全綠且測試數不減。
+- server 端拼 HTML 的頁面（如 `/edge-admin`）**不要寫死根路徑的 action／href／redirect**——IIS 子 application 部署下會 404；一律前置 `Request.PathBase`（HttpClient 方向的同一坑見 `HttpBaseAddress.cs` 註解）。
 - **不要為新相依加「可選參數 `= null` ＋ fallback」**——需要就宣告為必要相依，讓 DI 與測試替身誠實跟上（同一形狀在委派實作中出現過三次，全部被驗收退回）。
 - **不要用顯示字串做行為判斷**（例如比對中文標籤決定邏輯分支）——加旗標或 enum。
 - **節流／冷卻／TTL 類邏輯注入 `TimeProvider`**（DI 已註冊單例），不要直接用 `DateTimeOffset.UtcNow`——否則時間長度永遠測不到，只能測「有沒有發生」。

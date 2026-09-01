@@ -47,7 +47,9 @@ public static class EdgeAdminEndpoints
             IHttpClientFactory httpClientFactory,
             IOptionsMonitor<LineOptions> lineOptionsMonitor,
             DeploymentCapabilities capabilities,
-            LogRingBuffer ringBuffer) =>
+            LogRingBuffer ringBuffer,
+            OutboundTargetResolver targetResolver,
+            ILogger<LineConnectivityTester> testerLogger) =>
         {
             // OutboundHere=false 的主機根本沒有 LINE 具名 client，直接渲染頁面上的說明即可
             IReadOnlyList<LineConnectivityTestResult>? testResults = null;
@@ -57,7 +59,8 @@ public static class EdgeAdminEndpoints
                 var overrideToken = form["overrideToken"].ToString();
                 var tokenToUse = string.IsNullOrWhiteSpace(overrideToken) ? null : overrideToken.Trim();
 
-                var tester = new LineConnectivityTester(httpClientFactory, lineOptionsMonitor);
+                var tester = new LineConnectivityTester(
+                    httpClientFactory, lineOptionsMonitor, targetResolver, testerLogger);
                 testResults = await tester.TestConnectivityAsync(tokenToUse, context.RequestAborted);
             }
 
@@ -116,7 +119,7 @@ public static class EdgeAdminEndpoints
             store.Save(updated);
 
             // PRG (Post-Redirect-Get)
-            return Results.Redirect("/edge-admin?saved=true", permanent: false, preserveMethod: false);
+            return Results.Redirect($"{context.Request.PathBase}/edge-admin?saved=true", permanent: false, preserveMethod: false);
         });
     }
 
@@ -178,7 +181,7 @@ public static class EdgeAdminEndpoints
     {
         context.Response.Headers.CacheControl = "no-store, no-cache, must-revalidate";
         context.Response.Headers.Pragma = "no-cache";
-        return Results.Content(EdgeAdminPage.Render(model), "text/html; charset=utf-8");
+        return Results.Content(EdgeAdminPage.Render(model, context.Request.PathBase.Value ?? ""), "text/html; charset=utf-8");
     }
 
     /// <summary>GET 與連線測試 POST 都要渲染同一張頁面，檢視模型的組法只寫這一份。</summary>

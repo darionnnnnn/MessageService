@@ -48,6 +48,7 @@ public class HeartbeatServiceTests : IDisposable
     {
         public int Warnings { get; private set; }
         public int Infos { get; private set; }
+        public List<string> WarningMessages { get; } = [];
 
         public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
         public bool IsEnabled(Microsoft.Extensions.Logging.LogLevel logLevel) => true;
@@ -56,22 +57,29 @@ public class HeartbeatServiceTests : IDisposable
             Microsoft.Extensions.Logging.LogLevel logLevel, Microsoft.Extensions.Logging.EventId eventId,
             TState state, Exception? exception, Func<TState, Exception?, string> formatter)
         {
-            if (logLevel == Microsoft.Extensions.Logging.LogLevel.Warning) Warnings++;
+            if (logLevel == Microsoft.Extensions.Logging.LogLevel.Warning)
+            {
+                Warnings++;
+                WarningMessages.Add(formatter(state, exception));
+            }
             if (logLevel == Microsoft.Extensions.Logging.LogLevel.Information) Infos++;
         }
     }
 
     private HeartbeatService CreateService(
-        bool receivesWebhook, TimeProvider? timeProvider = null,
+        bool receivesWebhook,
+        TimeProvider? timeProvider = null,
+        Microsoft.Extensions.Options.IOptions<IngestOptions>? ingestOptions = null,
         Microsoft.Extensions.Logging.ILogger<HeartbeatService>? logger = null) =>
         new(
             _provider.GetRequiredService<IServiceScopeFactory>(),
             new DeploymentCapabilities(
                 ReceivesWebhook: receivesWebhook, HasDatabaseAccess: true, IngestApiEnabled: false,
                 ViewerEnabled: true, OutboundHere: false, RunsRetention: false, EdgePullApiEnabled: false),
-            timeProvider ?? TimeProvider.System,
+            timeProvider != null ? timeProvider : TimeProvider.System,
             OptionsFactory.Create(new HeartbeatOptions()),
-            logger ?? NullLogger<HeartbeatService>.Instance);
+            ingestOptions != null ? ingestOptions : OptionsFactory.Create(new IngestOptions()),
+            logger != null ? logger : NullLogger<HeartbeatService>.Instance);
 
     private async Task SeedOutboxEntryAsync(DateTimeOffset createdAt, DateTimeOffset? deadLetteredAt = null)
     {
@@ -178,5 +186,37 @@ public class HeartbeatServiceTests : IDisposable
         _reporter.Failing = true;
         await service.TryReportOnceAsync(CancellationToken.None);
         Assert.Equal(2, logger.Warnings);
+    }
+
+    [Fact]
+    public async Task TryReportOnceAsync_Failure_WithBaseUrl_LogsWarningWithTargetUrl()
+    {
+        var logger = new CountingLogger();
+        var ingestOptions = OptionsFactory.Create(new IngestOptions { BaseUrl = "https://core-host.example" });
+        var service = CreateService(receivesWebhook: false, ingestOptions: ingestOptions, logger: logger);
+        _reporter.Failing = true;
+
+        var result = await service.TryReportOnceAsync(CancellationToken.None);
+
+        Assert.False(result);
+        Assert.Equal(1, logger.Warnings);
+        var msg = Assert.Single(logger.WarningMessages);
+        Assert.Contains("https://core-host.example/api/ingest/heartbeat", msg);
+    }
+
+    [Fact]
+    public async Task TryReportOnceAsync_Failure_WithoutBaseUrl_LogsWarningWithLocalDatabase()
+    {
+        var logger = new CountingLogger();
+        var ingestOptions = OptionsFactory.Create(new IngestOptions { BaseUrl = null });
+        var service = CreateService(receivesWebhook: false, ingestOptions: ingestOptions, logger: logger);
+        _reporter.Failing = true;
+
+        var result = await service.TryReportOnceAsync(CancellationToken.None);
+
+        Assert.False(result);
+        Assert.Equal(1, logger.Warnings);
+        var msg = Assert.Single(logger.WarningMessages);
+        Assert.Contains("本機資料庫", msg);
     }
 }

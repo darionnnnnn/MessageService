@@ -74,6 +74,9 @@ public static class MessageServiceCoreServiceCollectionExtensions
         builder.Services.AddSingleton<FieldCipher>();
         builder.Services.AddSingleton(TimeProvider.System);
         builder.Services.AddSingleton<ReadinessCache>();
+        // 診斷用的 DNS 解析：快取有狀態，必須是單例
+        builder.Services.AddSingleton<IDnsLookup, SystemDnsLookup>();
+        builder.Services.AddSingleton<OutboundTargetResolver>();
         builder.Services.AddSingleton(ProcessOwnerId.Instance);
         builder.Services.AddTransient<IngestApiKeyHandler>();
         builder.Services.AddTransient<LineAuthorizationHandler>();

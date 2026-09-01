@@ -20,7 +20,7 @@ public class EdgeAdminPageTests
             WebhookSourceMode: "Any",
             WebhookSourceAllowedIps: ["192.0.2.2"]);
 
-        var html = EdgeAdminPage.Render(model);
+        var html = EdgeAdminPage.Render(model, "");
 
         // 完整值永遠不出現在輸出中
         Assert.DoesNotContain(lineSecret, html);
@@ -46,7 +46,7 @@ public class EdgeAdminPageTests
             WebhookSourceMode: "Any",
             WebhookSourceAllowedIps: []);
 
-        var html = EdgeAdminPage.Render(model);
+        var html = EdgeAdminPage.Render(model, "");
 
         // 不得洩漏原始字元的任何明文，且 placeholder 全遮罩為 ••••••••
         Assert.Contains("placeholder=\"••••••••\"", html);
@@ -66,7 +66,7 @@ public class EdgeAdminPageTests
             WebhookSourceMode: "Any",
             WebhookSourceAllowedIps: []);
 
-        var html = EdgeAdminPage.Render(model);
+        var html = EdgeAdminPage.Render(model, "");
 
         // 未設定的機密 placeholder 寫「未設定」
         Assert.Contains("placeholder=\"未設定\"", html);
@@ -85,7 +85,7 @@ public class EdgeAdminPageTests
             WebhookSourceMode: "Any",
             WebhookSourceAllowedIps: ["<b>bold</b>", "192.0.2.2"]);
 
-        var html = EdgeAdminPage.Render(model);
+        var html = EdgeAdminPage.Render(model, "");
 
         // 斷言輸出不含未逸出的 <script> 標籤
         Assert.DoesNotContain("<script>", html);
@@ -111,7 +111,7 @@ public class EdgeAdminPageTests
             WebhookSourceMode: "AllowlistOnly",
             WebhookSourceAllowedIps: webhookIps);
 
-        var html = EdgeAdminPage.Render(model);
+        var html = EdgeAdminPage.Render(model, "");
 
         // 多行呈現
         Assert.Contains("192.0.2.1\n192.0.2.2/24\n192.0.2.3", html);
@@ -131,12 +131,12 @@ public class EdgeAdminPageTests
             WebhookSourceAllowedIps: [],
             Saved: true);
 
-        var htmlSaved = EdgeAdminPage.Render(modelSaved);
+        var htmlSaved = EdgeAdminPage.Render(modelSaved, "");
         Assert.Contains("alert-success", htmlSaved);
         Assert.Contains("設定已儲存，並立即生效。", htmlSaved);
 
         var modelNotSaved = modelSaved with { Saved = false };
-        var htmlNotSaved = EdgeAdminPage.Render(modelNotSaved);
+        var htmlNotSaved = EdgeAdminPage.Render(modelNotSaved, "");
         Assert.DoesNotContain("<div class=\"alert-success\">", htmlNotSaved);
         Assert.DoesNotContain("設定已儲存，並立即生效。", htmlNotSaved);
     }
@@ -154,12 +154,12 @@ public class EdgeAdminPageTests
             Saved: false,
             IsUnreadable: true);
 
-        var htmlUnreadable = EdgeAdminPage.Render(modelUnreadable);
+        var htmlUnreadable = EdgeAdminPage.Render(modelUnreadable, "");
         Assert.Contains("<div class=\"alert-danger\">", htmlUnreadable);
         Assert.Contains("加密設定檔存在但無法解密", htmlUnreadable);
 
         var modelReadable = modelUnreadable with { IsUnreadable = false };
-        var htmlReadable = EdgeAdminPage.Render(modelReadable);
+        var htmlReadable = EdgeAdminPage.Render(modelReadable, "");
         Assert.DoesNotContain("<div class=\"alert-danger\">", htmlReadable);
         Assert.DoesNotContain("加密設定檔存在但無法解密", htmlReadable);
     }
@@ -197,7 +197,7 @@ public class EdgeAdminPageTests
             WebhookSourceMode: "Any",
             WebhookSourceAllowedIps: []);
 
-        var html = EdgeAdminPage.Render(model);
+        var html = EdgeAdminPage.Render(model, "");
 
         // 分頁標籤與容器
         Assert.Contains("id=\"tab-label-settings\"", html);
@@ -240,7 +240,7 @@ public class EdgeAdminPageTests
             WebhookSourceAllowedIps: [],
             LocalErrors: entries);
 
-        var html = EdgeAdminPage.Render(model);
+        var html = EdgeAdminPage.Render(model, "");
 
         // 表格標頭
         Assert.Contains("<th>時間</th>", html);
@@ -272,7 +272,7 @@ public class EdgeAdminPageTests
             WebhookSourceAllowedIps: [],
             LocalErrors: []);
 
-        var html = EdgeAdminPage.Render(model);
+        var html = EdgeAdminPage.Render(model, "");
 
         Assert.Contains("目前沒有記錄到警告以上訊息", html);
     }
@@ -291,7 +291,7 @@ public class EdgeAdminPageTests
             TodayLogContent: "2026-09-01 Log entry 1 <script>\n2026-09-01 Log entry 2",
             TodayLogErrorMessage: null);
 
-        var htmlWithLog = EdgeAdminPage.Render(modelWithLog);
+        var htmlWithLog = EdgeAdminPage.Render(modelWithLog, "");
         Assert.Contains("<pre class=\"log-pre\">", htmlWithLog);
         Assert.Contains("2026-09-01 Log entry 1 &lt;script&gt;\n2026-09-01 Log entry 2", htmlWithLog);
         Assert.DoesNotContain("<script>", htmlWithLog);
@@ -307,7 +307,7 @@ public class EdgeAdminPageTests
             TodayLogContent: null,
             TodayLogErrorMessage: "今天尚無 log 檔");
 
-        var htmlNoLog = EdgeAdminPage.Render(modelNoLog);
+        var htmlNoLog = EdgeAdminPage.Render(modelNoLog, "");
         Assert.Contains("今天尚無 log 檔", htmlNoLog);
 
         // 情況三：讀檔失敗
@@ -321,7 +321,7 @@ public class EdgeAdminPageTests
             TodayLogContent: null,
             TodayLogErrorMessage: "無法讀取 log 檔：存取被拒");
 
-        var htmlErrLog = EdgeAdminPage.Render(modelErrLog);
+        var htmlErrLog = EdgeAdminPage.Render(modelErrLog, "");
         Assert.Contains("無法讀取 log 檔：存取被拒", htmlErrLog);
     }
 
@@ -338,7 +338,7 @@ public class EdgeAdminPageTests
             WebhookSourceAllowedIps: [],
             ProxyStatusMessage: "本主機未使用 EdgeProxy");
 
-        var htmlUnused = EdgeAdminPage.Render(modelUnused);
+        var htmlUnused = EdgeAdminPage.Render(modelUnused, "");
         Assert.Contains("本主機未使用 EdgeProxy", htmlUnused);
 
         // 情況二：連線失敗訊息
@@ -351,7 +351,7 @@ public class EdgeAdminPageTests
             WebhookSourceAllowedIps: [],
             ProxyStatusMessage: "無法連上 EdgeProxy：連線逾時——請直接查看該主機的 logs 目錄");
 
-        var htmlFailed = EdgeAdminPage.Render(modelFailed);
+        var htmlFailed = EdgeAdminPage.Render(modelFailed, "");
         Assert.Contains("無法連上 EdgeProxy：連線逾時——請直接查看該主機的 logs 目錄", htmlFailed);
 
         // 情況三：連線成功且有條目（與本機錯誤共用表格渲染）
@@ -375,7 +375,7 @@ public class EdgeAdminPageTests
             ProxyErrors: entries,
             ProxyStatusMessage: null);
 
-        var htmlProxyOk = EdgeAdminPage.Render(modelProxyOk);
+        var htmlProxyOk = EdgeAdminPage.Render(modelProxyOk, "");
         Assert.Contains("badge-warning", htmlProxyOk);
         Assert.Contains("EdgeProxy.Forwarder", htmlProxyOk);
         Assert.Contains("Proxy warning message", htmlProxyOk);
@@ -393,7 +393,7 @@ public class EdgeAdminPageTests
             WebhookSourceAllowedIps: [],
             OutboundHere: false);
 
-        var html = EdgeAdminPage.Render(model);
+        var html = EdgeAdminPage.Render(model, "");
 
         Assert.Contains("此主機未啟用 LINE outbound，無法測試", html);
         Assert.DoesNotContain("測試目前生效的 Token", html);
@@ -442,7 +442,7 @@ public class EdgeAdminPageTests
             LineTestResults: testResults,
             ActiveTab: "connection");
 
-        var html = EdgeAdminPage.Render(model);
+        var html = EdgeAdminPage.Render(model, "");
 
         Assert.Contains("alert-success", html);
         Assert.Contains("連線測試完成：全部連線正常", html);
@@ -497,7 +497,7 @@ public class EdgeAdminPageTests
             LineTestResults: testResults,
             ActiveTab: "connection");
 
-        var html = EdgeAdminPage.Render(model);
+        var html = EdgeAdminPage.Render(model, "");
 
         Assert.Contains("alert-danger", html);
         Assert.Contains("連線測試完成：部分連線異常，請檢查下方表格", html);
@@ -527,7 +527,7 @@ public class EdgeAdminPageTests
             IngestAllowedClientIps: [], WebhookSourceMode: "Any", WebhookSourceAllowedIps: [],
             OutboundHere: true, LineTestResults: testResults, ActiveTab: "connection");
 
-        var html = EdgeAdminPage.Render(model);
+        var html = EdgeAdminPage.Render(model, "");
 
         Assert.Contains("<th>用途</th>", html);
         Assert.Contains("<th>目標</th>", html);
@@ -556,11 +556,115 @@ public class EdgeAdminPageTests
             WebhookSourceMode: "Any",
             WebhookSourceAllowedIps: []);
 
-        var html = EdgeAdminPage.Render(model);
+        var html = EdgeAdminPage.Render(model, "");
 
         Assert.Contains("id=\"tab-nav-settings\" name=\"admin-tab\" class=\"tab-radio\" checked", html);
         Assert.Contains("id=\"tab-nav-connection\" name=\"admin-tab\" class=\"tab-radio\" />", html);
         Assert.Contains("id=\"tab-nav-troubleshooting\" name=\"admin-tab\" class=\"tab-radio\" />", html);
     }
-}
 
+    [Fact]
+    public void Render_WithPathBase_PrependsPathBaseToFormActionsAndDoesNotContainUnprefixedAction()
+    {
+        var model = new EdgeAdminViewModel(
+            LineChannelSecret: null,
+            LineChannelAccessToken: null,
+            IngestApiKey: null,
+            IngestAllowedClientIps: [],
+            WebhookSourceMode: "Any",
+            WebhookSourceAllowedIps: [],
+            OutboundHere: true);
+
+        var html = EdgeAdminPage.Render(model, "/MSLine");
+
+        Assert.Contains("action=\"/MSLine/edge-admin/test-line\"", html);
+        Assert.Contains("action=\"/MSLine/edge-admin\"", html);
+        Assert.DoesNotContain("action=\"/edge-admin", html);
+    }
+
+    [Fact]
+    public void Render_WithEmptyPathBase_RendersDefaultFormActions()
+    {
+        var model = new EdgeAdminViewModel(
+            LineChannelSecret: null,
+            LineChannelAccessToken: null,
+            IngestApiKey: null,
+            IngestAllowedClientIps: [],
+            WebhookSourceMode: "Any",
+            WebhookSourceAllowedIps: [],
+            OutboundHere: true);
+
+        var html = EdgeAdminPage.Render(model, "");
+
+        Assert.Contains("action=\"/edge-admin/test-line\"", html);
+        Assert.Contains("action=\"/edge-admin\"", html);
+    }
+
+    [Fact]
+    public void RenderConnectionTestResultsTable_ShowsRequestUrlAndResolvedIp()
+    {
+        // 這兩欄是拿去跟網管核對防火牆的：要開的是這個網址與這個 IP
+        var results = new[]
+        {
+            new MessageService.Web.Services.LineConnectivityTestResult(
+                Purpose: "名稱查詢",
+                Target: "api.line.me",
+                Success: true,
+                Description: "bot",
+                Via: "Direct",
+                StrictSuccess: true,
+                RequestUrl: "https://api.line.me/v2/bot/info",
+                ResolvedIp: "203.0.113.10")
+        };
+
+        var html = EdgeAdminPage.RenderConnectionTestResultsTable(results);
+
+        Assert.Contains("<th>請求網址</th>", html);
+        Assert.Contains("<th>IP</th>", html);
+        Assert.Contains("https://api.line.me/v2/bot/info", html);
+        Assert.Contains("203.0.113.10", html);
+    }
+
+    [Fact]
+    public void RenderConnectionTestResultsTable_NoResolvedIp_ShowsResolutionFailed()
+    {
+        var results = new[]
+        {
+            new MessageService.Web.Services.LineConnectivityTestResult(
+                Purpose: "名稱查詢",
+                Target: "api.line.me",
+                Success: false,
+                Description: "連線逾時",
+                Via: "Direct",
+                StrictSuccess: true,
+                RequestUrl: "https://api.line.me/v2/bot/info",
+                ResolvedIp: null)
+        };
+
+        var html = EdgeAdminPage.RenderConnectionTestResultsTable(results);
+
+        Assert.Contains("解析失敗", html);
+    }
+
+    [Fact]
+    public void RenderConnectionTestResultsTable_EscapesRequestUrlAndIp()
+    {
+        var results = new[]
+        {
+            new MessageService.Web.Services.LineConnectivityTestResult(
+                Purpose: "名稱查詢",
+                Target: "api.line.me",
+                Success: false,
+                Description: "失敗",
+                Via: "Direct",
+                StrictSuccess: true,
+                RequestUrl: "https://api.line.me/<script>x</script>",
+                ResolvedIp: "<script>y</script>")
+        };
+
+        var html = EdgeAdminPage.RenderConnectionTestResultsTable(results);
+
+        Assert.DoesNotContain("<script>", html);
+        Assert.Contains("&lt;script&gt;", html);
+    }
+}

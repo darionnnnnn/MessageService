@@ -136,8 +136,9 @@ public static class EdgeAdminPage
         return entries is null ? statusHtml : statusHtml + RenderLogEntriesTable(entries);
     }
 
-    public static string RenderConnectionTab(bool outboundHere, IReadOnlyList<LineConnectivityTestResult>? testResults)
+    public static string RenderConnectionTab(bool outboundHere, IReadOnlyList<LineConnectivityTestResult>? testResults, string pathBase)
     {
+        var encodedPathBase = WebUtility.HtmlEncode(pathBase);
         var sb = new StringBuilder();
         sb.Append("""
             <div id="tab-connection" class="tab-pane tab-pane-connection">
@@ -172,12 +173,12 @@ public static class EdgeAdminPage
             sb.Append(RenderConnectionTestResultsTable(testResults));
         }
 
-        sb.Append("""
+        sb.Append($$"""
                 <div class="note">測試會對 LINE 官方 <code>v2/bot/info</code> 等相關網域發出連線請求。</div>
-                <form method="post" action="/edge-admin/test-line">
+                <form method="post" action="{{encodedPathBase}}/edge-admin/test-line">
                     <button type="submit" class="btn-submit">測試目前生效的 Token</button>
                 </form>
-                <form method="post" action="/edge-admin/test-line" style="margin-top: 24px;">
+                <form method="post" action="{{encodedPathBase}}/edge-admin/test-line" style="margin-top: 24px;">
                     <div class="form-group">
                         <label for="overrideToken">覆寫 Channel Access Token 測試</label>
                         <input type="password" id="overrideToken" name="overrideToken" placeholder="輸入要測試的 Token（留空不覆寫）" />
@@ -206,6 +207,8 @@ public static class EdgeAdminPage
             <tr>
                 <th>用途</th>
                 <th>目標</th>
+                <th>請求網址</th>
+                <th>IP</th>
                 <th>結果</th>
                 <th>說明</th>
                 <th>經由</th>
@@ -220,6 +223,11 @@ public static class EdgeAdminPage
             var targetEncoded = WebUtility.HtmlEncode(item.Target);
             var viaEncoded = WebUtility.HtmlEncode(item.Via);
             var descEncoded = WebUtility.HtmlEncode(item.Description);
+            // 這兩欄是拿去跟網管核對防火牆的：要開的是這個網址與這個 IP
+            var requestUrlEncoded = WebUtility.HtmlEncode(item.RequestUrl);
+            var resolvedIpEncoded = string.IsNullOrEmpty(item.ResolvedIp)
+                ? "解析失敗"
+                : WebUtility.HtmlEncode(item.ResolvedIp);
 
             var resultText = item.Success
                 ? (item.StrictSuccess ? "成功" : "可達")
@@ -231,6 +239,8 @@ public static class EdgeAdminPage
             <tr>
                 <td>{purposeEncoded}</td>
                 <td>{targetEncoded}</td>
+                <td class="col-message">{requestUrlEncoded}</td>
+                <td>{resolvedIpEncoded}</td>
                 <td><span class="badge {badgeClass}">{resultText}</span></td>
                 <td>{descEncoded}</td>
                 <td>{viaEncoded}</td>
@@ -247,7 +257,7 @@ public static class EdgeAdminPage
         return sb.ToString();
     }
 
-    public static string Render(EdgeAdminViewModel model)
+    public static string Render(EdgeAdminViewModel model, string pathBase)
     {
         var isConnectionTab = string.Equals(model.ActiveTab, "connection", StringComparison.OrdinalIgnoreCase);
         var isTroubleshootingTab = string.Equals(model.ActiveTab, "troubleshooting", StringComparison.OrdinalIgnoreCase);
@@ -287,7 +297,7 @@ public static class EdgeAdminPage
         var localErrorsHtml = RenderLogEntriesTable(model.LocalErrors);
         var todayLogHtml = RenderTodayLog(model.TodayLogContent, model.TodayLogErrorMessage);
         var proxyErrorsHtml = RenderProxyErrors(model.ProxyErrors, model.ProxyStatusMessage);
-        var connectionTabHtml = RenderConnectionTab(model.OutboundHere, model.LineTestResults);
+        var connectionTabHtml = RenderConnectionTab(model.OutboundHere, model.LineTestResults, pathBase);
 
         return $$"""
 <!DOCTYPE html>
@@ -560,7 +570,7 @@ public static class EdgeAdminPage
             <div id="tab-settings" class="tab-pane tab-pane-settings">
                 {{unreadableAlertHtml}}
                 {{successAlertHtml}}
-                <form method="post" action="/edge-admin">
+                <form method="post" action="{{WebUtility.HtmlEncode(pathBase)}}/edge-admin">
                     <div class="form-group">
                         <label for="lineChannelSecret">LINE Channel Secret</label>
                         <input type="password" id="lineChannelSecret" name="lineChannelSecret" placeholder="{{(string.IsNullOrEmpty(model.LineChannelSecret) ? "未設定" : WebUtility.HtmlEncode(maskedLineSecret))}}" />

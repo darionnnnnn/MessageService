@@ -62,6 +62,7 @@ public class EdgeProxyForwarderMiddleware(
             sizeFeature.MaxRequestBodySize = MaxWebhookBodyBytes;
         }
 
+        var httpClient = httpClientFactory.CreateClient(EdgeProxyOptions.HttpClientName);
         try
         {
             // request body 逐位元組原封轉發（維持 HMAC 驗簽有效性）
@@ -87,7 +88,6 @@ public class EdgeProxyForwarderMiddleware(
 
             requestMessage.Content = byteContent;
 
-            var httpClient = httpClientFactory.CreateClient(EdgeProxyOptions.HttpClientName);
             using var response = await httpClient.SendAsync(requestMessage, context.RequestAborted);
 
             // 回應只透傳狀態碼，不回傳 body
@@ -108,7 +108,10 @@ public class EdgeProxyForwarderMiddleware(
             {
                 context.Response.StatusCode = StatusCodes.Status502BadGateway;
             }
-            LogFailure(ex);
+            var targetDescription = httpClient.BaseAddress is not null
+                ? new Uri(httpClient.BaseAddress, ForwardPath).ToString()
+                : "未設定 EdgeProxy 目標位址";
+            LogFailure(ex, targetDescription);
         }
     }
 
@@ -132,7 +135,7 @@ public class EdgeProxyForwarderMiddleware(
         }
     }
 
-    private void LogFailure(Exception ex)
+    private void LogFailure(Exception ex, string targetDescription)
     {
         lock (_syncLock)
         {
@@ -143,8 +146,8 @@ public class EdgeProxyForwarderMiddleware(
             {
                 _lastFailureLogAt = now;
                 logger.LogWarning(ex,
-                    "轉發 webhook 至 Edge 失敗：{FailureReason}；這則告警（含時好時壞的情況）每 10 分鐘最多記一次。",
-                    OutboundFailureClassifier.Classify(ex));
+                    "轉發 webhook 至 Edge（{Target}）失敗：{FailureReason}；這則告警（含時好時壞的情況）每 10 分鐘最多記一次。",
+                    targetDescription, OutboundFailureClassifier.Classify(ex));
             }
         }
     }

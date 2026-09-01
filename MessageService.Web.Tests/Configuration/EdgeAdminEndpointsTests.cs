@@ -1198,4 +1198,25 @@ public class EdgeAdminEndpointsTests : IDisposable
         var html = await response.Content.ReadAsStringAsync();
         Assert.Contains("今日 log 檔尾", html);
     }
+
+    [Fact]
+    public async Task EdgeAdmin_PostSettings_RedirectsToEdgeAdminSavedWithEmptyPathBase()
+    {
+        using var factory = CreateEdgeFactory(clientIp: "127.0.0.1");
+        using var client = factory.CreateClient(new WebApplicationFactoryClientOptions
+        {
+            AllowAutoRedirect = false
+        });
+
+        var form = new Dictionary<string, string>
+        {
+            ["lineChannelSecret"] = "test-secret",
+            ["webhookMode"] = "Any"
+        };
+
+        var response = await client.PostAsync("/edge-admin", new FormUrlEncodedContent(form));
+
+        Assert.True(response.StatusCode is HttpStatusCode.Redirect or HttpStatusCode.SeeOther);
+        Assert.Equal("/edge-admin?saved=true", response.Headers.Location?.ToString());
+    }
 }

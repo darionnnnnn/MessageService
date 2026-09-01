@@ -5,6 +5,7 @@ using MessageService.Options;
 using MessageService.Services;
 using MessageService.Tests.TestSupport;
 using MessageService.Web.Services;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
 
@@ -17,6 +18,47 @@ public class LineConnectivityTesterTests
         var handler = new FakeHttpMessageHandler(responder);
         return new FakeHttpClientFactory(handler);
     }
+
+    /// <summary>測試一律用固定 IP 的假 DNS：真的去查 DNS 會讓測試依賴外部網路。</summary>
+    private sealed class FakeDnsLookup(Func<string, IPAddress[]> factory) : IDnsLookup
+    {
+        public Task<IPAddress[]> GetHostAddressesAsync(string host, CancellationToken cancellationToken)
+            => Task.FromResult(factory(host));
+    }
+
+    private sealed class FixedTimeProvider : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => DateTimeOffset.UnixEpoch;
+    }
+
+    private sealed class CapturingLogger<T> : ILogger<T>
+    {
+        public List<(LogLevel Level, string Message)> Logs { get; } = [];
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+            Func<TState, Exception?, string> formatter)
+            => Logs.Add((logLevel, formatter(state, exception)));
+    }
+
+    private static OutboundTargetResolver CreateResolver(string? ip = "203.0.113.10")
+        => new(
+            new FixedTimeProvider(),
+            new FakeDnsLookup(_ => ip is null ? throw new System.Net.Sockets.SocketException() : [IPAddress.Parse(ip)]));
+
+    private static LineConnectivityTester CreateTester(
+        IHttpClientFactory factory,
+        LineOptions options,
+        OutboundTargetResolver? resolver = null,
+        ILogger<LineConnectivityTester>? logger = null)
+        => new(
+            factory,
+            new FakeOptionsMonitor<LineOptions>(options),
+            resolver ?? CreateResolver(),
+            logger ?? NullLogger<LineConnectivityTester>.Instance);
 
     [Fact]
     public async Task TestConnectivityAsync_200WithDisplayName_ReturnsSuccess()
@@ -37,7 +79,7 @@ public class LineConnectivityTesterTests
         {
             OutboundVia = LineOutboundVia.Direct
         };
-        var tester = new LineConnectivityTester(factory, new FakeOptionsMonitor<LineOptions>(options));
+        var tester = CreateTester(factory, options);
 
         var results = await tester.TestConnectivityAsync();
 
@@ -65,7 +107,7 @@ public class LineConnectivityTesterTests
         });
 
         var options = new LineOptions();
-        var tester = new LineConnectivityTester(factory, new FakeOptionsMonitor<LineOptions>(options));
+        var tester = CreateTester(factory, options);
 
         var results = await tester.TestConnectivityAsync();
 
@@ -90,7 +132,7 @@ public class LineConnectivityTesterTests
         });
 
         var options = new LineOptions();
-        var tester = new LineConnectivityTester(factory, new FakeOptionsMonitor<LineOptions>(options));
+        var tester = CreateTester(factory, options);
 
         var results = await tester.TestConnectivityAsync();
 
@@ -116,7 +158,7 @@ public class LineConnectivityTesterTests
         });
 
         var options = new LineOptions();
-        var tester = new LineConnectivityTester(factory, new FakeOptionsMonitor<LineOptions>(options));
+        var tester = CreateTester(factory, options);
 
         var results = await tester.TestConnectivityAsync();
 
@@ -139,7 +181,7 @@ public class LineConnectivityTesterTests
         });
 
         var options = new LineOptions();
-        var tester = new LineConnectivityTester(factory, new FakeOptionsMonitor<LineOptions>(options));
+        var tester = CreateTester(factory, options);
 
         var results = await tester.TestConnectivityAsync();
 
@@ -167,7 +209,7 @@ public class LineConnectivityTesterTests
         });
 
         var options = new LineOptions { ChannelAccessToken = "configured-token" };
-        var tester = new LineConnectivityTester(factory, new FakeOptionsMonitor<LineOptions>(options));
+        var tester = CreateTester(factory, options);
 
         await tester.TestConnectivityAsync("my-override-token");
 
@@ -194,7 +236,7 @@ public class LineConnectivityTesterTests
         });
 
         var options = new LineOptions { ChannelAccessToken = "configured-token" };
-        var tester = new LineConnectivityTester(factory, new FakeOptionsMonitor<LineOptions>(options));
+        var tester = CreateTester(factory, options);
 
         await tester.TestConnectivityAsync(null);
 
@@ -219,7 +261,7 @@ public class LineConnectivityTesterTests
             OutboundVia = via,
             OutboundProxyBaseUrl = proxyUrl
         };
-        var tester = new LineConnectivityTester(factory, new FakeOptionsMonitor<LineOptions>(options));
+        var tester = CreateTester(factory, options);
 
         var results = await tester.TestConnectivityAsync();
 
@@ -243,7 +285,7 @@ public class LineConnectivityTesterTests
         });
 
         var options = new LineOptions { OutboundVia = LineOutboundVia.Direct };
-        var tester = new LineConnectivityTester(factory, new FakeOptionsMonitor<LineOptions>(options));
+        var tester = CreateTester(factory, options);
 
         var results = await tester.TestConnectivityAsync();
 
@@ -271,7 +313,7 @@ public class LineConnectivityTesterTests
         });
 
         var options = new LineOptions { OutboundVia = LineOutboundVia.Direct };
-        var tester = new LineConnectivityTester(factory, new FakeOptionsMonitor<LineOptions>(options));
+        var tester = CreateTester(factory, options);
 
         var results = await tester.TestConnectivityAsync();
 
@@ -303,7 +345,7 @@ public class LineConnectivityTesterTests
         });
 
         var options = new LineOptions { OutboundVia = LineOutboundVia.Direct };
-        var tester = new LineConnectivityTester(factory, new FakeOptionsMonitor<LineOptions>(options));
+        var tester = CreateTester(factory, options);
 
         var results = await tester.TestConnectivityAsync();
 
@@ -324,7 +366,7 @@ public class LineConnectivityTesterTests
         });
 
         var options = new LineOptions { OutboundVia = LineOutboundVia.Direct };
-        var tester = new LineConnectivityTester(factory, new FakeOptionsMonitor<LineOptions>(options));
+        var tester = CreateTester(factory, options);
 
         var results = await tester.TestConnectivityAsync();
 
@@ -352,7 +394,7 @@ public class LineConnectivityTesterTests
             OutboundVia = LineOutboundVia.EdgeProxy,
             OutboundProxyBaseUrl = "https://proxy.example/MSLine/"
         };
-        var tester = new LineConnectivityTester(factory, new FakeOptionsMonitor<LineOptions>(options));
+        var tester = CreateTester(factory, options);
 
         var results = await tester.TestConnectivityAsync();
 
@@ -385,7 +427,7 @@ public class LineConnectivityTesterTests
         });
 
         var options = new LineOptions { OutboundVia = LineOutboundVia.Direct };
-        var tester = new LineConnectivityTester(factory, new FakeOptionsMonitor<LineOptions>(options));
+        var tester = CreateTester(factory, options);
 
         var results = await tester.TestConnectivityAsync();
 
@@ -469,7 +511,7 @@ public class LineConnectivityTesterTests
             OutboundVia = LineOutboundVia.EdgeProxy,
             OutboundProxyBaseUrl = "https://proxy.example/MSLine/"
         };
-        var tester = new LineConnectivityTester(factory, new FakeOptionsMonitor<LineOptions>(options));
+        var tester = CreateTester(factory, options);
 
         var results = await tester.TestConnectivityAsync();
 
@@ -486,12 +528,141 @@ public class LineConnectivityTesterTests
         {
             Content = new StringContent("{\"displayName\":\"bot\"}", Encoding.UTF8, "application/json")
         });
-        var tester = new LineConnectivityTester(
-            factory, new FakeOptionsMonitor<LineOptions>(new LineOptions { OutboundVia = LineOutboundVia.Direct }));
+        var tester = CreateTester(factory, new LineOptions { OutboundVia = LineOutboundVia.Direct });
 
         var results = await tester.TestConnectivityAsync();
 
         Assert.True(results[0].StrictSuccess);
         Assert.All(results.Skip(1), r => Assert.False(r.StrictSuccess));
+    }
+
+    [Fact]
+    public async Task TestConnectivityAsync_Direct_ReportsAbsoluteRequestUrlAndResolvedIp()
+    {
+        // 這張表是拿去跟網管核對防火牆的：成功列也要看得到實際網址與 IP
+        var factory = CreateFactory(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("{\"displayName\":\"bot\"}", Encoding.UTF8, "application/json")
+        });
+        var tester = CreateTester(factory, new LineOptions { OutboundVia = LineOutboundVia.Direct });
+
+        var results = await tester.TestConnectivityAsync();
+
+        // FakeHttpClientFactory 會預設 BaseAddress，所以這裡只驗「組出來的是絕對網址、
+        // 且帶著該列真正要打的路徑」——網域由 BaseAddress 決定，那是註冊層的事
+        Assert.All(results, r => Assert.True(Uri.IsWellFormedUriString(r.RequestUrl, UriKind.Absolute), r.RequestUrl));
+        Assert.EndsWith("/v2/bot/info", results.First(r => r.Purpose == "名稱查詢").RequestUrl);
+        Assert.EndsWith("/probe", results.First(r => r.Purpose == "媒體內容").RequestUrl);
+        Assert.All(results, r => Assert.Equal("203.0.113.10", r.ResolvedIp));
+    }
+
+    [Fact]
+    public async Task TestConnectivityAsync_EdgeProxy_RequestUrlPointsAtProxyNotLine()
+    {
+        // EdgeProxy 拓撲下要開通的是 proxy 的網址，顯示 LINE 的網址會讓人去開錯誤的洞
+        var factory = CreateFactory(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("{\"displayName\":\"bot\"}", Encoding.UTF8, "application/json")
+        });
+        var options = new LineOptions
+        {
+            OutboundVia = LineOutboundVia.EdgeProxy,
+            OutboundProxyBaseUrl = "https://proxy.example/MSLine/"
+        };
+        var tester = CreateTester(factory, options);
+
+        var results = await tester.TestConnectivityAsync();
+
+        // 頭貼那列打的是絕對 URL（由 LineImageUrlRewriter 改寫），不受測試替身的 BaseAddress 影響，
+        // 是這裡唯一驗得到「真的指向 proxy」的一列
+        var image = results.First(r => r.Purpose == "頭貼 CDN");
+        // 原 LINE 網域留在路徑裡是改寫規則的一部分（proxy 靠它決定往哪個 CDN 轉），
+        // 重點是主機部分換成了 proxy
+        Assert.StartsWith("https://proxy.example/MSLine/line/image/", image.RequestUrl);
+        Assert.Equal("proxy.example", new Uri(image.RequestUrl).Host);
+        // 其餘各列的 Target 走 proxy host——這是防火牆要開通的對象
+        Assert.All(results, r => Assert.Equal("proxy.example", r.Target));
+    }
+
+    [Fact]
+    public async Task TestConnectivityAsync_DnsFails_ResolvedIpIsNullButTestStillRuns()
+    {
+        // DNS 解析只影響顯示，不該把連得上的目標判成失敗
+        var factory = CreateFactory(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("{\"displayName\":\"bot\"}", Encoding.UTF8, "application/json")
+        });
+        var tester = CreateTester(
+            factory, new LineOptions { OutboundVia = LineOutboundVia.Direct }, CreateResolver(ip: null));
+
+        var results = await tester.TestConnectivityAsync();
+
+        Assert.All(results, r => Assert.Null(r.ResolvedIp));
+        Assert.True(results.First(r => r.Purpose == "名稱查詢").Success);
+    }
+
+    [Fact]
+    public async Task TestConnectivityAsync_HttpStatusFailure_DescriptionCarriesTargetHost()
+    {
+        // 4xx／5xx 的說明以前不帶目標，拿去問網管沒東西可對
+        var factory = CreateFactory(_ => new HttpResponseMessage(HttpStatusCode.GatewayTimeout));
+        var tester = CreateTester(factory, new LineOptions { OutboundVia = LineOutboundVia.Direct });
+
+        var results = await tester.TestConnectivityAsync();
+
+        var content = results.First(r => r.Purpose == "媒體內容");
+        Assert.False(content.Success);
+        Assert.Contains("api-data.line.me", content.Description);
+    }
+
+    [Fact]
+    public async Task TestConnectivityAsync_NameQuery5xx_DescriptionCarriesTargetHost()
+    {
+        // 名稱查詢那列的狀態碼判定跟其他三列是各自獨立的一份，要分別驗到。
+        // 用 500 而不是 401：401/403/404/429 是「token 或路徑」問題，分類器刻意不帶 host
+        var factory = CreateFactory(req => req.RequestUri?.AbsolutePath == "/v2/bot/info"
+            ? new HttpResponseMessage(HttpStatusCode.InternalServerError)
+            : new HttpResponseMessage(HttpStatusCode.OK));
+        var tester = CreateTester(factory, new LineOptions { OutboundVia = LineOutboundVia.Direct });
+
+        var results = await tester.TestConnectivityAsync();
+
+        var nameQuery = results.First(r => r.Purpose == "名稱查詢");
+        Assert.False(nameQuery.Success);
+        Assert.Contains("api.line.me", nameQuery.Description);
+    }
+
+    [Fact]
+    public async Task TestConnectivityAsync_Failure_LogsWarningWithUrlAndIp()
+    {
+        // 沒開著頁面時也要留得下紀錄，網管事後才查得到是哪個網址／IP 不通
+        var logger = new CapturingLogger<LineConnectivityTester>();
+        var factory = CreateFactory(_ => throw new HttpRequestException("連不上"));
+        var tester = CreateTester(
+            factory, new LineOptions { OutboundVia = LineOutboundVia.Direct }, logger: logger);
+
+        await tester.TestConnectivityAsync();
+
+        var warnings = logger.Logs.Where(l => l.Level == LogLevel.Warning).ToList();
+        Assert.Equal(4, warnings.Count);
+        Assert.Contains(warnings, w => w.Message.Contains("api.line.me")
+            && w.Message.Contains("203.0.113.10")
+            && w.Message.Contains("/v2/bot/info"));
+    }
+
+    [Fact]
+    public async Task TestConnectivityAsync_AllSucceed_LogsNothing()
+    {
+        var logger = new CapturingLogger<LineConnectivityTester>();
+        var factory = CreateFactory(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("{\"displayName\":\"bot\"}", Encoding.UTF8, "application/json")
+        });
+        var tester = CreateTester(
+            factory, new LineOptions { OutboundVia = LineOutboundVia.Direct }, logger: logger);
+
+        await tester.TestConnectivityAsync();
+
+        Assert.Empty(logger.Logs);
     }
 }
