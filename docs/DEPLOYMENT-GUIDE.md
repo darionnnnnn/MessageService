@@ -117,7 +117,8 @@ dotnet publish MessageService.Web -c Release -o C:\Deploy\MessageService
 
 部署到某台主機時：
 
-1. 把對應的樣板**複製**到該主機的站台目錄，**改名成 `appsettings.Production.json`**
+1. 把對應的樣板**複製**到該主機的站台目錄，**檔名原樣保留**（例如
+   `appsettings.Production.Edge.json`）——啟動時會依檔名後綴判別這台主機的角色
 2. 填上機密：`Line:ChannelSecret`／`ChannelAccessToken`、`Ingest:ApiKey`、連線字串
    （`ConnectionStrings:Sqlite` 或 `SqlServer`）、要加密的話還有 `Encryption:Key`
 3. 填上該主機實際的白名單網段：`Viewer:AllowedClientIps`（檢視端使用者的辦公室網段）
@@ -128,9 +129,25 @@ dotnet publish MessageService.Web -c Release -o C:\Deploy\MessageService
    見 [DEPLOYMENT-MODES.md](DEPLOYMENT-MODES.md) 的兩台拓撲說明
 
 `ASPNETCORE_ENVIRONMENT=Production`（已內建在 `web.config`）會讓 ASP.NET Core 自動載入
-`appsettings.Production.json`，疊加在成品裡 `appsettings.json` 的開發預設值之上。這個檔案
-**不在發佈成品裡**，重新部署解壓新版本時不會被覆蓋——設定天然存活於重佈之間，不需要每次
-重新填一次。
+`appsettings.Production.json`；帶模式後綴的那份（`appsettings.Production.<模式>.json`）由程式
+自己找出來載入，疊在它與成品裡 `appsettings.json` 之上。這些檔案**不在發佈成品裡**，重新部署
+解壓新版本時不會被覆蓋——設定天然存活於重佈之間，不需要每次重新填一次。
+
+### 角色從哪裡來：檔名後綴與 `Deployment:Mode`
+
+站台目錄下**恰好一份** `appsettings.Production.<模式>.json` 時，模式取自檔名後綴，設定檔內
+不需要再寫 `Deployment:Mode`。規則：
+
+| 站台目錄的情況 | 結果 |
+|---|---|
+| 恰好一份後綴檔 | 載入它（優先權高於 `appsettings.json` 與 `appsettings.Production.json`），模式＝後綴 |
+| 後綴檔內另外寫了 `Deployment:Mode` 且與後綴不一致 | **擋啟動**，錯誤訊息列出兩個值 |
+| 兩份以上後綴檔 | **擋啟動**，錯誤訊息列出找到的檔名 |
+| 一份都沒有 | 走 `appsettings.Production.json` ＋ `Deployment:Mode`（既有部署不受影響） |
+
+合法後綴是 `AllInOne`／`Edge`／`Core`／`Viewer`／`EdgeProxy` 五個（不分大小寫）。舊名
+`Full`／`Line`／`Db` 只在 `Deployment:Mode` 鍵上相容，**不能當檔名後綴**；後綴位置寫其他字串
+（例如 `appsettings.Production.Backup.json`）會被當成一般檔案忽略，不擋啟動也不會被載入。
 
 > `Deployment:Mode` 的合法值是 `AllInOne`／`Edge`／`Core`／`Viewer`／`EdgeProxy`；升級前的舊部署若還在用
 > `Full`／`Line`／`Db`，不用急著改，程式會自動接受並在 log 記一則提醒，但新部署一律用新名稱。
@@ -434,11 +451,12 @@ curl -i -H "Authorization: Bearer <KEY>" https://既有網域/MSLine/line/api/v2
 回 200 並帶 bot 資訊就是整條鏈通了。回 403 表示 `EdgeProxy:AllowedClientIps` 沒把 Edge 的 IP
 放進去；回 502 表示 proxy 連不到 LINE。
 
-### E1e. Edge 設定頁（免重啟改設定）
+### E1e. Edge 設定頁（免重啟改設定、連線測試、錯誤排查）
 
-Edge 提供一個極簡設定頁 `/edge-admin`，可以在不重啟站台的情況下改幾個常動的設定，
-存檔後**立即生效**。設定值以 DPAPI（機器層級）加密後存在 `Db\edge-settings.dat`，
-優先權高於 `appsettings.json`。
+Edge 提供一個極簡設定頁 `/edge-admin`，分三個分頁：**設定**、**連線測試**、**錯誤排查**。
+
+**設定**分頁可以在不重啟站台的情況下改幾個常動的設定，存檔後**立即生效**。設定值以
+DPAPI（機器層級）加密後存在 `Db\edge-settings.dat`，優先權高於 `appsettings.json`。
 
 **開啟方式**：在 `appsettings.Production.json` 加白名單（**這個鍵只能放在這裡**）：
 
@@ -468,6 +486,31 @@ Ingest 允許來源 IP、Webhook 來源限制（模式與允許 IP）。
 
 也因此，`appsettings` 裡的機密值與目前實際生效的值不一致是正常狀態：
 盤點設定時以設定頁顯示的末四碼為準，不要以 `appsettings` 的內容為準。
+
+#### 連線測試分頁
+
+對 LINE 官方的 `v2/bot/info` 發一次請求，驗證憑證與整條 outbound 路徑。兩個按鈕：
+
+- **測試目前生效的 Token**：用這台主機現在生效的 `Line:ChannelAccessToken`。
+- **用這個 Token 測試（不儲存）**：填一把候選 token 先驗證再決定要不要存；這條路徑
+  **不會寫入加密檔**。
+
+結果會標明「經由」：`Direct`（Edge 自己連 LINE）或 `EdgeProxy(<BaseUrl>)`
+（`Line:OutboundVia=EdgeProxy` 時，等同於一次跑完 E1d 那條 curl 的整條鏈）。
+`Line:OutboundHere` 推導為 false 的主機沒有 LINE outbound，這個分頁只顯示說明、沒有按鈕。
+
+#### 錯誤排查分頁
+
+三個區塊，開啟頁面當下取得，不會自動更新（重新整理即重取）：
+
+1. **本機最近錯誤**：這個行程記憶體裡最近 200 則 Warning 以上的記錄（時間／等級／分類／
+   訊息／例外摘要）。重啟站台即清空。
+2. **今日 log 檔尾**：`logs\messageservice-<今天>.log` 的最後 100 行。要翻更早的記錄仍是
+   直接看該目錄下的檔案（保留 30 天）。
+3. **EdgeProxy 端錯誤**：`Line:OutboundVia=EdgeProxy` 時，向 proxy 的
+   `GET /proxy-admin/errors` 取它那台的同一份緩衝（受 `EdgeProxy:AllowedClientIps`
+   保護，不需要金鑰）。proxy 連不上時這裡只會顯示連不上的原因——那種情況表示問題可能
+   出在 proxy 站台本身，直接去該主機的 `logs\` 目錄看。
 
 **多工作處理程序**：設定檔有檔案監看，同一台上的其他 worker process 寫入後也會熱生效
 （IIS 重疊回收期間新舊行程並存時同樣適用）。Edge 的負載很輕，仍建議把應用程式集區的

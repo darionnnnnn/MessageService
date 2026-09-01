@@ -17,8 +17,9 @@
 | `appsettings.Production.Viewer.json` | 三台拓撲、或兩台拓撲切法 A：Viewer | 純檢視端，不收 webhook、不開 ingest API（見 `docs/DEPLOYMENT-MODES.md` 的兩台拓撲兩種切法） |
 | `appsettings.Production.EdgeProxy.json` | Edge 沒有合法 HTTPS 憑證時 | 借用既有憑證的對外伺服器，只把 webhook 原封轉發給 Edge（見 `docs/DEPLOYMENT-GUIDE.md` 的 Part E1c） |
 
-複製樣板、改名成 `appsettings.Production.json`、填機密的完整步驟（含三台拓撲時 Core 端
-要加的 `Viewer:Enabled=false` override）見 `docs/DEPLOYMENT-GUIDE.md` 的 Part C，
+複製樣板時**檔名原樣保留**：啟動時依 `appsettings.Production.<模式>.json` 的後綴判別角色，
+站台目錄下只能有一份。填機密的完整步驟（含三台拓撲時 Core 端要加的 `Viewer:Enabled=false`
+override）與後綴／`Deployment:Mode` 的共存規則見 `docs/DEPLOYMENT-GUIDE.md` 的 Part C，
 這裡不重複寫一份——兩處各寫一份日後會失同步。
 
 這些檔案帶 `//` 註解是刻意的——.NET 的設定載入器（`JsonCommentHandling.Skip`）支援帶註解的

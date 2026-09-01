@@ -40,7 +40,9 @@ raw body 算的 HMAC，任何反序列化再序列化都會讓 Edge 驗簽失敗
 
 其他一切它都不做：不碰資料庫、不緩衝、不落地、不重試、不驗簽、不持有任何金鑰。
 除了兩支健康檢查探針（`/healthz` 與 `/healthz/ready`，後者在沒有資料庫的模式一律回 200）
-之外，所有路徑都回 404。Edge 不可達時回 502，由 LINE 的 redelivery 重送
+與唯讀的 `GET /proxy-admin/errors`（回傳這台記憶體裡最近 200 則 Warning 以上的記錄，
+受 `EdgeProxy:AllowedClientIps` 保護、不需要金鑰，供 Edge 的設定頁拉取顯示）之外，
+所有路徑都回 404。Edge 不可達時回 502，由 LINE 的 redelivery 重送
 （Edge 端 outbox 與落地端的唯一索引保證重送安全）。
 
 ### 三種拓撲組合
@@ -90,7 +92,11 @@ Edge 與 EdgeProxy 的關係由兩個設定決定，可以組出三種環境：
 `OutboundHere=true`（例如 Core 端自己也連得到 LINE），但實務上通常只有一台需要。
 
 `AllInOne` 就是最初的單機行為：收 webhook、寫本機 outbox、由背景服務排空並直接寫進資料庫。
-沒有設定 `Deployment:Mode` 就是這個模式。
+沒有設定 `Deployment:Mode`、站台目錄下也沒有模式後綴設定檔時，就是這個模式。
+
+角色有兩個來源：站台目錄下的 `appsettings.Production.<模式>.json` 檔名後綴，或
+`Deployment:Mode` 設定鍵。兩者共存的完整規則（含衝突擋啟動的兩種情況）見
+[DEPLOYMENT-GUIDE.md](DEPLOYMENT-GUIDE.md) Part C。
 
 三種拓撲怎麼組合：
 
@@ -111,7 +117,7 @@ Edge 與 EdgeProxy 的關係由兩個設定決定，可以組出三種環境：
 
 推導邏輯全部收斂在 `MessageService.Services.DeploymentCapabilities.Derive`
 （`ReceivesWebhook`／`HasDatabaseAccess`／`IngestApiEnabled`／`ViewerEnabled`／`OutboundHere`／
-`RunsRetention` 六個布林），`Program.cs` 與 `DeploymentModeConvention` 都只吃這個推導結果，
+`RunsRetention`／`EdgePullApiEnabled` 七個布林），`Program.cs` 與 `DeploymentModeConvention` 都只吃這個推導結果，
 不會出現「改一處模式判斷、忘了改另一處」的分裂。
 
 ## 設定鍵升級對照
