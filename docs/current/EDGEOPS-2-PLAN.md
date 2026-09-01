@@ -1,6 +1,6 @@
 # EDGEOPS-2 第 1 輪規劃：edge-admin 子應用路徑修正＋連線診斷補網址與 IP
 
-> 狀態：實作完成，待體檢
+> 狀態：全案完成已併 dev
 > 基準：dev@f033138（1228 綠）→ feature/edgeops-2@9e405bb（1257 綠）
 > 來源：使用者實測回饋——(1) IIS 子 application 部署下 edge 設定頁測試功能 404；(2) LINE outbound 錯誤紀錄缺目標網址與 IP，難以跟網管核對防火牆開通。
 
@@ -206,3 +206,32 @@
 - `EdgeSettingsHotReloadTests` 的偶發失敗（既有問題，見上節）。
 - `OutboundFailureClassifier` 對 401／403／404／429 不帶 host 的既有設計。
 - 內部通道（webhook／心跳／outbox）不解析 IP——這是使用者本輪的明確定案。
+
+## 體檢輪（claude-fable-5）
+
+對 `dev..feature/edgeops-2` 全 diff 依「規劃比對／獵 bug／終檢後手改／架構契合／測試」五角度掃過：
+
+- **規劃比對**：四批次「改動」逐條有對應 diff；「明確不做」四項皆未混入；三項計畫外落差
+  （pathBase HTML 逸出、冗餘三元收斂、Classify 401/403/404/429 不帶 host 之既有設計確認）
+  已記於「與規劃的落差」節，均屬一致性修正非擴張。
+- **獵 bug 重點核實**：
+  1. `EdgeProxyForwarderMiddleware` 把 `CreateClient` 從 try 內搬到 try 外——具名 client 的
+     設定委派在 `CreateClient` 時執行、且該註冊在 `TargetBaseUrl` 缺值時刻意拋例外。核對
+     註冊處註解（「寧可在異常路徑丟例外」，fallback 會自我遞迴）與 `DeploymentValidator`
+     啟動守門後判定：非 bug，行為符合該處既有設計意圖。連帶確認新增的
+     「未設定 EdgeProxy 目標位址」分支實際不可達，屬無害防禦。
+  2. 交接節疑慮 1（`requestUrl` 組法）：邏輯核對正確——絕對 URI 直用；相對 URI 由
+     BaseAddress 組合（直連＝呼叫端補的 LINE 網域、EdgeProxy＝註冊層的 proxy 位址）。
+     測試替身預設 BaseAddress 導致網域部分未被單元測試涵蓋的缺口屬實，留待實測確認。
+  3. 交接節疑慮 2～5 逐項核過：快取無上限可接受（host 固定少數）、`CancellationToken.None`
+     有 2 秒內部逾時保底、pathBase 端點層級僅驗空值屬測試主機限制、批次 D 測試斷言
+     驗到含子應用路徑的真實 URL（非替身假值）。
+  4. 簽章變更的呼叫點全跟上：`Render`／`RenderConnectionTab`／`LineConnectivityTester`
+     建構子／`evaluateResponse` delegate 全 repo grep 無漏網。
+- **架構契合**：`IDnsLookup` 縫隙有測試需求支撐；`FormatTarget` 收斂了組字；心跳與 outbox
+  各算各的目標描述是規劃明訂（空值文案不同）；無單一呼叫者的多餘抽象。
+- **測試**：以實作輪收官記錄為準（1257 綠，基線 1228 → 1257）；體檢輪未改程式碼，
+  全量重跑於併 dev 後執行（見終檢輪）。
+
+體檢結論：**無需修正**。文件普查同步三處：`CLAUDE.md`（基線 1257+、新增「不要寫死根路徑」
+地雷）、`DEPLOYMENT-GUIDE.md`（連線測試表格新欄與失敗寫 log）、`README.md`（測試涵蓋清單）。
