@@ -116,7 +116,7 @@ public static class EdgeAdminEndpoints
             store.Save(updated);
 
             // PRG (Post-Redirect-Get)
-            return Results.Redirect("/edge-admin?saved=true", permanent: false, preserveMethod: false);
+            return Results.Redirect($"{context.Request.PathBase}/edge-admin?saved=true", permanent: false, preserveMethod: false);
         });
     }
 
@@ -178,7 +178,7 @@ public static class EdgeAdminEndpoints
     {
         context.Response.Headers.CacheControl = "no-store, no-cache, must-revalidate";
         context.Response.Headers.Pragma = "no-cache";
-        return Results.Content(EdgeAdminPage.Render(model), "text/html; charset=utf-8");
+        return Results.Content(EdgeAdminPage.Render(model, context.Request.PathBase.Value ?? ""), "text/html; charset=utf-8");
     }
 
     /// <summary>GET 與連線測試 POST 都要渲染同一張頁面，檢視模型的組法只寫這一份。</summary>
