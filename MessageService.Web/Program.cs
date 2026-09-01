@@ -1,6 +1,7 @@
 using MessageService.Options;
 using MessageService.Services;
 using MessageService.Web.Configuration;
+using MessageService.Web.Diagnostics;
 using MessageService.Web.Startup;
 using NLog.Web;
 
@@ -55,6 +56,14 @@ if (suffixResult.Status == DeploymentModeFileLocatorStatus.Found)
     deploymentOptions.Mode = suffixResult.Mode!.Value;
 }
 var deploymentMode = deploymentOptions.Mode;
+
+// 記憶體環形緩衝：僅 Edge 與 EdgeProxy 模式註冊，保留最近的警告與錯誤記錄供日後檢視
+if (deploymentMode is DeploymentMode.Edge or DeploymentMode.EdgeProxy)
+{
+    var logRingBuffer = new LogRingBuffer();
+    builder.Services.AddSingleton(logRingBuffer);
+    builder.Logging.AddProvider(new RingBufferLoggerProvider(logRingBuffer));
+}
 
 // DeploymentMode.Full/Line/Db 是舊名，跟新名稱共用底層數值——.NET 設定綁定本身就能接受舊名
 // （Enum.TryParse 認名稱、不認底層值），這裡另外偵測「用的是舊名」純粹是為了記一行提醒用的
