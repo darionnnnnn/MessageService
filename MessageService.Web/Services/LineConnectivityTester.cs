@@ -2,6 +2,7 @@ using System.Net.Http.Headers;
 using System.Text.Json;
 using MessageService.Options;
 using MessageService.Services;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
 namespace MessageService.Web.Services;
@@ -17,12 +18,22 @@ public record LineConnectivityTestResult(
     string Via,
     /// <summary>這一列的判準是不是「2xx 才算成功」（名稱查詢那列）。false 代表判準是
     /// 「連得到就好」，顯示文字要用「可達／不可達」而不是「成功／失敗」。</summary>
-    bool StrictSuccess = false);
+    bool StrictSuccess = false,
+    /// <summary>這次實際送出的絕對網址。走 EdgeProxy 時是 proxy 的網址，不是 LINE 的——
+    /// 網管要開通的是這一個。</summary>
+    string RequestUrl = "",
+    /// <summary>Target 解析到的 IP，解析不出來為 null。防火牆規則對的是 IP，
+    /// 只給網域名稱沒辦法直接核對。</summary>
+    string? ResolvedIp = null);
 
 /// <summary>
 /// 提供 Edge 設定頁測試 LINE 四個網域 outbound 連通性與憑證有效性。
 /// </summary>
-public class LineConnectivityTester(IHttpClientFactory httpClientFactory, IOptionsMonitor<LineOptions> monitor)
+public class LineConnectivityTester(
+    IHttpClientFactory httpClientFactory,
+    IOptionsMonitor<LineOptions> monitor,
+    OutboundTargetResolver targetResolver,
+    ILogger<LineConnectivityTester> logger)
 {
     private string DetermineVia()
     {
@@ -55,7 +66,7 @@ public class LineConnectivityTester(IHttpClientFactory httpClientFactory, IOptio
             requestUri: "v2/bot/info",
             overrideToken: overrideToken,
             strictSuccess: true,
-            evaluateResponse: async (response, ct) =>
+            evaluateResponse: async (response, target, ct) =>
             {
                 if (response.IsSuccessStatusCode)
                 {
@@ -84,7 +95,7 @@ public class LineConnectivityTester(IHttpClientFactory httpClientFactory, IOptio
                 }
 
                 var ex = new HttpRequestException($"HTTP {(int)response.StatusCode}", null, response.StatusCode);
-                return (false, OutboundFailureClassifier.Classify(ex, null));
+                return (false, OutboundFailureClassifier.Classify(ex, target));
             },
             via: via,
             cancellationToken: cancellationToken);
@@ -142,7 +153,7 @@ public class LineConnectivityTester(IHttpClientFactory httpClientFactory, IOptio
     /// TCP/TLS 通了，404／401 都算通。**但 403 與 502／503／504 例外**——那是「鏈路被擋住」
     /// 的回應（proxy 的白名單擋掉、或 proxy 連不到 LINE），報成可達就等於把斷掉的鏈報成通的。</summary>
     private static Task<(bool Success, string Description)> ReachableOnAnyResponse(
-        HttpResponseMessage response, CancellationToken cancellationToken)
+        HttpResponseMessage response, string target, CancellationToken cancellationToken)
     {
         var code = (int)response.StatusCode;
         var status = $"HTTP {code} {response.ReasonPhrase}".Trim();
@@ -150,7 +161,7 @@ public class LineConnectivityTester(IHttpClientFactory httpClientFactory, IOptio
         if (code is 403 or 502 or 503 or 504)
         {
             var ex = new HttpRequestException(status, null, response.StatusCode);
-            return Task.FromResult((false, $"{status}——{OutboundFailureClassifier.Classify(ex, null)}"));
+            return Task.FromResult((false, $"{status}——{OutboundFailureClassifier.Classify(ex, target)}"));
         }
 
         return Task.FromResult((true, $"可達（{status}）"));
@@ -163,7 +174,7 @@ public class LineConnectivityTester(IHttpClientFactory httpClientFactory, IOptio
         Uri? defaultBaseAddress,
         string requestUri,
         string? overrideToken,
-        Func<HttpResponseMessage, CancellationToken, Task<(bool Success, string Description)>> evaluateResponse,
+        Func<HttpResponseMessage, string, CancellationToken, Task<(bool Success, string Description)>> evaluateResponse,
         string via,
         CancellationToken cancellationToken,
         bool strictSuccess = false,
@@ -174,6 +185,36 @@ public class LineConnectivityTester(IHttpClientFactory httpClientFactory, IOptio
         // 走 EdgeProxy 時實際連的是 proxy，不是 LINE 的網域——顯示 LINE 的 host 會讓人
         // 去開錯誤的防火牆洞（runtime log 也是用同一個推導）
         var target = HttpBaseAddress.ResolveOutboundHost(options, directHost);
+
+        // 這張表是拿去跟網管核對防火牆的，成功列也要有 IP：規則要開的是 IP，不是網域名稱。
+        // 解析失敗不影響連線測試本身的判定，只讓 IP 欄位空著
+        var resolvedIp = await targetResolver.ResolveAsync(target, cancellationToken);
+
+        // 相對位址要等 BaseAddress 補好才組得出絕對網址；失敗路徑也要顯示，所以在 try 外面宣告
+        var requestUrl = requestUri;
+
+        LineConnectivityTestResult Build(bool success, string description)
+        {
+            var result = new LineConnectivityTestResult(
+                Purpose: purpose,
+                Target: target,
+                Success: success,
+                Description: description,
+                Via: via,
+                StrictSuccess: strictSuccess,
+                RequestUrl: requestUrl,
+                ResolvedIp: resolvedIp);
+
+            // 沒開著頁面時也要留得下紀錄，網管事後才查得到是哪個網址／IP 不通
+            if (!success)
+            {
+                logger.LogWarning(
+                    "LINE 連線測試失敗：{Purpose} 目標 {Target}（IP：{ResolvedIp}）網址 {RequestUrl}——{Description}",
+                    purpose, target, resolvedIp ?? "解析失敗", requestUrl, description);
+            }
+
+            return result;
+        }
 
         try
         {
@@ -189,13 +230,7 @@ public class LineConnectivityTester(IHttpClientFactory httpClientFactory, IOptio
 
             if (missingProxyRoute)
             {
-                return new LineConnectivityTestResult(
-                    Purpose: purpose,
-                    Target: target,
-                    Success: false,
-                    Description: "設定為經由 EdgeProxy，但這條路徑沒有 proxy 位址（多半是 Line:OutboundProxyBaseUrl 為空）",
-                    Via: via,
-                    StrictSuccess: strictSuccess);
+                return Build(false, "設定為經由 EdgeProxy，但這條路徑沒有 proxy 位址（多半是 Line:OutboundProxyBaseUrl 為空）");
             }
 
             if (client.BaseAddress is null && defaultBaseAddress is not null)
@@ -203,6 +238,12 @@ public class LineConnectivityTester(IHttpClientFactory httpClientFactory, IOptio
                 // 直連拓撲：具名 client 本來就不設 BaseAddress，由呼叫端補
                 client.BaseAddress = defaultBaseAddress;
             }
+
+            requestUrl = Uri.TryCreate(requestUri, UriKind.Absolute, out var absoluteUri)
+                ? absoluteUri.ToString()
+                : client.BaseAddress is not null
+                    ? new Uri(client.BaseAddress, requestUri).ToString()
+                    : requestUri;
 
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             cts.CancelAfter(TimeSpan.FromSeconds(10));
@@ -214,26 +255,13 @@ public class LineConnectivityTester(IHttpClientFactory httpClientFactory, IOptio
             }
 
             using var response = await client.SendAsync(request, cts.Token);
-            var (success, description) = await evaluateResponse(response, cts.Token);
+            var (success, description) = await evaluateResponse(response, target, cts.Token);
 
-            return new LineConnectivityTestResult(
-                Purpose: purpose,
-                Target: target,
-                Success: success,
-                Description: description,
-                Via: via,
-                StrictSuccess: strictSuccess);
+            return Build(success, description);
         }
         catch (Exception ex)
         {
-            var errorMsg = OutboundFailureClassifier.Classify(ex, target);
-            return new LineConnectivityTestResult(
-                Purpose: purpose,
-                Target: target,
-                Success: false,
-                Description: errorMsg,
-                Via: via,
-                StrictSuccess: strictSuccess);
+            return Build(false, OutboundFailureClassifier.Classify(ex, target));
         }
     }
 }

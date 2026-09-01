@@ -599,5 +599,72 @@ public class EdgeAdminPageTests
         Assert.Contains("action=\"/edge-admin/test-line\"", html);
         Assert.Contains("action=\"/edge-admin\"", html);
     }
-}
 
+    [Fact]
+    public void RenderConnectionTestResultsTable_ShowsRequestUrlAndResolvedIp()
+    {
+        // 這兩欄是拿去跟網管核對防火牆的：要開的是這個網址與這個 IP
+        var results = new[]
+        {
+            new MessageService.Web.Services.LineConnectivityTestResult(
+                Purpose: "名稱查詢",
+                Target: "api.line.me",
+                Success: true,
+                Description: "bot",
+                Via: "Direct",
+                StrictSuccess: true,
+                RequestUrl: "https://api.line.me/v2/bot/info",
+                ResolvedIp: "203.0.113.10")
+        };
+
+        var html = EdgeAdminPage.RenderConnectionTestResultsTable(results);
+
+        Assert.Contains("<th>請求網址</th>", html);
+        Assert.Contains("<th>IP</th>", html);
+        Assert.Contains("https://api.line.me/v2/bot/info", html);
+        Assert.Contains("203.0.113.10", html);
+    }
+
+    [Fact]
+    public void RenderConnectionTestResultsTable_NoResolvedIp_ShowsResolutionFailed()
+    {
+        var results = new[]
+        {
+            new MessageService.Web.Services.LineConnectivityTestResult(
+                Purpose: "名稱查詢",
+                Target: "api.line.me",
+                Success: false,
+                Description: "連線逾時",
+                Via: "Direct",
+                StrictSuccess: true,
+                RequestUrl: "https://api.line.me/v2/bot/info",
+                ResolvedIp: null)
+        };
+
+        var html = EdgeAdminPage.RenderConnectionTestResultsTable(results);
+
+        Assert.Contains("解析失敗", html);
+    }
+
+    [Fact]
+    public void RenderConnectionTestResultsTable_EscapesRequestUrlAndIp()
+    {
+        var results = new[]
+        {
+            new MessageService.Web.Services.LineConnectivityTestResult(
+                Purpose: "名稱查詢",
+                Target: "api.line.me",
+                Success: false,
+                Description: "失敗",
+                Via: "Direct",
+                StrictSuccess: true,
+                RequestUrl: "https://api.line.me/<script>x</script>",
+                ResolvedIp: "<script>y</script>")
+        };
+
+        var html = EdgeAdminPage.RenderConnectionTestResultsTable(results);
+
+        Assert.DoesNotContain("<script>", html);
+        Assert.Contains("&lt;script&gt;", html);
+    }
+}

@@ -207,6 +207,8 @@ public static class EdgeAdminPage
             <tr>
                 <th>用途</th>
                 <th>目標</th>
+                <th>請求網址</th>
+                <th>IP</th>
                 <th>結果</th>
                 <th>說明</th>
                 <th>經由</th>
@@ -221,6 +223,11 @@ public static class EdgeAdminPage
             var targetEncoded = WebUtility.HtmlEncode(item.Target);
             var viaEncoded = WebUtility.HtmlEncode(item.Via);
             var descEncoded = WebUtility.HtmlEncode(item.Description);
+            // 這兩欄是拿去跟網管核對防火牆的：要開的是這個網址與這個 IP
+            var requestUrlEncoded = WebUtility.HtmlEncode(item.RequestUrl);
+            var resolvedIpEncoded = string.IsNullOrEmpty(item.ResolvedIp)
+                ? "解析失敗"
+                : WebUtility.HtmlEncode(item.ResolvedIp);
 
             var resultText = item.Success
                 ? (item.StrictSuccess ? "成功" : "可達")
@@ -232,6 +239,8 @@ public static class EdgeAdminPage
             <tr>
                 <td>{purposeEncoded}</td>
                 <td>{targetEncoded}</td>
+                <td class="col-message">{requestUrlEncoded}</td>
+                <td>{resolvedIpEncoded}</td>
                 <td><span class="badge {badgeClass}">{resultText}</span></td>
                 <td>{descEncoded}</td>
                 <td>{viaEncoded}</td>

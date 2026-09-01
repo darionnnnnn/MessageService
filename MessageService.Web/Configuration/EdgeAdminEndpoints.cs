@@ -47,7 +47,9 @@ public static class EdgeAdminEndpoints
             IHttpClientFactory httpClientFactory,
             IOptionsMonitor<LineOptions> lineOptionsMonitor,
             DeploymentCapabilities capabilities,
-            LogRingBuffer ringBuffer) =>
+            LogRingBuffer ringBuffer,
+            OutboundTargetResolver targetResolver,
+            ILogger<LineConnectivityTester> testerLogger) =>
         {
             // OutboundHere=false 的主機根本沒有 LINE 具名 client，直接渲染頁面上的說明即可
             IReadOnlyList<LineConnectivityTestResult>? testResults = null;
@@ -57,7 +59,8 @@ public static class EdgeAdminEndpoints
                 var overrideToken = form["overrideToken"].ToString();
                 var tokenToUse = string.IsNullOrWhiteSpace(overrideToken) ? null : overrideToken.Trim();
 
-                var tester = new LineConnectivityTester(httpClientFactory, lineOptionsMonitor);
+                var tester = new LineConnectivityTester(
+                    httpClientFactory, lineOptionsMonitor, targetResolver, testerLogger);
                 testResults = await tester.TestConnectivityAsync(tokenToUse, context.RequestAborted);
             }
 
