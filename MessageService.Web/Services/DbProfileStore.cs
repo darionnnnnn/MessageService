@@ -24,7 +24,8 @@ public class DbProfileStore(MessageDbContext dbContext, FieldCipher cipher, ILog
             })
             .FirstOrDefaultAsync(cancellationToken);
 
-        var groupStale = group is null || IsStale(group.UpdatedAt, group.PictureUrl, group.HasPicture, cutoff);
+        var groupStale = group is null
+            || IsStale(group.UpdatedAt, group.PictureUrl, group.PictureFetchedUrl, group.HasPicture, cutoff);
         var groupFetchedUrl = group?.PictureFetchedUrl;
         var hasGroupPicture = group?.HasPicture ?? false;
 
@@ -44,12 +45,21 @@ public class DbProfileStore(MessageDbContext dbContext, FieldCipher cipher, ILog
             })
             .FirstOrDefaultAsync(cancellationToken);
 
-        var memberStale = member is null || IsStale(member.UpdatedAt, member.PictureUrl, member.HasPicture, cutoff);
+        var memberStale = member is null
+            || IsStale(member.UpdatedAt, member.PictureUrl, member.PictureFetchedUrl, member.HasPicture, cutoff);
         return new ProfileStaleness(groupStale, memberStale, groupFetchedUrl, member?.PictureFetchedUrl, hasGroupPicture, member?.HasPicture ?? false);
     }
 
-    private static bool IsStale(DateTimeOffset updatedAt, string? pictureUrl, bool hasPicture, DateTimeOffset cutoff) =>
-        updatedAt < cutoff || (!string.IsNullOrWhiteSpace(pictureUrl) && !hasPicture);
+    /// <summary>除了 TTL，還要把「LINE 說有頭貼、我們卻沒有圖」算成過期——不然頭貼下載失敗後
+    /// 名稱的 UpdatedAt 已更新，這筆要等滿一整個 RefreshAfter 才會再試一次圖。
+    /// 例外是 PictureFetchedUrl 已經等於目前的網址：那代表這個網址試過而且永久拿不到
+    /// （檔案超過上限、404），再判為過期就會變成無限期的每 10 分鐘重抓。</summary>
+    private static bool IsStale(
+        DateTimeOffset updatedAt, string? pictureUrl, string? pictureFetchedUrl, bool hasPicture, DateTimeOffset cutoff) =>
+        updatedAt < cutoff
+        || (!string.IsNullOrWhiteSpace(pictureUrl)
+            && !hasPicture
+            && !string.Equals(pictureUrl, pictureFetchedUrl, StringComparison.Ordinal));
 
     public async Task UpsertGroupAsync(string groupId, GroupSummary summary, CancellationToken cancellationToken)
     {
@@ -80,6 +90,10 @@ public class DbProfileStore(MessageDbContext dbContext, FieldCipher cipher, ILog
                 entity.Picture = new GroupPicture { GroupId = groupId, Content = EncryptPictureContent(summary.PictureBytes) };
                 ApplyPictureMetadata(entity, summary.PictureUrl, summary.PictureContentType);
             }
+            else if (summary.PicturePermanentlyUnavailable)
+            {
+                entity.PictureFetchedUrl = summary.PictureUrl;
+            }
             dbContext.Groups.Add(entity);
         }
         else
@@ -94,6 +108,10 @@ public class DbProfileStore(MessageDbContext dbContext, FieldCipher cipher, ILog
                     picture,
                     await dbContext.GroupPictures.AnyAsync(p => p.GroupId == groupId, cancellationToken));
                 ApplyPictureMetadata(existing, summary.PictureUrl, summary.PictureContentType);
+            }
+            else if (summary.PicturePermanentlyUnavailable)
+            {
+                existing.PictureFetchedUrl = summary.PictureUrl;
             }
         }
 
@@ -128,6 +146,10 @@ public class DbProfileStore(MessageDbContext dbContext, FieldCipher cipher, ILog
                 entity.Picture = new GroupMemberPicture { GroupId = groupId, UserId = userId, Content = EncryptPictureContent(profile.PictureBytes) };
                 ApplyPictureMetadata(entity, profile.PictureUrl, profile.PictureContentType);
             }
+            else if (profile.PicturePermanentlyUnavailable)
+            {
+                entity.PictureFetchedUrl = profile.PictureUrl;
+            }
             dbContext.GroupMembers.Add(entity);
         }
         else
@@ -142,6 +164,10 @@ public class DbProfileStore(MessageDbContext dbContext, FieldCipher cipher, ILog
                     picture,
                     await dbContext.GroupMemberPictures.AnyAsync(p => p.GroupId == groupId && p.UserId == userId, cancellationToken));
                 ApplyPictureMetadata(existing, profile.PictureUrl, profile.PictureContentType);
+            }
+            else if (profile.PicturePermanentlyUnavailable)
+            {
+                existing.PictureFetchedUrl = profile.PictureUrl;
             }
         }
 

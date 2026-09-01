@@ -174,7 +174,8 @@ public static class DeploymentValidator
                 "Line:OutboundHere=false，否則兩台會重複下載同一批媒體內容。", mode);
         }
 
-        if (!capabilities.OutboundHere)
+        // AllInOne 沒有「其他主機」可言，那個情況由下面那則 Warning 負責講
+        if (!capabilities.OutboundHere && mode is not DeploymentMode.AllInOne)
         {
             logger.LogInformation(
                 "此主機不做 LINE outbound（Line:OutboundHere=false 或依部署模式推導），媒體下載與頭貼刷新由其他主機負責。");

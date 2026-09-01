@@ -10,8 +10,12 @@ namespace MessageService.Web.Services;
 /// </summary>
 public class LineAuthorizationHandler(
     IOptionsMonitor<LineOptions> monitor,
-    ILogger<LineAuthorizationHandler> logger) : DelegatingHandler
+    ILogger<LineAuthorizationHandler> logger,
+    TimeProvider timeProvider) : DelegatingHandler
 {
+    // 節流狀態是實例欄位而非靜態：HttpClientFactory 預設每 2 分鐘輪替 handler chain，
+    // 這代表最壞情況下警告會比 10 分鐘密——但靜態欄位會讓測試互相污染，且這則警告本來就是
+    // 「設定漏填」的提示，多幾則不會淹掉 log
     private readonly object _syncLock = new();
     private DateTimeOffset? _lastWarningAt;
     private static readonly TimeSpan LogInterval = TimeSpan.FromMinutes(10);
@@ -38,7 +42,7 @@ public class LineAuthorizationHandler(
     {
         lock (_syncLock)
         {
-            var now = DateTimeOffset.UtcNow;
+            var now = timeProvider.GetUtcNow();
             if (_lastWarningAt is not { } last || now - last >= LogInterval)
             {
                 _lastWarningAt = now;

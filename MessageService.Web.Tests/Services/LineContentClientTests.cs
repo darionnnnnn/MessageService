@@ -17,12 +17,13 @@ public class LineContentClientTests
         handler = new FakeHttpMessageHandler(responder);
         var authHandler = new MessageService.Web.Services.LineAuthorizationHandler(
             new FakeOptionsMonitor<LineOptions>(new LineOptions { ChannelAccessToken = "test-token" }),
-            NullLogger<MessageService.Web.Services.LineAuthorizationHandler>.Instance)
+            NullLogger<MessageService.Web.Services.LineAuthorizationHandler>.Instance,
+            TimeProvider.System)
         {
             InnerHandler = handler
         };
         var factory = new FakeHttpClientFactory(authHandler);
-        return new LineContentClient(factory, OptionsFactoryCreate(new LineOptions { ChannelAccessToken = "test-token" }));
+        return new LineContentClient(factory);
     }
 
     private static IOptions<LineOptions> OptionsFactoryCreate(LineOptions options) =>

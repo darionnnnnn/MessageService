@@ -1,5 +1,6 @@
 using System.Net.Http.Headers;
 using MessageService.Options;
+using MessageService.Services;
 using Microsoft.AspNetCore.Http.Features;
 
 namespace MessageService.Web.Middleware;
@@ -142,7 +143,8 @@ public class EdgeProxyForwarderMiddleware(
             {
                 _lastFailureLogAt = now;
                 logger.LogWarning(ex,
-                    "轉發 webhook 至 Edge 失敗；這則告警（含時好時壞的情況）每 10 分鐘最多記一次。");
+                    "轉發 webhook 至 Edge 失敗：{FailureReason}；這則告警（含時好時壞的情況）每 10 分鐘最多記一次。",
+                    OutboundFailureClassifier.Classify(ex));
             }
         }
     }

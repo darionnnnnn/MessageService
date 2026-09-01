@@ -648,4 +648,102 @@ public class DbProfileStoreTests : IDisposable
         Assert.False(staleness.GroupStale);
         Assert.False(staleness.MemberStale);
     }
+
+    [Fact]
+    public async Task GetStalenessAsync_Group_PictureUrlAlreadyTriedAndUnavailable_IsNotStale()
+    {
+        // PictureFetchedUrl 等於目前的 PictureUrl 代表「這個網址試過而且永久拿不到」
+        // （檔案超過上限、404）——再判為過期就會變成無限期的每 10 分鐘重抓
+        var store = new DbProfileStore(_dbContext, CreateCipher(false), NullLogger<DbProfileStore>.Instance);
+
+        _dbContext.Groups.Add(new Group
+        {
+            GroupId = "g1",
+            GroupName = "Group 1",
+            PictureUrl = "https://example.com/too-big.png",
+            PictureFetchedUrl = "https://example.com/too-big.png",
+            UpdatedAt = DateTimeOffset.UtcNow
+        });
+        await _dbContext.SaveChangesAsync();
+        _dbContext.ChangeTracker.Clear();
+
+        var staleness = await store.GetStalenessAsync("g1", null, DateTimeOffset.UtcNow.AddMinutes(-5), CancellationToken.None);
+
+        Assert.False(staleness.GroupStale);
+    }
+
+    [Fact]
+    public async Task GetStalenessAsync_Group_PictureUrlChangedAfterPermanentFailure_IsStaleAgain()
+    {
+        // 換了一張新頭貼就要重新試——「試過了」只對當時那個網址成立
+        var store = new DbProfileStore(_dbContext, CreateCipher(false), NullLogger<DbProfileStore>.Instance);
+
+        _dbContext.Groups.Add(new Group
+        {
+            GroupId = "g1",
+            GroupName = "Group 1",
+            PictureUrl = "https://example.com/new.png",
+            PictureFetchedUrl = "https://example.com/old-too-big.png",
+            UpdatedAt = DateTimeOffset.UtcNow
+        });
+        await _dbContext.SaveChangesAsync();
+        _dbContext.ChangeTracker.Clear();
+
+        var staleness = await store.GetStalenessAsync("g1", null, DateTimeOffset.UtcNow.AddMinutes(-5), CancellationToken.None);
+
+        Assert.True(staleness.GroupStale);
+    }
+
+    [Fact]
+    public async Task UpsertGroupAsync_PicturePermanentlyUnavailable_StampsFetchedUrlSoItStopsRetrying()
+    {
+        var store = new DbProfileStore(_dbContext, CreateCipher(false), NullLogger<DbProfileStore>.Instance);
+
+        await store.UpsertGroupAsync(
+            "g1",
+            new GroupSummary("g1", "Group 1", "https://example.com/too-big.png", PicturePermanentlyUnavailable: true),
+            CancellationToken.None);
+        _dbContext.ChangeTracker.Clear();
+
+        var group = await _dbContext.Groups.FindAsync("g1");
+        Assert.Equal("https://example.com/too-big.png", group!.PictureFetchedUrl);
+
+        var staleness = await store.GetStalenessAsync("g1", null, DateTimeOffset.UtcNow.AddMinutes(-5), CancellationToken.None);
+        Assert.False(staleness.GroupStale);
+    }
+
+    [Fact]
+    public async Task UpsertMemberAsync_PicturePermanentlyUnavailable_StampsFetchedUrlSoItStopsRetrying()
+    {
+        var store = new DbProfileStore(_dbContext, CreateCipher(false), NullLogger<DbProfileStore>.Instance);
+
+        await store.UpsertMemberAsync(
+            "g1",
+            "u1",
+            new MemberProfile("u1", "Member 1", "https://example.com/too-big.png", PicturePermanentlyUnavailable: true),
+            CancellationToken.None);
+        _dbContext.ChangeTracker.Clear();
+
+        var staleness = await store.GetStalenessAsync("g1", "u1", DateTimeOffset.UtcNow.AddMinutes(-5), CancellationToken.None);
+        Assert.False(staleness.MemberStale);
+    }
+
+    [Fact]
+    public async Task UpsertGroupAsync_TransientPictureFailure_LeavesFetchedUrlAloneSoItRetries()
+    {
+        // 暫時性失敗（防火牆不通）不能蓋掉 PictureFetchedUrl，否則修好後就不會自動補圖
+        var store = new DbProfileStore(_dbContext, CreateCipher(false), NullLogger<DbProfileStore>.Instance);
+
+        await store.UpsertGroupAsync(
+            "g1",
+            new GroupSummary("g1", "Group 1", "https://example.com/pic.png", PictureDownloadFailed: true),
+            CancellationToken.None);
+        _dbContext.ChangeTracker.Clear();
+
+        var group = await _dbContext.Groups.FindAsync("g1");
+        Assert.Null(group!.PictureFetchedUrl);
+
+        var staleness = await store.GetStalenessAsync("g1", null, DateTimeOffset.UtcNow.AddMinutes(-5), CancellationToken.None);
+        Assert.True(staleness.GroupStale);
+    }
 }

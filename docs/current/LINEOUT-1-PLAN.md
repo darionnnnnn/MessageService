@@ -122,4 +122,36 @@ log 與設定頁就能辨識問題類別**。使用者定案：四個待決全�
 | B | agy | 完成 | 1200 綠（+14） | 缺圖 stale 判定抽成共用私有方法、反例（無 PictureUrl 不觸發）有測試。手改一項：agy 讓「頭貼過大跳過」兩條路徑回報成功，配上 B1 後同一張過大的圖會每 5 分鐘被重抓一次（B1 讓它永遠 stale）——改為回報失敗走 10 分鐘冷卻，並補一筆測試釘住。 |
 | C | agy | 完成 | 1205 綠（+5） | 無落差。三個 client 的改寫決策抽成共用本地函式（未寫三份）；`LineProfileClient` 的頭貼改寫同步改吃 `IOptionsMonitor`；連線測試那句「尚未重啟站台」已改掉。熱更新雙向（Direct↔EdgeProxy）有測試。 |
 | D | agy | 完成 | 1216 綠（+11） | 四筆共用同一個 `TestTargetAsync`，判定用既有分類器。手改一項：三個「有回應即可達」的判定寫了三份逐字相同的 lambda，收斂成單一 `ReachableOnAnyResponse`。 |
-| 文件同步 | Claude | — | — | — |
+| 文件同步 | Claude | 待辦 | — | 收尾時處理 |
+| 終檢 | Explore×2 | 完成 | 1225 綠 | 見下節 |
+
+## 併回前終檢（兩個獨立 Explore：程式碼、診斷可用性）
+
+### 已修（本輪處理）
+
+| 嚴重度 | 發現 | 處置 |
+|---|---|---|
+| 高 | B1 讓「有 PictureUrl 卻沒圖」永遠 stale，但**永久性失敗**（頭貼超過 2MB 上限、404／410）也拿到跟暫時性失敗一樣的無限重試預算：每筆每 10 分鐘打一次 Profile API＋CDN，永遠不收斂，且冷卻表條目只增不減 | 分流永久／暫時：`LineProfileClient` 回傳 `PictureFetch`（Downloaded／Transient／Permanent），永久性失敗時 `DbProfileStore` 把網址寫進既有的 `PictureFetchedUrl`，staleness 的缺圖條件加上 `PictureUrl != PictureFetchedUrl`——「這個網址試過拿不到」就不再判缺圖（換新頭貼會重新試）。暫時性失敗完全不動，防火牆修好仍是 10 分鐘內自動補齊。補 7 筆測試（含「換網址要重試」與「暫時失敗不可蓋掉 FetchedUrl」） |
+| 高 | 連線測試分頁在 EdgeProxy 拓撲下把 host 顯示成 LINE 的網域，但實際連的是 proxy——與 runtime log（已用 `ResolveOutboundHost`）互相矛盾，會讓人去開錯誤的防火牆洞 | 測試器改用同一個 `HttpBaseAddress.ResolveOutboundHost` 推導顯示的 host |
+| 高 | 後三列的判準「任何 HTTP 回應＝可達」讓 proxy 回的 403（白名單沒放行）／502／504（proxy 連不到 LINE）顯示成綠色「可達」，正好把斷掉的鏈報成通的 | 403／502／503／504 改判為失敗並附分類字串，其餘狀態碼仍算可達 |
+| 中 | 頭貼那列繞過「EdgeProxy 但沒有 proxy 位址」的保護（它沒有 BaseAddress），會靜默退回直連還報成功 | 該列改以「URL 有沒有被改寫成 `/line/image/` 路徑」判斷，與其他三列同一個守門 |
+| 中 | `IsDnsError` 把 `HostUnreachable`／`NetworkUnreachable`／`HostDown` 都報成「DNS 解析失敗」——企業防火牆 DROP 封包時最常見的形狀被指向錯誤方向 | 只留 `HostNotFound`／`NameResolutionError`；新增「網路無法到達：沒有路由（防火牆 DROP 或路由設定）」一類 |
+| 中 | 分類器把任何 `TaskCanceledException` 都報成「連線逾時（防火牆很可能未開通）」，使用者中斷頁面請求也會這樣報 | 內層有 `TimeoutException` 才算逾時；純取消回「請求已取消（呼叫端中斷，不是連線問題）」 |
+| 中 | A3 的 host 推導用 `IOptions`（啟動快照），而 C 已把 client 改成熱讀——改完 proxy 設定後請求打向新 proxy、log 卻寫舊 host | 兩處改吃 `IOptionsMonitor` |
+| 中 | 分類器沒套到實測會用到的其他 outbound 失敗點 | 補上心跳（Edge→Core 最早的訊號）與 EdgeProxy 的 webhook 轉發（proxy→Edge 唯一的訊號） |
+| 中 | 節流測試是恆真形狀（把間隔改成 1 秒或無限大都仍綠），10 分鐘沒被釘住 | `LineAuthorizationHandler` 改注入 `TimeProvider`（必要相依，非可選），測試用假時鐘斷言「9 分 59 秒不記、10 分 1 秒再記」 |
+| 低 | 分類器五次重複走訪例外鏈＋規格外的 `Uri` 多載與 host 猜測分支；`EdgeAdminPage` 用中文字串 `Purpose == "名稱查詢"` 決定顯示「成功／可達」；`LineContentClient` 留著未使用的 `IOptions` 參數；AllInOne 模式下新的 Information 與既有 Warning 語意打架 | 分類器改單次走訪＋收齊訊號再產字串；結果型別加 `StrictSuccess` 旗標取代字串比對；刪死參數；Information 加 `mode is not AllInOne` 條件 |
+
+### 遞延（未做，理由）
+
+- **分類器補到 `HttpIngestSink`、`EdgePullService`、`ApiProfileStore`／`ApiContentWorkSource`**：這幾條是 Edge↔Core 的資料通道，與本輪要診斷的「LINE outbound」是不同的鏈路；心跳已經是這條鏈路最早的訊號，先看它就夠。
+- **拉取模式下 Core 端派工（`EdgePullService.BuildProfileDispatchAsync`）沒有冷卻表**：缺圖條目在 Core 眼中每輪都 stale，會白跑 staleness 查詢與派工（實際 LINE 呼叫仍被 Edge 端的 10 分鐘冷卻擋住，不是熱迴圈）。永久失敗分流後受影響範圍已大幅縮小，剩下的是「暫時失敗期間每輪多一次查詢」。
+- **`ProfileRefreshService` 的冷卻粒度**：圖失敗時整筆（含已成功的名稱）進 10 分鐘冷卻，沒有「名稱 OK／圖沒 OK」的分離粒度。
+- **B 的冷卻長度測試仍以 50ms 冒充 10 分鐘**（`ProfileRefreshService` 未注入時鐘）：能抓到「把 `RecordFailure` 換回 `Suppress`」的回歸，但釘不住長度。
+- **連線測試第 2、4 項用 `probe` 路徑**（規劃書寫的是根路徑或既有路徑）：功能等價，未改。
+
+## 體檢交接
+
+- 全量測試：**1225 綠 / 0 失敗 / 0 略過**（本輪起點 1159，共 +66）。
+- 建置 0 警告 0 錯誤；改動檔案皆無 BOM 與 NUL 汙染。
+- 文件同步（README／DEPLOYMENT-GUIDE 的排查段）尚未做，留給收尾流程。

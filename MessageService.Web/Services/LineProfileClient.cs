@@ -64,15 +64,16 @@ public class LineProfileClient : ILineProfileClient
         var root = document.RootElement;
 
         var pictureUrl = root.TryGetProperty("pictureUrl", out var picture) ? picture.GetString() : null;
-        var (bytes, contentType, downloadFailed) = await DownloadPictureAsync(pictureUrl, knownPictureUrl, hasPicture, cancellationToken);
+        var pictureFetch = await DownloadPictureAsync(pictureUrl, knownPictureUrl, hasPicture, cancellationToken);
 
         return new GroupSummary(
             root.GetProperty("groupId").GetString() ?? groupId,
             root.TryGetProperty("groupName", out var name) ? name.GetString() : null,
             pictureUrl,
-            bytes,
-            contentType,
-            downloadFailed);
+            pictureFetch.Bytes,
+            pictureFetch.ContentType,
+            pictureFetch.TransientFailure,
+            pictureFetch.PermanentlyUnavailable);
     }
 
     public async Task<MemberProfile?> GetGroupMemberProfileAsync(string groupId, string userId, string? knownPictureUrl, bool hasPicture, CancellationToken cancellationToken)
@@ -89,22 +90,34 @@ public class LineProfileClient : ILineProfileClient
         var root = document.RootElement;
 
         var pictureUrl = root.TryGetProperty("pictureUrl", out var picture) ? picture.GetString() : null;
-        var (bytes, contentType, downloadFailed) = await DownloadPictureAsync(pictureUrl, knownPictureUrl, hasPicture, cancellationToken);
+        var pictureFetch = await DownloadPictureAsync(pictureUrl, knownPictureUrl, hasPicture, cancellationToken);
 
         return new MemberProfile(
             root.GetProperty("userId").GetString() ?? userId,
             root.TryGetProperty("displayName", out var name) ? name.GetString() : null,
             pictureUrl,
-            bytes,
-            contentType,
-            downloadFailed);
+            pictureFetch.Bytes,
+            pictureFetch.ContentType,
+            pictureFetch.TransientFailure,
+            pictureFetch.PermanentlyUnavailable);
     }
     
-    private async Task<(byte[]? Bytes, string? ContentType, bool DownloadFailed)> DownloadPictureAsync(string? pictureUrl, string? knownPictureUrl, bool hasPicture, CancellationToken cancellationToken)
+    /// <summary>頭貼下載結果。暫時性與永久性失敗要分開：staleness 把「有網址卻沒有圖」
+    /// 判定為過期，永久性失敗若也走重試路徑，同一張拿不到的圖會被無限期地每 10 分鐘重抓一次。</summary>
+    private readonly record struct PictureFetch(
+        byte[]? Bytes, string? ContentType, bool TransientFailure, bool PermanentlyUnavailable)
+    {
+        public static readonly PictureFetch NotAttempted = new(null, null, false, false);
+        public static PictureFetch Downloaded(byte[] bytes, string? contentType) => new(bytes, contentType, false, false);
+        public static readonly PictureFetch Transient = new(null, null, true, false);
+        public static readonly PictureFetch Permanent = new(null, null, false, true);
+    }
+
+    private async Task<PictureFetch> DownloadPictureAsync(string? pictureUrl, string? knownPictureUrl, bool hasPicture, CancellationToken cancellationToken)
     {
         if (pictureUrl == null || (pictureUrl == knownPictureUrl && hasPicture))
         {
-            return (null, null, false);
+            return PictureFetch.NotAttempted;
         }
 
         string? requestUrl = null;
@@ -131,27 +144,29 @@ public class LineProfileClient : ILineProfileClient
             var contentLength = response.Content.Headers.ContentLength;
             if (contentLength > MaxImageSize)
             {
-                // 回報成失敗是刻意的：頭貼缺圖會讓這筆持續判定為 stale（見 DbProfileStore 的
-                // staleness 判定），回報成功只會讓同一張過大的圖每 5 分鐘被重抓一次
+                // 超過上限是永久性的：回報成暫時失敗會讓同一張過大的圖被無限期重抓
                 _logger.LogWarning("Profile picture for {PictureUrl} is too large ({Size} bytes), skipping download", pictureUrl, contentLength);
-                return (null, null, true);
+                return PictureFetch.Permanent;
             }
             
             var bytes = await response.Content.ReadAsByteArrayAsync(cancellationToken);
             if (bytes.Length > MaxImageSize)
             {
                 _logger.LogWarning("Profile picture for {PictureUrl} is too large ({Size} bytes) after reading, skipping", pictureUrl, bytes.Length);
-                return (null, null, true);
+                return PictureFetch.Permanent;
             }
             
-            return (bytes, response.Content.Headers.ContentType?.MediaType, false);
+            return PictureFetch.Downloaded(bytes, response.Content.Headers.ContentType?.MediaType);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             var targetHost = requestUrl ?? pictureUrl;
             _logger.LogWarning(ex, "Failed to download profile picture from {PictureUrl}: {FailureReason}",
                 pictureUrl, OutboundFailureClassifier.Classify(ex, targetHost));
-            return (null, null, true);
+
+            // 404／410 代表這個網址本身沒東西，重試多少次都一樣
+            var permanent = ex is HttpRequestException { StatusCode: System.Net.HttpStatusCode.NotFound or System.Net.HttpStatusCode.Gone };
+            return permanent ? PictureFetch.Permanent : PictureFetch.Transient;
         }
     }
 }

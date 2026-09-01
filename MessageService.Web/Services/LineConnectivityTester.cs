@@ -14,7 +14,10 @@ public record LineConnectivityTestResult(
     string Target,
     bool Success,
     string Description,
-    string Via);
+    string Via,
+    /// <summary>這一列的判準是不是「2xx 才算成功」（名稱查詢那列）。false 代表判準是
+    /// 「連得到就好」，顯示文字要用「可達／不可達」而不是「成功／失敗」。</summary>
+    bool StrictSuccess = false);
 
 /// <summary>
 /// 提供 Edge 設定頁測試 LINE 四個網域 outbound 連通性與憑證有效性。
@@ -46,11 +49,12 @@ public class LineConnectivityTester(IHttpClientFactory httpClientFactory, IOptio
         // 1. 名稱查詢 (api.line.me)
         var profileResult = await TestTargetAsync(
             purpose: "名稱查詢",
-            target: "api.line.me",
+            directHost: "api.line.me",
             clientName: LineProfileClient.HttpClientName,
             defaultBaseAddress: new Uri("https://api.line.me/"),
             requestUri: "v2/bot/info",
             overrideToken: overrideToken,
+            strictSuccess: true,
             evaluateResponse: async (response, ct) =>
             {
                 if (response.IsSuccessStatusCode)
@@ -79,7 +83,7 @@ public class LineConnectivityTester(IHttpClientFactory httpClientFactory, IOptio
                 }
 
                 var ex = new HttpRequestException($"HTTP {(int)response.StatusCode}", null, response.StatusCode);
-                return (false, OutboundFailureClassifier.Classify(ex, "api.line.me"));
+                return (false, OutboundFailureClassifier.Classify(ex, null));
             },
             via: via,
             cancellationToken: cancellationToken);
@@ -88,7 +92,7 @@ public class LineConnectivityTester(IHttpClientFactory httpClientFactory, IOptio
         // 2. 媒體內容 (api-data.line.me)
         var contentResult = await TestTargetAsync(
             purpose: "媒體內容",
-            target: "api-data.line.me",
+            directHost: "api-data.line.me",
             clientName: LineContentClient.HttpClientName,
             defaultBaseAddress: new Uri("https://api-data.line.me/"),
             requestUri: "probe",
@@ -101,7 +105,7 @@ public class LineConnectivityTester(IHttpClientFactory httpClientFactory, IOptio
         // 3. 貼圖 (stickershop.line-scdn.net)
         var stickerResult = await TestTargetAsync(
             purpose: "貼圖",
-            target: "stickershop.line-scdn.net",
+            directHost: "stickershop.line-scdn.net",
             clientName: LineContentClient.StickerHttpClientName,
             defaultBaseAddress: new Uri("https://stickershop.line-scdn.net/"),
             requestUri: "stickershop/v1/sticker/52002734/android/sticker.png",
@@ -119,37 +123,56 @@ public class LineConnectivityTester(IHttpClientFactory httpClientFactory, IOptio
 
         var imageResult = await TestTargetAsync(
             purpose: "頭貼 CDN",
-            target: "profile.line-scdn.net",
+            directHost: "profile.line-scdn.net",
             clientName: LineProfileClient.ImageHttpClientName,
             defaultBaseAddress: null,
             requestUri: imageTargetUrl,
             overrideToken: null,
             evaluateResponse: ReachableOnAnyResponse,
             via: via,
-            cancellationToken: cancellationToken);
+            cancellationToken: cancellationToken,
+            requiresProxyRewrite: true);
         results.Add(imageResult);
 
         return results;
     }
 
     /// <summary>公開 CDN 與 content API 這三個目標只驗「連得到」：收到任何 HTTP 回應就代表
-    /// TCP/TLS 通了（404／401 都算通），只有連不上才是防火牆問題。</summary>
+    /// TCP/TLS 通了，404／401 都算通。**但 403 與 502／503／504 例外**——那是「鏈路被擋住」
+    /// 的回應（proxy 的白名單擋掉、或 proxy 連不到 LINE），報成可達就等於把斷掉的鏈報成通的。</summary>
     private static Task<(bool Success, string Description)> ReachableOnAnyResponse(
-        HttpResponseMessage response, CancellationToken cancellationToken) =>
-        Task.FromResult((true, $"HTTP {(int)response.StatusCode} {response.ReasonPhrase}".Trim()));
+        HttpResponseMessage response, CancellationToken cancellationToken)
+    {
+        var code = (int)response.StatusCode;
+        var status = $"HTTP {code} {response.ReasonPhrase}".Trim();
+
+        if (code is 403 or 502 or 503 or 504)
+        {
+            var ex = new HttpRequestException(status, null, response.StatusCode);
+            return Task.FromResult((false, $"{status}——{OutboundFailureClassifier.Classify(ex, null)}"));
+        }
+
+        return Task.FromResult((true, $"可達（{status}）"));
+    }
 
     private async Task<LineConnectivityTestResult> TestTargetAsync(
         string purpose,
-        string target,
+        string directHost,
         string clientName,
         Uri? defaultBaseAddress,
         string requestUri,
         string? overrideToken,
         Func<HttpResponseMessage, CancellationToken, Task<(bool Success, string Description)>> evaluateResponse,
         string via,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool strictSuccess = false,
+        bool requiresProxyRewrite = false)
     {
         var options = monitor.CurrentValue;
+
+        // 走 EdgeProxy 時實際連的是 proxy，不是 LINE 的網域——顯示 LINE 的 host 會讓人
+        // 去開錯誤的防火牆洞（runtime log 也是用同一個推導）
+        var target = HttpBaseAddress.ResolveOutboundHost(options, directHost);
 
         try
         {
@@ -157,23 +180,27 @@ public class LineConnectivityTester(IHttpClientFactory httpClientFactory, IOptio
 
             // EdgeProxy 拓撲下 BaseAddress 必須已被改寫成 proxy 位址；此時補直連的 fallback
             // 會讓「proxy 沒生效」變成一次成功的直連測試，把斷掉的鏈報成通的
-            if (client.BaseAddress is null)
-            {
-                if (options.OutboundVia is LineOutboundVia.EdgeProxy && defaultBaseAddress is not null)
-                {
-                    return new LineConnectivityTestResult(
-                        Purpose: purpose,
-                        Target: target,
-                        Success: false,
-                        Description: "設定為經由 EdgeProxy，但 LINE 具名 client 沒有 proxy 位址（多半是 Line:OutboundProxyBaseUrl 為空）",
-                        Via: via);
-                }
+            // 頭貼那列沒有 BaseAddress（打絕對 URL），改用「URL 有沒有被改寫成 proxy 路徑」判斷
+            var missingProxyRoute = options.OutboundVia is LineOutboundVia.EdgeProxy
+                && (requiresProxyRewrite
+                    ? !requestUri.Contains("/line/image/", StringComparison.Ordinal)
+                    : client.BaseAddress is null && defaultBaseAddress is not null);
 
-                if (defaultBaseAddress is not null)
-                {
-                    // 直連拓撲：具名 client 本來就不設 BaseAddress，由呼叫端補
-                    client.BaseAddress = defaultBaseAddress;
-                }
+            if (missingProxyRoute)
+            {
+                return new LineConnectivityTestResult(
+                    Purpose: purpose,
+                    Target: target,
+                    Success: false,
+                    Description: "設定為經由 EdgeProxy，但這條路徑沒有 proxy 位址（多半是 Line:OutboundProxyBaseUrl 為空）",
+                    Via: via,
+                    StrictSuccess: strictSuccess);
+            }
+
+            if (client.BaseAddress is null && defaultBaseAddress is not null)
+            {
+                // 直連拓撲：具名 client 本來就不設 BaseAddress，由呼叫端補
+                client.BaseAddress = defaultBaseAddress;
             }
 
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -193,7 +220,8 @@ public class LineConnectivityTester(IHttpClientFactory httpClientFactory, IOptio
                 Target: target,
                 Success: success,
                 Description: description,
-                Via: via);
+                Via: via,
+                StrictSuccess: strictSuccess);
         }
         catch (Exception ex)
         {
@@ -203,7 +231,8 @@ public class LineConnectivityTester(IHttpClientFactory httpClientFactory, IOptio
                 Target: target,
                 Success: false,
                 Description: errorMsg,
-                Via: via);
+                Via: via,
+                StrictSuccess: strictSuccess);
         }
     }
 }

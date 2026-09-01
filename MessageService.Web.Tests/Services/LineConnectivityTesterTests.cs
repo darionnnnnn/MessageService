@@ -415,7 +415,7 @@ public class LineConnectivityTesterTests
             return new HttpResponseMessage(HttpStatusCode.OK);
         });
 
-        var authHandler = new LineAuthorizationHandler(monitor, NullLogger<LineAuthorizationHandler>.Instance)
+        var authHandler = new LineAuthorizationHandler(monitor, NullLogger<LineAuthorizationHandler>.Instance, TimeProvider.System)
         {
             InnerHandler = innerHandler
         };
@@ -444,7 +444,7 @@ public class LineConnectivityTesterTests
             return new HttpResponseMessage(HttpStatusCode.OK);
         });
 
-        var authHandler = new LineAuthorizationHandler(monitor, NullLogger<LineAuthorizationHandler>.Instance)
+        var authHandler = new LineAuthorizationHandler(monitor, NullLogger<LineAuthorizationHandler>.Instance, TimeProvider.System)
         {
             InnerHandler = innerHandler
         };

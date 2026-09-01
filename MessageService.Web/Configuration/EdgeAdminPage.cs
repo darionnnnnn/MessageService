@@ -222,8 +222,8 @@ public static class EdgeAdminPage
             var descEncoded = WebUtility.HtmlEncode(item.Description);
 
             var resultText = item.Success
-                ? (item.Purpose == "名稱查詢" ? "成功" : "可達")
-                : (item.Purpose == "名稱查詢" ? "失敗" : "不可達");
+                ? (item.StrictSuccess ? "成功" : "可達")
+                : (item.StrictSuccess ? "失敗" : "不可達");
 
             var badgeClass = item.Success ? "badge-info" : "badge-error";
 

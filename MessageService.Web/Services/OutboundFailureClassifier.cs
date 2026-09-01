@@ -1,150 +1,140 @@
+using System.Net;
 using System.Net.Sockets;
 using System.Security.Authentication;
 
 namespace MessageService.Services;
 
 /// <summary>
-/// 將 outbound 請求例外分類為可直接行動的繁體中文診斷字串。
-/// 純函式（無狀態、不記 log、相同輸入永遠相同輸出）。
+/// 把 outbound 請求的例外翻成一句可直接行動的繁體中文診斷，讓 log 一行就能分辨
+/// 該查 token、對端白名單、還是防火牆。純函式（無狀態、不記 log、相同輸入永遠相同輸出）。
 /// </summary>
 public static class OutboundFailureClassifier
 {
-    public static string Classify(Exception? ex, Uri? targetUri) =>
-        Classify(ex, targetUri?.Host);
-
-    public static string Classify(Exception? ex, string? hostOrUrl = null)
+    /// <param name="host">實際打向的 host（走 EdgeProxy 時是 proxy 的 host，不是 LINE 的）。
+    /// 取不到就傳 null，訊息會省略 host 那一段。</param>
+    public static string Classify(Exception? ex, string? host = null)
     {
         if (ex is null)
         {
             return string.Empty;
         }
 
-        var host = ExtractHost(hostOrUrl);
+        // 呼叫端手上可能只有完整 URL（例如頭貼下載），取 host 就好
+        host = string.IsNullOrWhiteSpace(host)
+            ? null
+            : Uri.TryCreate(host.Trim(), UriKind.Absolute, out var uri) ? uri.Host : host.Trim();
 
-        // 1. 檢查是否有帶狀態碼的 HttpRequestException
-        foreach (var exception in EnumerateExceptions(ex))
+        HttpStatusCode? statusCode = null;
+        SocketError? socketError = null;
+        HttpRequestError? requestError = null;
+        var tlsFailure = false;
+        var timedOut = false;
+        var cancelled = false;
+
+        // 例外鏈只走一次，把訊號收齊之後再依優先序產生訊息
+        foreach (var current in EnumerateExceptions(ex))
         {
-            if (exception is HttpRequestException { StatusCode: { } statusCode })
+            switch (current)
             {
-                var code = (int)statusCode;
-                return code switch
-                {
-                    401 => "LINE 拒絕認證（401）：Line:ChannelAccessToken 無效或為空",
-                    403 => "被對端拒絕（403）：經由 EdgeProxy 時請檢查 proxy 端的 EdgeProxy:AllowedClientIps 是否含這台的 IP；直連時請檢查對外連線是否被攔截",
-                    429 => "被 LINE 限流（429）：稍後會自動重試",
-                    404 => "目標不存在（404）：可能是 bot 已離開該群組，或 URL 路徑不正確",
-                    >= 500 and <= 599 => host != null
-                        ? $"HTTP {code}：{host} 對端伺服器錯誤"
-                        : $"HTTP {code}：對端伺服器錯誤",
-                    >= 400 and <= 499 => host != null
-                        ? $"HTTP {code}：{host} 請求錯誤"
-                        : $"HTTP {code}：請求錯誤",
-                    _ => host != null
-                        ? $"HTTP {code}：{host}"
-                        : $"HTTP {code}"
-                };
+                case HttpRequestException httpEx:
+                    statusCode ??= httpEx.StatusCode;
+                    requestError ??= httpEx.HttpRequestError;
+                    break;
+                case SocketException socketEx:
+                    socketError ??= socketEx.SocketErrorCode;
+                    break;
+                case AuthenticationException:
+                    tlsFailure = true;
+                    break;
+                case TimeoutException:
+                    timedOut = true;
+                    break;
+                case OperationCanceledException:
+                    cancelled = true;
+                    break;
             }
         }
 
-        // 2. DNS 解析失敗
-        foreach (var exception in EnumerateExceptions(ex))
+        if (statusCode is { } code)
         {
-            if (exception is HttpRequestException { HttpRequestError: HttpRequestError.NameResolutionError })
+            return (int)code switch
             {
-                return host != null
-                    ? $"DNS 解析失敗：{host} 無法解析（防火牆或 DNS 設定）"
-                    : "DNS 解析失敗：無法解析（防火牆或 DNS 設定）";
-            }
-
-            if (exception is SocketException sockEx && IsDnsError(sockEx.SocketErrorCode))
-            {
-                return host != null
-                    ? $"DNS 解析失敗：{host} 無法解析（防火牆或 DNS 設定）"
-                    : "DNS 解析失敗：無法解析（防火牆或 DNS 設定）";
-            }
+                401 => "LINE 拒絕認證（401）：Line:ChannelAccessToken 無效或為空",
+                403 => "被對端拒絕（403）：經由 EdgeProxy 時請檢查 proxy 端的 EdgeProxy:AllowedClientIps "
+                    + "是否含這台的 IP；直連時請檢查對外連線是否被攔截",
+                404 => "目標不存在（404）：可能是 bot 已離開該群組，或 URL 路徑不正確",
+                429 => "被 LINE 限流（429）：稍後會自動重試",
+                >= 500 and <= 599 => WithHost($"HTTP {(int)code}：{{0}}對端伺服器錯誤", host),
+                >= 400 and <= 499 => WithHost($"HTTP {(int)code}：{{0}}請求錯誤", host),
+                var other => WithHost($"HTTP {other}{{0}}", host is null ? null : $"：{host}"),
+            };
         }
 
-        // 3. 連線被拒
-        foreach (var exception in EnumerateExceptions(ex))
+        if (requestError is HttpRequestError.NameResolutionError || socketError is SocketError.HostNotFound)
         {
-            if (exception is SocketException { SocketErrorCode: SocketError.ConnectionRefused })
-            {
-                return host != null
-                    ? $"連線被拒：{host} 拒絕連線（目標服務未啟動或防火牆 REJECT）"
-                    : "連線被拒：拒絕連線（目標服務未啟動或防火牆 REJECT）";
-            }
+            return WithHost("DNS 解析失敗：{0}無法解析（防火牆或 DNS 設定）", host);
         }
 
-        // 4. 連線逾時／無回應
-        foreach (var exception in EnumerateExceptions(ex))
+        // 路由不可達與 DNS 解析失敗是兩回事：企業防火牆 DROP 掉封包時看到的是這一類，
+        // 把它報成 DNS 會把排查引到完全錯誤的方向
+        if (socketError is SocketError.HostUnreachable or SocketError.NetworkUnreachable
+            or SocketError.HostDown or SocketError.NetworkDown)
         {
-            if (exception is TimeoutException
-                or TaskCanceledException
-                or SocketException { SocketErrorCode: SocketError.TimedOut })
-            {
-                return host != null
-                    ? $"連線逾時：{host} 沒有回應（防火牆很可能未開通）"
-                    : "連線逾時：沒有回應（防火牆很可能未開通）";
-            }
+            return WithHost("網路無法到達：{0}沒有路由（防火牆 DROP 或路由設定）", host);
         }
 
-        // 5. TLS／憑證失敗
-        foreach (var exception in EnumerateExceptions(ex))
+        if (socketError is SocketError.ConnectionRefused)
         {
-            if (exception is AuthenticationException
-                or HttpRequestException { HttpRequestError: HttpRequestError.SecureConnectionError })
-            {
-                return host != null
-                    ? $"TLS 交握失敗：{host}"
-                    : "TLS 交握失敗";
-            }
+            return WithHost("連線被拒：{0}拒絕連線（目標服務未啟動或防火牆 REJECT）", host);
         }
 
-        // 6. 其他例外
+        if (tlsFailure || requestError is HttpRequestError.SecureConnectionError)
+        {
+            return host is null ? "TLS 交握失敗" : $"TLS 交握失敗：{host}";
+        }
+
+        if (timedOut || socketError is SocketError.TimedOut)
+        {
+            return WithHost("連線逾時：{0}沒有回應（防火牆很可能未開通）", host);
+        }
+
+        // 取消要跟逾時分開：HttpClient 逾時丟的 TaskCanceledException 內層帶 TimeoutException
+        // （上面那條會先接住），沒有內層 TimeoutException 的就是呼叫端／使用者主動取消，
+        // 報成「防火牆未開通」會誤導
+        if (cancelled)
+        {
+            return "請求已取消（呼叫端中斷，不是連線問題）";
+        }
+
         return $"{ex.GetType().Name}: {ex.Message}";
     }
 
-    private static bool IsDnsError(SocketError error) =>
-        error is SocketError.HostNotFound
-            or SocketError.NoData
-            or SocketError.TryAgain
-            or SocketError.HostUnreachable
-            or SocketError.HostDown
-            or SocketError.AddressNotAvailable
-            or SocketError.TypeNotFound;
-
-    private static string? ExtractHost(string? hostOrUrl)
-    {
-        if (string.IsNullOrWhiteSpace(hostOrUrl))
-        {
-            return null;
-        }
-
-        // 呼叫端傳的可能是完整 URL（頭貼下載）或純 host（其餘路徑），兩種都要能吃
-        return Uri.TryCreate(hostOrUrl, UriKind.Absolute, out var uri) ? uri.Host : hostOrUrl.Trim();
-    }
+    /// <summary>host 取不到時不要印出空括號或 null。</summary>
+    private static string WithHost(string template, string? host) =>
+        string.Format(template, host is null ? "" : $"{host} ");
 
     private static IEnumerable<Exception> EnumerateExceptions(Exception ex)
     {
-        if (ex is AggregateException agg)
+        if (ex is AggregateException aggregate)
         {
-            foreach (var inner in agg.Flatten().InnerExceptions)
+            foreach (var inner in aggregate.Flatten().InnerExceptions)
             {
                 foreach (var sub in EnumerateExceptions(inner))
                 {
                     yield return sub;
                 }
             }
+
+            yield break;
         }
-        else
+
+        yield return ex;
+
+        if (ex.InnerException is not null)
         {
-            yield return ex;
-            if (ex.InnerException is not null)
+            foreach (var inner in EnumerateExceptions(ex.InnerException))
             {
-                foreach (var inner in EnumerateExceptions(ex.InnerException))
-                {
-                    yield return inner;
-                }
+                yield return inner;
             }
         }
     }

@@ -165,16 +165,36 @@ public class OutboundFailureClassifierTests
     }
 
     [Fact]
-    public void Classify_UriOverload_ExtractsHostCorrectly()
+    public void Classify_WithAndWithoutHost_OmitsHostSegmentWhenMissing()
     {
         var ex = new HttpRequestException("500", null, HttpStatusCode.InternalServerError);
-        var uri = new Uri("https://api.line.me/v2/bot/group/123/summary");
 
-        var result = OutboundFailureClassifier.Classify(ex, uri);
-        var nullResult = OutboundFailureClassifier.Classify(ex, (Uri?)null);
+        Assert.Equal("HTTP 500：api.line.me 對端伺服器錯誤", OutboundFailureClassifier.Classify(ex, "api.line.me"));
+        Assert.Equal("HTTP 500：對端伺服器錯誤", OutboundFailureClassifier.Classify(ex, null));
+    }
 
-        Assert.Equal("HTTP 500：api.line.me 對端伺服器錯誤", result);
-        Assert.Equal("HTTP 500：對端伺服器錯誤", nullResult);
+    [Fact]
+    public void Classify_HostUnreachable_IsNotReportedAsDnsFailure()
+    {
+        // 企業防火牆 DROP 掉封包時看到的是 HostUnreachable，報成 DNS 會把排查引到錯誤方向
+        var ex = new HttpRequestException("unreachable", new SocketException((int)SocketError.HostUnreachable));
+
+        var result = OutboundFailureClassifier.Classify(ex, "api-data.line.me");
+
+        Assert.Contains("網路無法到達", result);
+        Assert.DoesNotContain("DNS", result);
+    }
+
+    [Fact]
+    public void Classify_UserCancellation_IsNotReportedAsTimeout()
+    {
+        // HttpClient 逾時丟的 TaskCanceledException 內層帶 TimeoutException（算逾時）；
+        // 沒有內層的就是呼叫端主動取消，不能報成「防火牆未開通」
+        var cancelled = new TaskCanceledException("cancelled");
+        var timedOut = new TaskCanceledException("timeout", new TimeoutException());
+
+        Assert.Contains("請求已取消", OutboundFailureClassifier.Classify(cancelled, "api.line.me"));
+        Assert.Contains("連線逾時", OutboundFailureClassifier.Classify(timedOut, "api.line.me"));
     }
 
     [Fact]

@@ -37,7 +37,7 @@ public class LineAuthorizationHandlerTests
             return new HttpResponseMessage(HttpStatusCode.OK);
         });
 
-        var authHandler = new LineAuthorizationHandler(monitor, NullLogger<LineAuthorizationHandler>.Instance)
+        var authHandler = new LineAuthorizationHandler(monitor, NullLogger<LineAuthorizationHandler>.Instance, TimeProvider.System)
         {
             InnerHandler = innerHandler
         };
@@ -63,7 +63,7 @@ public class LineAuthorizationHandlerTests
             return new HttpResponseMessage(HttpStatusCode.OK);
         });
 
-        var authHandler = new LineAuthorizationHandler(monitor, NullLogger<LineAuthorizationHandler>.Instance)
+        var authHandler = new LineAuthorizationHandler(monitor, NullLogger<LineAuthorizationHandler>.Instance, TimeProvider.System)
         {
             InnerHandler = innerHandler
         };
@@ -89,7 +89,7 @@ public class LineAuthorizationHandlerTests
             return new HttpResponseMessage(HttpStatusCode.OK);
         });
 
-        var authHandler = new LineAuthorizationHandler(monitor, NullLogger<LineAuthorizationHandler>.Instance)
+        var authHandler = new LineAuthorizationHandler(monitor, NullLogger<LineAuthorizationHandler>.Instance, TimeProvider.System)
         {
             InnerHandler = innerHandler
         };
@@ -116,7 +116,7 @@ public class LineAuthorizationHandlerTests
             return new HttpResponseMessage(HttpStatusCode.OK);
         });
 
-        var authHandler = new LineAuthorizationHandler(monitor, NullLogger<LineAuthorizationHandler>.Instance)
+        var authHandler = new LineAuthorizationHandler(monitor, NullLogger<LineAuthorizationHandler>.Instance, TimeProvider.System)
         {
             InnerHandler = innerHandler
         };
@@ -133,36 +133,50 @@ public class LineAuthorizationHandlerTests
     }
 
     [Fact]
-    public async Task SendAsync_WhenTokenEmpty_LogsWarningAndThrottles()
+    public async Task SendAsync_WhenTokenEmpty_ThrottlesWarningToOncePerTenMinutes()
     {
         var options = new LineOptions { ChannelAccessToken = "" };
         var monitor = new FakeOptionsMonitor<LineOptions>(options);
         var logger = new CapturingLogger();
+        var clock = new FakeClock(DateTimeOffset.Parse("2026-09-01T10:00:00Z"));
         var innerHandler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK));
 
-        var authHandler = new LineAuthorizationHandler(monitor, logger)
+        var authHandler = new LineAuthorizationHandler(monitor, logger, clock)
         {
             InnerHandler = innerHandler
         };
 
         using var client = new HttpClient(authHandler);
 
-        using (var req1 = new HttpRequestMessage(HttpMethod.Get, "https://api.line.me/v2/bot/info"))
+        async Task SendOnceAsync()
         {
-            await client.SendAsync(req1);
+            using var request = new HttpRequestMessage(HttpMethod.Get, "https://api.line.me/v2/bot/info");
+            await client.SendAsync(request);
         }
 
+        await SendOnceAsync();
         Assert.Single(logger.Warnings);
         Assert.Contains("Line:ChannelAccessToken 為空", logger.Warnings[0]);
         Assert.Contains("/edge-admin", logger.Warnings[0]);
 
-        // 第二次呼叫在 10 分鐘內應該被節流
-        using (var req2 = new HttpRequestMessage(HttpMethod.Get, "https://api.line.me/v2/bot/info"))
-        {
-            await client.SendAsync(req2);
-        }
-
+        // 9 分 59 秒還在節流窗內
+        clock.Advance(TimeSpan.FromSeconds(599));
+        await SendOnceAsync();
         Assert.Single(logger.Warnings);
+
+        // 跨過 10 分鐘就要再記一次（把節流間隔改長改短，這條都會紅）
+        clock.Advance(TimeSpan.FromSeconds(2));
+        await SendOnceAsync();
+        Assert.Equal(2, logger.Warnings.Count);
+    }
+
+    private sealed class FakeClock(DateTimeOffset now) : TimeProvider
+    {
+        private DateTimeOffset _now = now;
+
+        public override DateTimeOffset GetUtcNow() => _now;
+
+        public void Advance(TimeSpan delta) => _now += delta;
     }
 
     [Fact]
@@ -173,7 +187,7 @@ public class LineAuthorizationHandlerTests
         var logger = new CapturingLogger();
         var innerHandler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK));
 
-        var authHandler = new LineAuthorizationHandler(monitor, logger)
+        var authHandler = new LineAuthorizationHandler(monitor, logger, TimeProvider.System)
         {
             InnerHandler = innerHandler
         };

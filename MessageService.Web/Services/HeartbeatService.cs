@@ -73,14 +73,16 @@ public class HeartbeatService(
             _failing = true;
             _lastFailureLogAt = now;
             logger.LogWarning(ex,
-                "Failed to report heartbeat；持續失敗期間這則告警每 10 分鐘最多再記一次。");
+                "Failed to report heartbeat：{FailureReason}；持續失敗期間這則告警每 10 分鐘最多再記一次。",
+                OutboundFailureClassifier.Classify(ex));
             return;
         }
 
         if (_lastFailureLogAt is { } last && now - last >= TimeSpan.FromMinutes(10))
         {
             _lastFailureLogAt = now;
-            logger.LogWarning("Failed to report heartbeat（仍然失敗）：{Reason}", ex.Message);
+            logger.LogWarning("Failed to report heartbeat（仍然失敗）：{FailureReason}",
+                OutboundFailureClassifier.Classify(ex));
         }
     }
 

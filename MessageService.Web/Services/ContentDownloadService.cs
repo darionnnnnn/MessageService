@@ -207,7 +207,7 @@ public class ContentDownloadService(
 
         // 貼圖走 CDN、其餘走 content API；走 EdgeProxy 時兩者都是 proxy 的 host
         var targetHost = HttpBaseAddress.ResolveOutboundHost(
-            scope.ServiceProvider.GetService<IOptions<LineOptions>>()?.Value,
+            scope.ServiceProvider.GetService<IOptionsMonitor<LineOptions>>()?.CurrentValue,
             item.MessageType == "sticker" ? "stickershop.line-scdn.net" : "api-data.line.me");
         Exception? lastException = null;
         for (var attempt = 1; attempt <= _options.MaxRetries; attempt++)

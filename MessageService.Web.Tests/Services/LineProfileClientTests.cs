@@ -174,10 +174,10 @@ public class LineProfileClientTests
     }
 
     [Fact]
-    public async Task GetGroupSummaryAsync_PictureTooLarge_ReportsDownloadFailedSoItBacksOff()
+    public async Task GetGroupSummaryAsync_PictureTooLarge_ReportsPermanentlyUnavailable()
     {
-        // 過大的圖會被跳過，但「有 PictureUrl 卻沒圖」在 staleness 判定裡是永遠 stale——
-        // 回報成功會讓同一張圖每 5 分鐘被重抓一次，所以這條路徑必須算失敗（走 10 分鐘冷卻）
+        // 過大的圖重試多少次都一樣，必須回報成「永久不可得」——回報成暫時失敗的話，
+        // staleness 的缺圖條件會讓同一張圖被無限期地每 10 分鐘重抓
         var handler = new FakeHttpMessageHandler(request =>
         {
             if (request.RequestUri!.AbsolutePath.Contains("/v2/bot/group/"))
@@ -203,7 +203,57 @@ public class LineProfileClientTests
 
         Assert.NotNull(summary);
         Assert.Null(summary!.PictureBytes);
-        Assert.True(summary.PictureDownloadFailed);
+        Assert.True(summary.PicturePermanentlyUnavailable);
+        Assert.False(summary.PictureDownloadFailed);
+    }
+
+    [Fact]
+    public async Task GetGroupSummaryAsync_PictureNotFound_ReportsPermanentlyUnavailable()
+    {
+        var handler = new FakeHttpMessageHandler(request =>
+            request.RequestUri!.AbsolutePath.Contains("/v2/bot/group/")
+                ? new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent("""{"groupId":"G1","groupName":"群組","pictureUrl":"https://profile.line-scdn.net/gone.png"}""")
+                }
+                : new HttpResponseMessage(HttpStatusCode.NotFound));
+
+        var client = new LineProfileClient(
+            new FakeHttpClientFactory(handler), CreateOptions(), NullLogger<LineProfileClient>.Instance);
+
+        var summary = await client.GetGroupSummaryAsync("G1", null, false, CancellationToken.None);
+
+        Assert.NotNull(summary);
+        Assert.True(summary!.PicturePermanentlyUnavailable);
+        Assert.False(summary.PictureDownloadFailed);
+    }
+
+    [Fact]
+    public async Task GetGroupSummaryAsync_PictureConnectionFails_ReportsTransientFailure()
+    {
+        // 連不上是暫時性的（防火牆修好就會成功），必須維持重試路徑
+        var handler = new FakeHttpMessageHandler(request =>
+        {
+            if (request.RequestUri!.AbsolutePath.Contains("/v2/bot/group/"))
+            {
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent("""{"groupId":"G1","groupName":"群組","pictureUrl":"https://profile.line-scdn.net/pic.png"}""")
+                };
+            }
+
+            throw new HttpRequestException("connection refused",
+                new System.Net.Sockets.SocketException((int)System.Net.Sockets.SocketError.ConnectionRefused));
+        });
+
+        var client = new LineProfileClient(
+            new FakeHttpClientFactory(handler), CreateOptions(), NullLogger<LineProfileClient>.Instance);
+
+        var summary = await client.GetGroupSummaryAsync("G1", null, false, CancellationToken.None);
+
+        Assert.NotNull(summary);
+        Assert.True(summary!.PictureDownloadFailed);
+        Assert.False(summary.PicturePermanentlyUnavailable);
     }
 
     [Fact]

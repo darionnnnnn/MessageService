@@ -1,7 +1,5 @@
 using System.Net.Http.Headers;
 using System.Text.Json;
-using MessageService.Options;
-using Microsoft.Extensions.Options;
 
 namespace MessageService.Services;
 
@@ -13,7 +11,7 @@ public class LineContentClient : ILineContentClient
     private readonly HttpClient _httpClient;
     private readonly HttpClient _stickerHttpClient;
 
-    public LineContentClient(IHttpClientFactory httpClientFactory, IOptions<LineOptions> options)
+    public LineContentClient(IHttpClientFactory httpClientFactory)
     {
         _httpClient = httpClientFactory.CreateClient(HttpClientName);
         _httpClient.BaseAddress ??= new Uri("https://api-data.line.me/");

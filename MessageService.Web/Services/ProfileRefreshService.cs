@@ -66,7 +66,7 @@ public class ProfileRefreshService(
         var profileStore = scope.ServiceProvider.GetRequiredService<IProfileStore>();
         var profileClient = scope.ServiceProvider.GetRequiredService<ILineProfileClient>();
         var targetHost = HttpBaseAddress.ResolveOutboundHost(
-            scope.ServiceProvider.GetService<IOptions<LineOptions>>()?.Value, "api.line.me");
+            scope.ServiceProvider.GetService<IOptionsMonitor<LineOptions>>()?.CurrentValue, "api.line.me");
         var cutoff = DateTimeOffset.UtcNow - _options.RefreshAfter;
 
         // 一次查完群組與成員的 staleness——TTL 判斷一定要在打 LINE API 之前完成才省得到配額，
@@ -173,6 +173,7 @@ public class ProfileRefreshService(
         }
 
         await profileStore.UpsertGroupAsync(groupId, summary, cancellationToken);
+        // 永久不可得的圖不進冷卻：staleness 已經把它記成「試過了」，不會再被判為缺圖
         if (summary.PictureDownloadFailed)
         {
             RecordFailure(groupId);
