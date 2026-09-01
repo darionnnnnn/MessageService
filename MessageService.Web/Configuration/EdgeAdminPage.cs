@@ -24,7 +24,7 @@ public record EdgeAdminViewModel(
     IReadOnlyList<LogBufferEntry>? ProxyErrors = null,
     string? ProxyStatusMessage = null,
     bool OutboundHere = true,
-    LineConnectivityTestResult? LineTestResult = null,
+    IReadOnlyList<LineConnectivityTestResult>? LineTestResults = null,
     string? ActiveTab = null);
 
 /// <summary>
@@ -136,7 +136,7 @@ public static class EdgeAdminPage
         return entries is null ? statusHtml : statusHtml + RenderLogEntriesTable(entries);
     }
 
-    public static string RenderConnectionTab(bool outboundHere, LineConnectivityTestResult? testResult)
+    public static string RenderConnectionTab(bool outboundHere, IReadOnlyList<LineConnectivityTestResult>? testResults)
     {
         var sb = new StringBuilder();
         sb.Append("""
@@ -153,27 +153,27 @@ public static class EdgeAdminPage
             return sb.ToString();
         }
 
-        if (testResult is not null)
+        if (testResults is not null && testResults.Count > 0)
         {
-            var viaEncoded = WebUtility.HtmlEncode(testResult.Via ?? "");
-            if (testResult.Success)
+            var allSuccess = testResults.All(r => r.Success);
+            if (allSuccess)
             {
-                var nameEncoded = WebUtility.HtmlEncode(testResult.BotDisplayName ?? "");
-                sb.Append($"""
-                <div class="alert-success">連線成功：{nameEncoded}（經由 {viaEncoded}）</div>
+                sb.Append("""
+                <div class="alert-success">連線測試完成：全部連線正常</div>
 """);
             }
             else
             {
-                var errEncoded = WebUtility.HtmlEncode(testResult.ErrorMessage ?? "");
-                sb.Append($"""
-                <div class="alert-danger">連線失敗：{errEncoded}（經由 {viaEncoded}）</div>
+                sb.Append("""
+                <div class="alert-danger">連線測試完成：部分連線異常，請檢查下方表格</div>
 """);
             }
+
+            sb.Append(RenderConnectionTestResultsTable(testResults));
         }
 
         sb.Append("""
-                <div class="note">測試會對 LINE 官方 <code>v2/bot/info</code> 發一次請求。</div>
+                <div class="note">測試會對 LINE 官方 <code>v2/bot/info</code> 等相關網域發出連線請求。</div>
                 <form method="post" action="/edge-admin/test-line">
                     <button type="submit" class="btn-submit">測試目前生效的 Token</button>
                 </form>
@@ -186,6 +186,62 @@ public static class EdgeAdminPage
                     <button type="submit" class="btn-submit">用這個 Token 測試（不儲存）</button>
                 </form>
             </div>
+""");
+
+        return sb.ToString();
+    }
+
+    public static string RenderConnectionTestResultsTable(IReadOnlyList<LineConnectivityTestResult>? results)
+    {
+        if (results is null || results.Count == 0)
+        {
+            return string.Empty;
+        }
+
+        var sb = new StringBuilder();
+        sb.Append("""
+<div class="table-responsive" style="margin-bottom: 24px;">
+    <table>
+        <thead>
+            <tr>
+                <th>用途</th>
+                <th>目標</th>
+                <th>結果</th>
+                <th>說明</th>
+                <th>經由</th>
+            </tr>
+        </thead>
+        <tbody>
+""");
+
+        foreach (var item in results)
+        {
+            var purposeEncoded = WebUtility.HtmlEncode(item.Purpose);
+            var targetEncoded = WebUtility.HtmlEncode(item.Target);
+            var viaEncoded = WebUtility.HtmlEncode(item.Via);
+            var descEncoded = WebUtility.HtmlEncode(item.Description);
+
+            var resultText = item.Success
+                ? (item.Purpose == "名稱查詢" ? "成功" : "可達")
+                : (item.Purpose == "名稱查詢" ? "失敗" : "不可達");
+
+            var badgeClass = item.Success ? "badge-info" : "badge-error";
+
+            sb.Append($"""
+            <tr>
+                <td>{purposeEncoded}</td>
+                <td>{targetEncoded}</td>
+                <td><span class="badge {badgeClass}">{resultText}</span></td>
+                <td>{descEncoded}</td>
+                <td>{viaEncoded}</td>
+            </tr>
+""");
+        }
+
+        sb.Append("""
+        </tbody>
+    </table>
+</div>
 """);
 
         return sb.ToString();
@@ -231,7 +287,7 @@ public static class EdgeAdminPage
         var localErrorsHtml = RenderLogEntriesTable(model.LocalErrors);
         var todayLogHtml = RenderTodayLog(model.TodayLogContent, model.TodayLogErrorMessage);
         var proxyErrorsHtml = RenderProxyErrors(model.ProxyErrors, model.ProxyStatusMessage);
-        var connectionTabHtml = RenderConnectionTab(model.OutboundHere, model.LineTestResult);
+        var connectionTabHtml = RenderConnectionTab(model.OutboundHere, model.LineTestResults);
 
         return $$"""
 <!DOCTYPE html>

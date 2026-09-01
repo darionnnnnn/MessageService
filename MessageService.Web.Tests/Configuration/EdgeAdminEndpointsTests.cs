@@ -57,6 +57,22 @@ public class EdgeAdminEndpointsTests : IDisposable
             {
                 services.AddSingleton<ISettingsProtector>(_protector);
                 services.AddSingleton<IStartupFilter>(new FakeRemoteIpStartupFilter(IPAddress.Parse(clientIp)));
+
+                services.AddHttpClient(MessageService.Services.LineProfileClient.HttpClientName)
+                    .ConfigurePrimaryHttpMessageHandler(() => new FakeHttpMessageHandler(_ =>
+                        new HttpResponseMessage(HttpStatusCode.OK)
+                        {
+                            Content = new StringContent("{\"displayName\":\"預設機器人\"}", Encoding.UTF8, "application/json")
+                        }));
+                services.AddHttpClient(MessageService.Services.LineContentClient.HttpClientName)
+                    .ConfigurePrimaryHttpMessageHandler(() => new FakeHttpMessageHandler(_ =>
+                        new HttpResponseMessage(HttpStatusCode.OK)));
+                services.AddHttpClient(MessageService.Services.LineContentClient.StickerHttpClientName)
+                    .ConfigurePrimaryHttpMessageHandler(() => new FakeHttpMessageHandler(_ =>
+                        new HttpResponseMessage(HttpStatusCode.OK)));
+                services.AddHttpClient(MessageService.Services.LineProfileClient.ImageHttpClientName)
+                    .ConfigurePrimaryHttpMessageHandler(() => new FakeHttpMessageHandler(_ =>
+                        new HttpResponseMessage(HttpStatusCode.OK)));
             });
 
             configure?.Invoke(builder);
@@ -680,10 +696,15 @@ public class EdgeAdminEndpointsTests : IDisposable
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var html = await response.Content.ReadAsStringAsync();
 
-        // 驗證連線成功與 bot 名稱
+        // 驗證連線成功與 bot 名稱及四列標題
         Assert.Contains("alert-success", html);
-        Assert.Contains("連線成功：我的機器人", html);
-        Assert.Contains("（經由 Direct）", html);
+        Assert.Contains("連線測試完成：全部連線正常", html);
+        Assert.Contains("我的機器人", html);
+        Assert.Contains("Direct", html);
+        Assert.Contains("名稱查詢", html);
+        Assert.Contains("媒體內容", html);
+        Assert.Contains("貼圖", html);
+        Assert.Contains("頭貼 CDN", html);
 
         // 驗證連線測試分頁為 checked
         Assert.Contains("id=\"tab-nav-connection\" name=\"admin-tab\" class=\"tab-radio\" checked", html);
@@ -722,9 +743,8 @@ public class EdgeAdminEndpointsTests : IDisposable
 
         // 驗證連線失敗與 401
         Assert.Contains("alert-danger", html);
-        Assert.Contains("連線失敗：", html);
         Assert.Contains("401", html);
-        Assert.Contains("Invalid OAuth access token", html);
+        Assert.Contains("Line:ChannelAccessToken 無效或為空", html);
     }
 
     [Fact]
@@ -757,7 +777,6 @@ public class EdgeAdminEndpointsTests : IDisposable
 
         // 驗證連線失敗與例外訊息
         Assert.Contains("alert-danger", html);
-        Assert.Contains("連線失敗：", html);
         Assert.Contains("HttpRequestException", html);
         Assert.Contains("Network connection failed to LINE API", html);
     }
@@ -874,6 +893,188 @@ public class EdgeAdminEndpointsTests : IDisposable
         // 必須逸出
         Assert.DoesNotContain("<script>alert('xss')</script>", html);
         Assert.Contains("&lt;script&gt;alert(&#39;xss&#39;)&lt;/script&gt;", html);
+    }
+
+    [Fact]
+    public async Task EdgeAdmin_TestLine_AllFourTargetsSuccess_RendersFourRowsWithAllPurposes()
+    {
+        // 驗收標準 1：四筆全部成功時，頁面出現四列、四個用途名稱都在
+        using var factory = CreateEdgeFactory(builder =>
+        {
+            builder.UseSetting("Line:OutboundHere", "true");
+            builder.UseSetting("Line:OutboundVia", "Direct");
+        });
+
+        using var client = factory.CreateClient();
+        var form = new Dictionary<string, string>
+        {
+            ["overrideToken"] = ""
+        };
+
+        var response = await client.PostAsync("/edge-admin/test-line", new FormUrlEncodedContent(form));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var html = await response.Content.ReadAsStringAsync();
+
+        Assert.Contains("名稱查詢", html);
+        Assert.Contains("媒體內容", html);
+        Assert.Contains("貼圖", html);
+        Assert.Contains("頭貼 CDN", html);
+        Assert.Contains("api.line.me", html);
+        Assert.Contains("api-data.line.me", html);
+        Assert.Contains("stickershop.line-scdn.net", html);
+        Assert.Contains("profile.line-scdn.net", html);
+    }
+
+    [Fact]
+    public async Task EdgeAdmin_TestLine_NameQuery401_ShowsClassifierMessageAndOtherRowsSucceed()
+    {
+        // 驗收標準 2：名稱查詢回 401 → 該列失敗且說明含分類器的 401 字串；其他三列不受影響
+        using var factory = CreateEdgeFactory(builder =>
+        {
+            builder.UseSetting("Line:OutboundHere", "true");
+            builder.UseSetting("Line:OutboundVia", "Direct");
+
+            builder.ConfigureServices(services =>
+            {
+                services.AddHttpClient(MessageService.Services.LineProfileClient.HttpClientName)
+                    .ConfigurePrimaryHttpMessageHandler(() => new FakeHttpMessageHandler(_ =>
+                        new HttpResponseMessage(HttpStatusCode.Unauthorized)
+                        {
+                            ReasonPhrase = "Unauthorized"
+                        }));
+            });
+        });
+
+        using var client = factory.CreateClient();
+        var form = new Dictionary<string, string>
+        {
+            ["overrideToken"] = ""
+        };
+
+        var response = await client.PostAsync("/edge-admin/test-line", new FormUrlEncodedContent(form));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var html = await response.Content.ReadAsStringAsync();
+
+        Assert.Contains("Line:ChannelAccessToken 無效或為空", html);
+        Assert.Contains("badge-error", html);
+        Assert.Contains("badge-info", html);
+    }
+
+    [Fact]
+    public async Task EdgeAdmin_TestLine_Content404_MarkedAsReachable()
+    {
+        // 驗收標準 3：媒體內容回 404 → 該列判定為可達（不是失敗）
+        using var factory = CreateEdgeFactory(builder =>
+        {
+            builder.UseSetting("Line:OutboundHere", "true");
+            builder.UseSetting("Line:OutboundVia", "Direct");
+
+            builder.ConfigureServices(services =>
+            {
+                services.AddHttpClient(MessageService.Services.LineContentClient.HttpClientName)
+                    .ConfigurePrimaryHttpMessageHandler(() => new FakeHttpMessageHandler(_ =>
+                        new HttpResponseMessage(HttpStatusCode.NotFound)
+                        {
+                            ReasonPhrase = "Not Found"
+                        }));
+            });
+        });
+
+        using var client = factory.CreateClient();
+        var form = new Dictionary<string, string>
+        {
+            ["overrideToken"] = ""
+        };
+
+        var response = await client.PostAsync("/edge-admin/test-line", new FormUrlEncodedContent(form));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var html = await response.Content.ReadAsStringAsync();
+
+        Assert.Contains("HTTP 404 Not Found", html);
+        // 媒體內容回 404 時仍判定為全部正常/可達
+        Assert.Contains("連線測試完成：全部連線正常", html);
+    }
+
+    [Fact]
+    public async Task EdgeAdmin_TestLine_StickerAndImageRequests_VerifyCapturedUris()
+    {
+        // 驗收標準 4 & 5：貼圖路徑與頭貼 EdgeProxy /line/image/ 路徑
+        HttpRequestMessage? capturedStickerReq = null;
+        HttpRequestMessage? capturedImageReq = null;
+
+        using var factory = CreateEdgeFactory(builder =>
+        {
+            builder.UseSetting("Line:OutboundHere", "true");
+            builder.UseSetting("Line:OutboundVia", "EdgeProxy");
+            builder.UseSetting("Line:OutboundProxyBaseUrl", "https://proxy.corp.example/MSLine/");
+
+            builder.ConfigureServices(services =>
+            {
+                services.AddHttpClient(MessageService.Services.LineContentClient.StickerHttpClientName)
+                    .ConfigurePrimaryHttpMessageHandler(() => new FakeHttpMessageHandler(req =>
+                    {
+                        capturedStickerReq = req;
+                        return new HttpResponseMessage(HttpStatusCode.OK);
+                    }));
+                services.AddHttpClient(MessageService.Services.LineProfileClient.ImageHttpClientName)
+                    .ConfigurePrimaryHttpMessageHandler(() => new FakeHttpMessageHandler(req =>
+                    {
+                        capturedImageReq = req;
+                        return new HttpResponseMessage(HttpStatusCode.OK);
+                    }));
+            });
+        });
+
+        using var client = factory.CreateClient();
+        var form = new Dictionary<string, string>
+        {
+            ["overrideToken"] = ""
+        };
+
+        var response = await client.PostAsync("/edge-admin/test-line", new FormUrlEncodedContent(form));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.NotNull(capturedStickerReq);
+        Assert.Contains("stickershop/v1/sticker/52002734/android/sticker.png", capturedStickerReq!.RequestUri?.AbsolutePath);
+
+        Assert.NotNull(capturedImageReq);
+        Assert.Equal("https://proxy.corp.example/MSLine/line/image/profile.line-scdn.net/probe", capturedImageReq!.RequestUri?.ToString());
+    }
+
+    [Fact]
+    public async Task EdgeAdmin_TestLine_WhenOneTargetThrowsConnectionException_Returns200AndShowsUnreachable()
+    {
+        // 驗收標準 6：某一筆丟連線例外時，該列顯示不可達與分類字串，且回應碼仍是 200（頁面不炸）
+        using var factory = CreateEdgeFactory(builder =>
+        {
+            builder.UseSetting("Line:OutboundHere", "true");
+            builder.UseSetting("Line:OutboundVia", "Direct");
+
+            builder.ConfigureServices(services =>
+            {
+                services.AddHttpClient(MessageService.Services.LineContentClient.StickerHttpClientName)
+                    .ConfigurePrimaryHttpMessageHandler(() => new FakeHttpMessageHandler(_ =>
+                        throw new TimeoutException("Sticker CDN timed out")));
+            });
+        });
+
+        using var client = factory.CreateClient();
+        var form = new Dictionary<string, string>
+        {
+            ["overrideToken"] = ""
+        };
+
+        var response = await client.PostAsync("/edge-admin/test-line", new FormUrlEncodedContent(form));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var html = await response.Content.ReadAsStringAsync();
+
+        Assert.Contains("連線逾時：stickershop.line-scdn.net 沒有回應", html);
+        Assert.Contains("不可達", html);
+        Assert.Contains("alert-danger", html);
     }
 
     [Fact]

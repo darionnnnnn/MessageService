@@ -50,7 +50,7 @@ public static class EdgeAdminEndpoints
             LogRingBuffer ringBuffer) =>
         {
             // OutboundHere=false 的主機根本沒有 LINE 具名 client，直接渲染頁面上的說明即可
-            LineConnectivityTestResult? testResult = null;
+            IReadOnlyList<LineConnectivityTestResult>? testResults = null;
             if (capabilities.OutboundHere)
             {
                 var form = await context.Request.ReadFormAsync();
@@ -58,12 +58,12 @@ public static class EdgeAdminEndpoints
                 var tokenToUse = string.IsNullOrWhiteSpace(overrideToken) ? null : overrideToken.Trim();
 
                 var tester = new LineConnectivityTester(httpClientFactory, lineOptionsMonitor);
-                testResult = await tester.TestConnectivityAsync(tokenToUse, context.RequestAborted);
+                testResults = await tester.TestConnectivityAsync(tokenToUse, context.RequestAborted);
             }
 
             var model = await BuildViewModelAsync(
                 config, store, httpClientFactory, ringBuffer, capabilities,
-                saved: false, lineTestResult: testResult, activeTab: "connection");
+                saved: false, lineTestResults: testResults, activeTab: "connection");
 
             return RenderPage(context, model);
         });
@@ -189,7 +189,7 @@ public static class EdgeAdminEndpoints
         LogRingBuffer ringBuffer,
         DeploymentCapabilities capabilities,
         bool saved,
-        LineConnectivityTestResult? lineTestResult = null,
+        IReadOnlyList<LineConnectivityTestResult>? lineTestResults = null,
         string? activeTab = null)
     {
         // 錯誤排查：本機緩衝快照、今日 log 檔尾、EdgeProxy 端錯誤
@@ -213,7 +213,7 @@ public static class EdgeAdminEndpoints
             ProxyErrors: proxyErrors,
             ProxyStatusMessage: proxyStatusMessage,
             OutboundHere: capabilities.OutboundHere,
-            LineTestResult: lineTestResult,
+            LineTestResults: lineTestResults,
             ActiveTab: activeTab);
     }
 

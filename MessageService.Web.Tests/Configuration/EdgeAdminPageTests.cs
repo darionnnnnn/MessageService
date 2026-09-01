@@ -403,6 +403,34 @@ public class EdgeAdminPageTests
     [Fact]
     public void Render_ConnectionTab_WhenTestResultSuccess_DisplaysGreenAlertAndEscapesBotName()
     {
+        var testResults = new[]
+        {
+            new MessageService.Web.Services.LineConnectivityTestResult(
+                Purpose: "名稱查詢",
+                Target: "api.line.me",
+                Success: true,
+                Description: "我的 <script>Bot</script>",
+                Via: "Direct"),
+            new MessageService.Web.Services.LineConnectivityTestResult(
+                Purpose: "媒體內容",
+                Target: "api-data.line.me",
+                Success: true,
+                Description: "HTTP 200 OK",
+                Via: "Direct"),
+            new MessageService.Web.Services.LineConnectivityTestResult(
+                Purpose: "貼圖",
+                Target: "stickershop.line-scdn.net",
+                Success: true,
+                Description: "HTTP 200 OK",
+                Via: "Direct"),
+            new MessageService.Web.Services.LineConnectivityTestResult(
+                Purpose: "頭貼 CDN",
+                Target: "profile.line-scdn.net",
+                Success: true,
+                Description: "HTTP 200 OK",
+                Via: "Direct")
+        };
+
         var model = new EdgeAdminViewModel(
             LineChannelSecret: null,
             LineChannelAccessToken: null,
@@ -411,17 +439,18 @@ public class EdgeAdminPageTests
             WebhookSourceMode: "Any",
             WebhookSourceAllowedIps: [],
             OutboundHere: true,
-            LineTestResult: new MessageService.Web.Services.LineConnectivityTestResult(
-                Success: true,
-                BotDisplayName: "我的 <script>Bot</script>",
-                ErrorMessage: null,
-                Via: "Direct"),
+            LineTestResults: testResults,
             ActiveTab: "connection");
 
         var html = EdgeAdminPage.Render(model);
 
         Assert.Contains("alert-success", html);
-        Assert.Contains("連線成功：我的 &lt;script&gt;Bot&lt;/script&gt;（經由 Direct）", html);
+        Assert.Contains("連線測試完成：全部連線正常", html);
+        Assert.Contains("名稱查詢", html);
+        Assert.Contains("媒體內容", html);
+        Assert.Contains("貼圖", html);
+        Assert.Contains("頭貼 CDN", html);
+        Assert.Contains("我的 &lt;script&gt;Bot&lt;/script&gt;", html);
         Assert.DoesNotContain("<script>Bot</script>", html);
         Assert.Contains("id=\"tab-nav-connection\" name=\"admin-tab\" class=\"tab-radio\" checked", html);
     }
@@ -429,6 +458,34 @@ public class EdgeAdminPageTests
     [Fact]
     public void Render_ConnectionTab_WhenTestResultFailed_DisplaysRedAlertAndEscapesError()
     {
+        var testResults = new[]
+        {
+            new MessageService.Web.Services.LineConnectivityTestResult(
+                Purpose: "名稱查詢",
+                Target: "api.line.me",
+                Success: false,
+                Description: "HTTP 401 <b>Unauthorized</b>",
+                Via: "EdgeProxy(https://proxy.example/MSLine/)"),
+            new MessageService.Web.Services.LineConnectivityTestResult(
+                Purpose: "媒體內容",
+                Target: "api-data.line.me",
+                Success: true,
+                Description: "HTTP 200 OK",
+                Via: "EdgeProxy(https://proxy.example/MSLine/)"),
+            new MessageService.Web.Services.LineConnectivityTestResult(
+                Purpose: "貼圖",
+                Target: "stickershop.line-scdn.net",
+                Success: true,
+                Description: "HTTP 200 OK",
+                Via: "EdgeProxy(https://proxy.example/MSLine/)"),
+            new MessageService.Web.Services.LineConnectivityTestResult(
+                Purpose: "頭貼 CDN",
+                Target: "profile.line-scdn.net",
+                Success: true,
+                Description: "HTTP 200 OK",
+                Via: "EdgeProxy(https://proxy.example/MSLine/)")
+        };
+
         var model = new EdgeAdminViewModel(
             LineChannelSecret: null,
             LineChannelAccessToken: null,
@@ -437,18 +494,55 @@ public class EdgeAdminPageTests
             WebhookSourceMode: "Any",
             WebhookSourceAllowedIps: [],
             OutboundHere: true,
-            LineTestResult: new MessageService.Web.Services.LineConnectivityTestResult(
-                Success: false,
-                BotDisplayName: null,
-                ErrorMessage: "HTTP 401 <b>Unauthorized</b>",
-                Via: "EdgeProxy(https://proxy.example/MSLine/)"),
+            LineTestResults: testResults,
             ActiveTab: "connection");
 
         var html = EdgeAdminPage.Render(model);
 
         Assert.Contains("alert-danger", html);
-        Assert.Contains("連線失敗：HTTP 401 &lt;b&gt;Unauthorized&lt;/b&gt;（經由 EdgeProxy(https://proxy.example/MSLine/)）", html);
+        Assert.Contains("連線測試完成：部分連線異常，請檢查下方表格", html);
+        Assert.Contains("badge-error", html);
+        Assert.Contains("HTTP 401 &lt;b&gt;Unauthorized&lt;/b&gt;", html);
         Assert.DoesNotContain("<b>Unauthorized</b>", html);
+    }
+
+    [Fact]
+    public void Render_ConnectionTab_WhenAllFourTargetsSuccess_ContainsAllFourRowsInTable()
+    {
+        // 驗收標準 1：四筆全部成功時，頁面出現四列、四個用途名稱都在
+        var testResults = new[]
+        {
+            new MessageService.Web.Services.LineConnectivityTestResult(
+                Purpose: "名稱查詢", Target: "api.line.me", Success: true, Description: "LINE Bot", Via: "Direct"),
+            new MessageService.Web.Services.LineConnectivityTestResult(
+                Purpose: "媒體內容", Target: "api-data.line.me", Success: true, Description: "HTTP 200 OK", Via: "Direct"),
+            new MessageService.Web.Services.LineConnectivityTestResult(
+                Purpose: "貼圖", Target: "stickershop.line-scdn.net", Success: true, Description: "HTTP 200 OK", Via: "Direct"),
+            new MessageService.Web.Services.LineConnectivityTestResult(
+                Purpose: "頭貼 CDN", Target: "profile.line-scdn.net", Success: true, Description: "HTTP 200 OK", Via: "Direct")
+        };
+
+        var model = new EdgeAdminViewModel(
+            LineChannelSecret: null, LineChannelAccessToken: null, IngestApiKey: null,
+            IngestAllowedClientIps: [], WebhookSourceMode: "Any", WebhookSourceAllowedIps: [],
+            OutboundHere: true, LineTestResults: testResults, ActiveTab: "connection");
+
+        var html = EdgeAdminPage.Render(model);
+
+        Assert.Contains("<th>用途</th>", html);
+        Assert.Contains("<th>目標</th>", html);
+        Assert.Contains("<th>結果</th>", html);
+        Assert.Contains("<th>說明</th>", html);
+        Assert.Contains("<th>經由</th>", html);
+
+        Assert.Contains("<td>名稱查詢</td>", html);
+        Assert.Contains("<td>api.line.me</td>", html);
+        Assert.Contains("<td>媒體內容</td>", html);
+        Assert.Contains("<td>api-data.line.me</td>", html);
+        Assert.Contains("<td>貼圖</td>", html);
+        Assert.Contains("<td>stickershop.line-scdn.net</td>", html);
+        Assert.Contains("<td>頭貼 CDN</td>", html);
+        Assert.Contains("<td>profile.line-scdn.net</td>", html);
     }
 
     [Fact]
