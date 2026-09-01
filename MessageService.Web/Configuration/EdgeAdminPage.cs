@@ -1,4 +1,7 @@
 using System.Net;
+using System.Text;
+using MessageService.Web.Diagnostics;
+using Microsoft.Extensions.Logging;
 
 namespace MessageService.Web.Configuration;
 
@@ -13,11 +16,16 @@ public record EdgeAdminViewModel(
     string? WebhookSourceMode,
     IReadOnlyList<string>? WebhookSourceAllowedIps,
     bool Saved = false,
-    bool IsUnreadable = false);
+    bool IsUnreadable = false,
+    IReadOnlyList<LogBufferEntry>? LocalErrors = null,
+    string? TodayLogContent = null,
+    string? TodayLogErrorMessage = null,
+    IReadOnlyList<LogBufferEntry>? ProxyErrors = null,
+    string? ProxyStatusMessage = null);
 
 /// <summary>
 /// 提供純函式產生 Edge 端管理設定頁 HTML。
-/// 不依賴任何外部 CSS/JS/字型，整頁自包含，所有設定值皆做 HTML 逸出。
+/// 不依賴任何外部 CSS/JS/字型，整頁自包含，所有動態文字皆做 HTML 逸出。
 /// </summary>
 public static class EdgeAdminPage
 {
@@ -38,6 +46,89 @@ public static class EdgeAdminPage
         }
 
         return "••••••••" + secret[^4..];
+    }
+
+    /// <summary>
+    /// 產生日誌緩衝條目表格 HTML。本機最近錯誤（區塊一）與 EdgeProxy 端錯誤（區塊三）共用此函式。
+    /// </summary>
+    public static string RenderLogEntriesTable(IReadOnlyList<LogBufferEntry>? entries)
+    {
+        if (entries is null || entries.Count == 0)
+        {
+            return """<div class="empty-msg">目前沒有記錄到警告以上訊息</div>""";
+        }
+
+        var sb = new StringBuilder();
+        sb.Append("""
+<div class="table-responsive">
+    <table>
+        <thead>
+            <tr>
+                <th>時間</th>
+                <th>等級</th>
+                <th>分類</th>
+                <th>訊息</th>
+                <th>例外摘要</th>
+            </tr>
+        </thead>
+        <tbody>
+""");
+
+        foreach (var entry in entries)
+        {
+            var timeStr = entry.TimestampUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss");
+            var levelStr = entry.Level.ToString();
+            var levelClass = entry.Level switch
+            {
+                LogLevel.Warning => "badge-warning",
+                LogLevel.Error => "badge-error",
+                LogLevel.Critical => "badge-critical",
+                _ => "badge-info"
+            };
+            var categoryEncoded = WebUtility.HtmlEncode(entry.Category);
+            var messageEncoded = WebUtility.HtmlEncode(entry.Message);
+            var exceptionEncoded = string.IsNullOrEmpty(entry.ExceptionSummary)
+                ? "-"
+                : $"<pre class=\"exception-pre\">{WebUtility.HtmlEncode(entry.ExceptionSummary)}</pre>";
+
+            sb.Append($"""
+            <tr>
+                <td class="col-time">{timeStr}</td>
+                <td><span class="badge {levelClass}">{levelStr}</span></td>
+                <td class="col-category">{categoryEncoded}</td>
+                <td class="col-message">{messageEncoded}</td>
+                <td class="col-exception">{exceptionEncoded}</td>
+            </tr>
+""");
+        }
+
+        sb.Append("""
+        </tbody>
+    </table>
+</div>
+""");
+
+        return sb.ToString();
+    }
+
+    public static string RenderTodayLog(string? content, string? errorMessage)
+    {
+        if (!string.IsNullOrEmpty(errorMessage))
+        {
+            return $"""<div class="status-msg">{WebUtility.HtmlEncode(errorMessage)}</div>""";
+        }
+
+        return $"""<pre class="log-pre">{WebUtility.HtmlEncode(content ?? "")}</pre>""";
+    }
+
+    public static string RenderProxyErrors(IReadOnlyList<LogBufferEntry>? entries, string? statusMessage)
+    {
+        if (!string.IsNullOrEmpty(statusMessage))
+        {
+            return $"""<div class="status-msg">{WebUtility.HtmlEncode(statusMessage)}</div>""";
+        }
+
+        return RenderLogEntriesTable(entries);
     }
 
     public static string Render(EdgeAdminViewModel model)
@@ -69,6 +160,10 @@ public static class EdgeAdminPage
         var anySelected = webhookMode == "Any" ? " selected" : "";
         var allowlistSelected = webhookMode == "AllowlistOnly" ? " selected" : "";
 
+        var localErrorsHtml = RenderLogEntriesTable(model.LocalErrors);
+        var todayLogHtml = RenderTodayLog(model.TodayLogContent, model.TodayLogErrorMessage);
+        var proxyErrorsHtml = RenderProxyErrors(model.ProxyErrors, model.ProxyStatusMessage);
+
         return $$"""
 <!DOCTYPE html>
 <html lang="zh-TW">
@@ -90,7 +185,7 @@ public static class EdgeAdminPage
             background: #ffffff;
             border: 1px solid #dee2e6;
             border-radius: 8px;
-            max-width: 680px;
+            max-width: 860px;
             width: 100%;
             padding: 32px;
             box-shadow: 0 2px 4px rgba(0,0,0,0.05);
@@ -105,6 +200,146 @@ public static class EdgeAdminPage
             font-size: 0.875rem;
             color: #6c757d;
             margin-bottom: 24px;
+        }
+        .tab-radio {
+            display: none;
+        }
+        .tab-nav {
+            display: flex;
+            border-bottom: 2px solid #dee2e6;
+            margin-bottom: 24px;
+            gap: 8px;
+        }
+        .tab-button {
+            display: inline-block;
+            padding: 8px 16px;
+            font-size: 1rem;
+            font-weight: 600;
+            color: #6c757d;
+            cursor: pointer;
+            border-bottom: 2px solid transparent;
+            margin-bottom: -2px;
+            user-select: none;
+            text-decoration: none;
+        }
+        .tab-button:hover {
+            color: #495057;
+        }
+        #tab-nav-settings:checked ~ .tab-nav #tab-label-settings,
+        #tab-nav-connection:checked ~ .tab-nav #tab-label-connection,
+        #tab-nav-troubleshooting:checked ~ .tab-nav #tab-label-troubleshooting {
+            color: #007bff;
+            border-bottom-color: #007bff;
+        }
+        .tab-pane {
+            display: none;
+        }
+        #tab-nav-settings:checked ~ .tab-content .tab-pane-settings,
+        #tab-nav-connection:checked ~ .tab-content .tab-pane-connection,
+        #tab-nav-troubleshooting:checked ~ .tab-content .tab-pane-troubleshooting {
+            display: block;
+        }
+        .section {
+            margin-bottom: 32px;
+        }
+        .section:last-child {
+            margin-bottom: 0;
+        }
+        h2 {
+            font-size: 1.15rem;
+            margin-top: 0;
+            margin-bottom: 12px;
+            color: #495057;
+            border-bottom: 1px solid #e9ecef;
+            padding-bottom: 6px;
+        }
+        .empty-msg,
+        .status-msg {
+            color: #6c757d;
+            font-size: 0.9rem;
+            padding: 12px 16px;
+            background-color: #f8f9fa;
+            border: 1px solid #e9ecef;
+            border-radius: 4px;
+        }
+        .table-responsive {
+            overflow-x: auto;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.85rem;
+        }
+        th, td {
+            border: 1px solid #dee2e6;
+            padding: 8px 10px;
+            text-align: left;
+            vertical-align: top;
+        }
+        th {
+            background-color: #f8f9fa;
+            font-weight: 600;
+            color: #495057;
+        }
+        .col-time {
+            white-space: nowrap;
+            width: 150px;
+        }
+        .col-category {
+            word-break: break-word;
+            max-width: 180px;
+        }
+        .col-message {
+            word-break: break-word;
+        }
+        .col-exception {
+            max-width: 250px;
+        }
+        .badge {
+            display: inline-block;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+        .badge-warning {
+            color: #856404;
+            background-color: #fff3cd;
+        }
+        .badge-error {
+            color: #721c24;
+            background-color: #f8d7da;
+        }
+        .badge-critical {
+            color: #ffffff;
+            background-color: #dc3545;
+        }
+        .badge-info {
+            color: #0c5460;
+            background-color: #d1ecf1;
+        }
+        .exception-pre {
+            margin: 0;
+            font-family: Consolas, Monaco, "Courier New", monospace;
+            font-size: 0.8rem;
+            white-space: pre-wrap;
+            word-break: break-all;
+            max-height: 150px;
+            overflow-y: auto;
+        }
+        .log-pre {
+            background-color: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 4px;
+            padding: 12px;
+            font-family: Consolas, Monaco, "Courier New", monospace;
+            font-size: 0.825rem;
+            line-height: 1.4;
+            white-space: pre-wrap;
+            word-break: break-all;
+            max-height: 400px;
+            overflow-y: auto;
+            margin: 0;
         }
         .alert-success {
             background-color: #d4edda;
@@ -184,43 +419,77 @@ public static class EdgeAdminPage
 <div class="container">
     <h1>Edge 管理設定</h1>
     <div class="note">儲存後立即生效，不需重啟站台。機密欄位留空表示維持原值不變。</div>
-    {{unreadableAlertHtml}}
-    {{successAlertHtml}}
-    <form method="post" action="/edge-admin">
-        <div class="form-group">
-            <label for="lineChannelSecret">LINE Channel Secret</label>
-            <input type="password" id="lineChannelSecret" name="lineChannelSecret" placeholder="{{(string.IsNullOrEmpty(model.LineChannelSecret) ? "未設定" : WebUtility.HtmlEncode(maskedLineSecret))}}" />
-            <div class="field-desc">留空＝維持原值</div>
+
+    <div class="tabs-container">
+        <input type="radio" id="tab-nav-settings" name="admin-tab" class="tab-radio" checked />
+        <input type="radio" id="tab-nav-connection" name="admin-tab" class="tab-radio" />
+        <input type="radio" id="tab-nav-troubleshooting" name="admin-tab" class="tab-radio" />
+
+        <div class="tab-nav">
+            <label for="tab-nav-settings" class="tab-button" id="tab-label-settings">設定</label>
+            <label for="tab-nav-connection" class="tab-button" id="tab-label-connection">連線測試</label>
+            <label for="tab-nav-troubleshooting" class="tab-button" id="tab-label-troubleshooting">錯誤排查</label>
         </div>
-        <div class="form-group">
-            <label for="lineChannelAccessToken">LINE Channel Access Token</label>
-            <input type="password" id="lineChannelAccessToken" name="lineChannelAccessToken" placeholder="{{(string.IsNullOrEmpty(model.LineChannelAccessToken) ? "未設定" : WebUtility.HtmlEncode(maskedLineToken))}}" />
-            <div class="field-desc">留空＝維持原值</div>
+
+        <div class="tab-content">
+            <div id="tab-settings" class="tab-pane tab-pane-settings">
+                {{unreadableAlertHtml}}
+                {{successAlertHtml}}
+                <form method="post" action="/edge-admin">
+                    <div class="form-group">
+                        <label for="lineChannelSecret">LINE Channel Secret</label>
+                        <input type="password" id="lineChannelSecret" name="lineChannelSecret" placeholder="{{(string.IsNullOrEmpty(model.LineChannelSecret) ? "未設定" : WebUtility.HtmlEncode(maskedLineSecret))}}" />
+                        <div class="field-desc">留空＝維持原值</div>
+                    </div>
+                    <div class="form-group">
+                        <label for="lineChannelAccessToken">LINE Channel Access Token</label>
+                        <input type="password" id="lineChannelAccessToken" name="lineChannelAccessToken" placeholder="{{(string.IsNullOrEmpty(model.LineChannelAccessToken) ? "未設定" : WebUtility.HtmlEncode(maskedLineToken))}}" />
+                        <div class="field-desc">留空＝維持原值</div>
+                    </div>
+                    <div class="form-group">
+                        <label for="ingestApiKey">Ingest 共用金鑰</label>
+                        <input type="password" id="ingestApiKey" name="ingestApiKey" placeholder="{{(string.IsNullOrEmpty(model.IngestApiKey) ? "未設定" : WebUtility.HtmlEncode(maskedIngestKey))}}" />
+                        <div class="field-desc">留空＝維持原值</div>
+                    </div>
+                    <div class="form-group">
+                        <label for="ingestAllowedClientIps">Ingest 允許來源 IP</label>
+                        <textarea id="ingestAllowedClientIps" name="ingestAllowedClientIps" rows="3" placeholder="每行一筆 IP 或 CIDR">{{WebUtility.HtmlEncode(ingestIpsText)}}</textarea>
+                        <div class="field-desc">多行文字，每行一筆 IP 或 CIDR 網段</div>
+                    </div>
+                    <div class="form-group">
+                        <label for="webhookSourceMode">Webhook 來源限制</label>
+                        <select id="webhookSourceMode" name="webhookSourceMode">
+                            <option value="Any"{{anySelected}}>Any（不限制來源）</option>
+                            <option value="AllowlistOnly"{{allowlistSelected}}>AllowlistOnly（僅允許白名單）</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="webhookSourceAllowedIps">Webhook 允許來源 IP</label>
+                        <textarea id="webhookSourceAllowedIps" name="webhookSourceAllowedIps" rows="3" placeholder="每行一筆 IP 或 CIDR">{{WebUtility.HtmlEncode(webhookIpsText)}}</textarea>
+                        <div class="field-desc">多行文字，每行一筆 IP 或 CIDR 網段</div>
+                    </div>
+                    <button type="submit" class="btn-submit">儲存設定</button>
+                </form>
+            </div>
+            <div id="tab-connection" class="tab-pane tab-pane-connection">
+                <h2>連線測試</h2>
+            </div>
+            <div id="tab-troubleshooting" class="tab-pane tab-pane-troubleshooting">
+                <div class="section">
+                    <h2>本機最近錯誤</h2>
+                    {{localErrorsHtml}}
+                </div>
+                <div class="section">
+                    <h2>今日 log 檔尾</h2>
+                    {{todayLogHtml}}
+                </div>
+                <div class="section">
+                    <h2>EdgeProxy 端錯誤</h2>
+                    {{proxyErrorsHtml}}
+                </div>
+            </div>
         </div>
-        <div class="form-group">
-            <label for="ingestApiKey">Ingest 共用金鑰</label>
-            <input type="password" id="ingestApiKey" name="ingestApiKey" placeholder="{{(string.IsNullOrEmpty(model.IngestApiKey) ? "未設定" : WebUtility.HtmlEncode(maskedIngestKey))}}" />
-            <div class="field-desc">留空＝維持原值</div>
-        </div>
-        <div class="form-group">
-            <label for="ingestAllowedClientIps">Ingest 允許來源 IP</label>
-            <textarea id="ingestAllowedClientIps" name="ingestAllowedClientIps" rows="3" placeholder="每行一筆 IP 或 CIDR">{{WebUtility.HtmlEncode(ingestIpsText)}}</textarea>
-            <div class="field-desc">多行文字，每行一筆 IP 或 CIDR 網段</div>
-        </div>
-        <div class="form-group">
-            <label for="webhookSourceMode">Webhook 來源限制</label>
-            <select id="webhookSourceMode" name="webhookSourceMode">
-                <option value="Any"{{anySelected}}>Any（不限制來源）</option>
-                <option value="AllowlistOnly"{{allowlistSelected}}>AllowlistOnly（僅允許白名單）</option>
-            </select>
-        </div>
-        <div class="form-group">
-            <label for="webhookSourceAllowedIps">Webhook 允許來源 IP</label>
-            <textarea id="webhookSourceAllowedIps" name="webhookSourceAllowedIps" rows="3" placeholder="每行一筆 IP 或 CIDR">{{WebUtility.HtmlEncode(webhookIpsText)}}</textarea>
-            <div class="field-desc">多行文字，每行一筆 IP 或 CIDR 網段</div>
-        </div>
-        <button type="submit" class="btn-submit">儲存設定</button>
-    </form>
+    </div>
 </div>
 </body>
 </html>

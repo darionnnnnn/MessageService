@@ -368,6 +368,11 @@ public static class MessageServiceCoreServiceCollectionExtensions
                 // payload 只有訊息中繼資料（無媒體 blob），不需要比照 LineContentClient 的長 timeout
                 client.Timeout = TimeSpan.FromSeconds(30);
             }).AddHttpMessageHandler<IngestApiKeyHandler>();
+
+            builder.Services.AddHttpClient("edge-proxy-errors", client =>
+            {
+                client.Timeout = TimeSpan.FromSeconds(5);
+            });
         }
 
         // outbox 一律是 SQLite（收錄端本機緩衝，跟主資料庫 provider 無關），Migrate() 那段（見

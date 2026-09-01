@@ -185,4 +185,199 @@ public class EdgeAdminPageTests
         Assert.Equal("••••••••cdef", masked);
         Assert.DoesNotContain("0123", masked, System.StringComparison.Ordinal);
     }
+
+    [Fact]
+    public void Render_TabsStructure_ContainsAllThreeTabsAndContainers()
+    {
+        var model = new EdgeAdminViewModel(
+            LineChannelSecret: null,
+            LineChannelAccessToken: null,
+            IngestApiKey: null,
+            IngestAllowedClientIps: [],
+            WebhookSourceMode: "Any",
+            WebhookSourceAllowedIps: []);
+
+        var html = EdgeAdminPage.Render(model);
+
+        // 分頁標籤與容器
+        Assert.Contains("id=\"tab-label-settings\"", html);
+        Assert.Contains("id=\"tab-label-connection\"", html);
+        Assert.Contains("id=\"tab-label-troubleshooting\"", html);
+        Assert.Contains("設定", html);
+        Assert.Contains("連線測試", html);
+        Assert.Contains("錯誤排查", html);
+
+        Assert.Contains("id=\"tab-settings\"", html);
+        Assert.Contains("id=\"tab-connection\"", html);
+        Assert.Contains("id=\"tab-troubleshooting\"", html);
+
+        // 錯誤排查三區塊標題
+        Assert.Contains("本機最近錯誤", html);
+        Assert.Contains("今日 log 檔尾", html);
+        Assert.Contains("EdgeProxy 端錯誤", html);
+    }
+
+    [Fact]
+    public void Render_Troubleshooting_WhenBufferHasEntries_RendersTableWithEscapedContent()
+    {
+        var timestamp = new DateTimeOffset(2026, 9, 1, 10, 30, 0, TimeSpan.Zero);
+        var entries = new[]
+        {
+            new MessageService.Web.Diagnostics.LogBufferEntry(
+                TimestampUtc: timestamp,
+                Level: Microsoft.Extensions.Logging.LogLevel.Error,
+                Category: "MessageService.Test<Category>",
+                Message: "Something failed with <script>alert('xss')</script>",
+                ExceptionSummary: "InvalidOperationException: boom <script>")
+        };
+
+        var model = new EdgeAdminViewModel(
+            LineChannelSecret: null,
+            LineChannelAccessToken: null,
+            IngestApiKey: null,
+            IngestAllowedClientIps: [],
+            WebhookSourceMode: "Any",
+            WebhookSourceAllowedIps: [],
+            LocalErrors: entries);
+
+        var html = EdgeAdminPage.Render(model);
+
+        // 表格標頭
+        Assert.Contains("<th>時間</th>", html);
+        Assert.Contains("<th>等級</th>", html);
+        Assert.Contains("<th>分類</th>", html);
+        Assert.Contains("<th>訊息</th>", html);
+        Assert.Contains("<th>例外摘要</th>", html);
+
+        // 等級與時間
+        Assert.Contains("badge-error", html);
+        Assert.Contains(timestamp.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss"), html);
+
+        // 逸出驗證：不得出現原樣 <script>
+        Assert.DoesNotContain("<script>", html);
+        Assert.Contains("&lt;script&gt;alert(&#39;xss&#39;)&lt;/script&gt;", html);
+        Assert.Contains("MessageService.Test&lt;Category&gt;", html);
+        Assert.Contains("boom &lt;script&gt;", html);
+    }
+
+    [Fact]
+    public void Render_Troubleshooting_WhenBufferEmpty_RendersEmptyBufferMessage()
+    {
+        var model = new EdgeAdminViewModel(
+            LineChannelSecret: null,
+            LineChannelAccessToken: null,
+            IngestApiKey: null,
+            IngestAllowedClientIps: [],
+            WebhookSourceMode: "Any",
+            WebhookSourceAllowedIps: [],
+            LocalErrors: []);
+
+        var html = EdgeAdminPage.Render(model);
+
+        Assert.Contains("目前沒有記錄到警告以上訊息", html);
+    }
+
+    [Fact]
+    public void Render_Troubleshooting_LogTail_RendersContentOrErrorMessage()
+    {
+        // 情況一：有 log 內容且含特殊字元
+        var modelWithLog = new EdgeAdminViewModel(
+            LineChannelSecret: null,
+            LineChannelAccessToken: null,
+            IngestApiKey: null,
+            IngestAllowedClientIps: [],
+            WebhookSourceMode: "Any",
+            WebhookSourceAllowedIps: [],
+            TodayLogContent: "2026-09-01 Log entry 1 <script>\n2026-09-01 Log entry 2",
+            TodayLogErrorMessage: null);
+
+        var htmlWithLog = EdgeAdminPage.Render(modelWithLog);
+        Assert.Contains("<pre class=\"log-pre\">", htmlWithLog);
+        Assert.Contains("2026-09-01 Log entry 1 &lt;script&gt;\n2026-09-01 Log entry 2", htmlWithLog);
+        Assert.DoesNotContain("<script>", htmlWithLog);
+
+        // 情況二：今天尚無 log 檔
+        var modelNoLog = new EdgeAdminViewModel(
+            LineChannelSecret: null,
+            LineChannelAccessToken: null,
+            IngestApiKey: null,
+            IngestAllowedClientIps: [],
+            WebhookSourceMode: "Any",
+            WebhookSourceAllowedIps: [],
+            TodayLogContent: null,
+            TodayLogErrorMessage: "今天尚無 log 檔");
+
+        var htmlNoLog = EdgeAdminPage.Render(modelNoLog);
+        Assert.Contains("今天尚無 log 檔", htmlNoLog);
+
+        // 情況三：讀檔失敗
+        var modelErrLog = new EdgeAdminViewModel(
+            LineChannelSecret: null,
+            LineChannelAccessToken: null,
+            IngestApiKey: null,
+            IngestAllowedClientIps: [],
+            WebhookSourceMode: "Any",
+            WebhookSourceAllowedIps: [],
+            TodayLogContent: null,
+            TodayLogErrorMessage: "無法讀取 log 檔：存取被拒");
+
+        var htmlErrLog = EdgeAdminPage.Render(modelErrLog);
+        Assert.Contains("無法讀取 log 檔：存取被拒", htmlErrLog);
+    }
+
+    [Fact]
+    public void Render_Troubleshooting_ProxyErrors_RendersStatusOrTable()
+    {
+        // 情況一：未使用 EdgeProxy
+        var modelUnused = new EdgeAdminViewModel(
+            LineChannelSecret: null,
+            LineChannelAccessToken: null,
+            IngestApiKey: null,
+            IngestAllowedClientIps: [],
+            WebhookSourceMode: "Any",
+            WebhookSourceAllowedIps: [],
+            ProxyStatusMessage: "本主機未使用 EdgeProxy");
+
+        var htmlUnused = EdgeAdminPage.Render(modelUnused);
+        Assert.Contains("本主機未使用 EdgeProxy", htmlUnused);
+
+        // 情況二：連線失敗訊息
+        var modelFailed = new EdgeAdminViewModel(
+            LineChannelSecret: null,
+            LineChannelAccessToken: null,
+            IngestApiKey: null,
+            IngestAllowedClientIps: [],
+            WebhookSourceMode: "Any",
+            WebhookSourceAllowedIps: [],
+            ProxyStatusMessage: "無法連上 EdgeProxy：連線逾時——請直接查看該主機的 logs 目錄");
+
+        var htmlFailed = EdgeAdminPage.Render(modelFailed);
+        Assert.Contains("無法連上 EdgeProxy：連線逾時——請直接查看該主機的 logs 目錄", htmlFailed);
+
+        // 情況三：連線成功且有條目（與本機錯誤共用表格渲染）
+        var entries = new[]
+        {
+            new MessageService.Web.Diagnostics.LogBufferEntry(
+                TimestampUtc: new DateTimeOffset(2026, 9, 1, 10, 0, 0, TimeSpan.Zero),
+                Level: Microsoft.Extensions.Logging.LogLevel.Warning,
+                Category: "EdgeProxy.Forwarder",
+                Message: "Proxy warning message",
+                ExceptionSummary: null)
+        };
+
+        var modelProxyOk = new EdgeAdminViewModel(
+            LineChannelSecret: null,
+            LineChannelAccessToken: null,
+            IngestApiKey: null,
+            IngestAllowedClientIps: [],
+            WebhookSourceMode: "Any",
+            WebhookSourceAllowedIps: [],
+            ProxyErrors: entries,
+            ProxyStatusMessage: null);
+
+        var htmlProxyOk = EdgeAdminPage.Render(modelProxyOk);
+        Assert.Contains("badge-warning", htmlProxyOk);
+        Assert.Contains("EdgeProxy.Forwarder", htmlProxyOk);
+        Assert.Contains("Proxy warning message", htmlProxyOk);
+    }
 }

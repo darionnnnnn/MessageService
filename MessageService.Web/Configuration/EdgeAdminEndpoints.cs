@@ -1,6 +1,13 @@
+using System.Net.Http.Json;
+using System.Text;
+using MessageService.Services;
+using MessageService.Web.Diagnostics;
+using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 
 namespace MessageService.Web.Configuration;
 
@@ -15,10 +22,13 @@ public static class EdgeAdminEndpoints
 
     public static void MapEdgeAdminEndpoints(this IEndpointRouteBuilder endpoints)
     {
-        endpoints.MapGet("/edge-admin", (
+        endpoints.MapGet("/edge-admin", async (
             IConfiguration config,
             EdgeSettingsStore store,
-            HttpContext context) =>
+            HttpContext context,
+            IHttpClientFactory httpClientFactory,
+            IHostEnvironment hostEnvironment,
+            LogRingBuffer ringBuffer) =>
         {
             var saved = context.Request.Query.ContainsKey("saved");
 
@@ -31,6 +41,15 @@ public static class EdgeAdminEndpoints
             var webhookIps = config.GetSection(PrefixWebhookIps).Get<string[]>() ?? [];
             var isUnreadable = store.LoadStatus == EncryptedSettingsLoadStatus.Unreadable;
 
+            // 錯誤排查：本機緩衝快照
+            var localErrors = ringBuffer.Snapshot();
+
+            // 錯誤排查：今日 log 檔尾
+            var (todayLogContent, todayLogErrorMessage) = ReadTodayLogTail(hostEnvironment.ContentRootPath);
+
+            // 錯誤排查：EdgeProxy 錯誤
+            var (proxyErrors, proxyStatusMessage) = await FetchProxyErrorsAsync(httpClientFactory, config);
+
             var model = new EdgeAdminViewModel(
                 lineSecret,
                 lineToken,
@@ -39,7 +58,12 @@ public static class EdgeAdminEndpoints
                 webhookMode,
                 webhookIps,
                 Saved: saved,
-                IsUnreadable: isUnreadable);
+                IsUnreadable: isUnreadable,
+                LocalErrors: localErrors,
+                TodayLogContent: todayLogContent,
+                TodayLogErrorMessage: todayLogErrorMessage,
+                ProxyErrors: proxyErrors,
+                ProxyStatusMessage: proxyStatusMessage);
 
             var html = EdgeAdminPage.Render(model);
             // 頁面帶有機密的末四碼，不能進瀏覽器磁碟快取或中間代理
@@ -151,5 +175,81 @@ public static class EdgeAdminEndpoints
             .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             .Where(line => !string.IsNullOrWhiteSpace(line))
             .ToList();
+    }
+
+    private static (string? Content, string? ErrorMessage) ReadTodayLogTail(string contentRootPath)
+    {
+        var todayStr = DateTime.Now.ToString("yyyy-MM-dd");
+        var targetPath = Path.Combine(contentRootPath, "logs", $"messageservice-{todayStr}.log");
+
+        if (!File.Exists(targetPath))
+        {
+            return (null, "今天尚無 log 檔");
+        }
+
+        try
+        {
+            const int maxLines = 100;
+            var queue = new Queue<string>(maxLines);
+            using var stream = new FileStream(targetPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            using var reader = new StreamReader(stream, Encoding.UTF8);
+
+            string? line;
+            while ((line = reader.ReadLine()) is not null)
+            {
+                if (queue.Count >= maxLines)
+                {
+                    queue.Dequeue();
+                }
+                queue.Enqueue(line);
+            }
+
+            return (string.Join("\n", queue), null);
+        }
+        catch (Exception ex)
+        {
+            return (null, $"無法讀取 log 檔：{ex.Message}");
+        }
+    }
+
+    private static async Task<(IReadOnlyList<LogBufferEntry>? Entries, string? StatusMessage)> FetchProxyErrorsAsync(
+        IHttpClientFactory httpClientFactory,
+        IConfiguration config)
+    {
+        var outboundVia = config["Line:OutboundVia"];
+        var isEdgeProxy = string.Equals(outboundVia, "EdgeProxy", StringComparison.OrdinalIgnoreCase);
+        var outboundProxyBaseUrl = config["Line:OutboundProxyBaseUrl"];
+
+        if (!isEdgeProxy || string.IsNullOrWhiteSpace(outboundProxyBaseUrl))
+        {
+            return (null, "本主機未使用 EdgeProxy");
+        }
+
+        try
+        {
+            var client = httpClientFactory.CreateClient("edge-proxy-errors");
+            var baseUri = HttpBaseAddress.Create(outboundProxyBaseUrl);
+            var requestUri = new Uri(baseUri, "proxy-admin/errors");
+
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            var response = await client.GetAsync(requestUri, cts.Token);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                return (null, $"無法連上 EdgeProxy：HTTP {(int)response.StatusCode} {response.ReasonPhrase}——請直接查看該主機的 logs 目錄");
+            }
+
+            var data = await response.Content.ReadFromJsonAsync<ProxyAdminErrorsResponse>(cancellationToken: cts.Token);
+            if (data is null)
+            {
+                return (null, "無法連上 EdgeProxy：回應內容為空——請直接查看該主機的 logs 目錄");
+            }
+
+            return (data.Entries, null);
+        }
+        catch (Exception ex)
+        {
+            return (null, $"無法連上 EdgeProxy：{ex.Message}——請直接查看該主機的 logs 目錄");
+        }
     }
 }

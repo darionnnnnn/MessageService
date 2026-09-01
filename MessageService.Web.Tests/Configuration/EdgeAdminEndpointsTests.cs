@@ -4,11 +4,13 @@ using System.Text;
 using MessageService.Outbox;
 using MessageService.Tests.TestSupport;
 using MessageService.Web.Configuration;
+using MessageService.Web.Diagnostics;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Xunit;
 
 namespace MessageService.Web.Tests.Configuration;
@@ -458,5 +460,260 @@ public class EdgeAdminEndpointsTests : IDisposable
         Assert.Equal(EncryptedSettingsLoadStatus.Loaded, store.LoadStatus);
         var config = factory.Services.GetRequiredService<IConfiguration>();
         Assert.Equal("repaired-secret", config["Line:ChannelSecret"]);
+    }
+
+    [Fact]
+    public async Task EdgeAdmin_Get_ContainsThreeTabsAndContainersAndSectionTitles()
+    {
+        using var factory = CreateEdgeFactory();
+        using var client = factory.CreateClient();
+
+        var response = await client.GetAsync("/edge-admin");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        var html = await response.Content.ReadAsStringAsync();
+
+        // 三個分頁標題與容器
+        Assert.Contains("id=\"tab-label-settings\"", html);
+        Assert.Contains("id=\"tab-label-connection\"", html);
+        Assert.Contains("id=\"tab-label-troubleshooting\"", html);
+        Assert.Contains("設定", html);
+        Assert.Contains("連線測試", html);
+        Assert.Contains("錯誤排查", html);
+
+        Assert.Contains("id=\"tab-settings\"", html);
+        Assert.Contains("id=\"tab-connection\"", html);
+        Assert.Contains("id=\"tab-troubleshooting\"", html);
+
+        // 錯誤排查三區塊標題
+        Assert.Contains("本機最近錯誤", html);
+        Assert.Contains("今日 log 檔尾", html);
+        Assert.Contains("EdgeProxy 端錯誤", html);
+    }
+
+    [Fact]
+    public async Task EdgeAdmin_Get_WhenLocalBufferHasEntries_DisplaysEntriesAndEscapesHtml()
+    {
+        using var factory = CreateEdgeFactory();
+
+        // 寫入帶有 HTML 特殊字元的 Warning
+        var ringBuffer = factory.Services.GetRequiredService<LogRingBuffer>();
+        ringBuffer.Add(new LogBufferEntry(
+            TimestampUtc: DateTimeOffset.UtcNow,
+            Level: LogLevel.Warning,
+            Category: "TestCategory",
+            Message: "Local buffer with <script>alert('msg')</script>",
+            ExceptionSummary: "InvalidOp: <script>fail</script>"));
+
+        using var client = factory.CreateClient();
+        var response = await client.GetAsync("/edge-admin");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var html = await response.Content.ReadAsStringAsync();
+
+        Assert.DoesNotContain("<script>alert", html);
+        Assert.Contains("&lt;script&gt;alert(&#39;msg&#39;)&lt;/script&gt;", html);
+        Assert.Contains("TestCategory", html);
+        Assert.Contains("InvalidOp: &lt;script&gt;fail&lt;/script&gt;", html);
+    }
+
+    [Fact]
+    public async Task EdgeAdmin_Get_WhenLocalBufferEmpty_DisplaysEmptyBufferMessage()
+    {
+        using var factory = CreateEdgeFactory(builder =>
+        {
+            builder.ConfigureServices(services =>
+            {
+                services.AddSingleton(new LogRingBuffer());
+            });
+        });
+        using var client = factory.CreateClient();
+
+        var response = await client.GetAsync("/edge-admin");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var html = await response.Content.ReadAsStringAsync();
+        Assert.Contains("目前沒有記錄到警告以上訊息", html);
+    }
+
+    [Fact]
+    public async Task EdgeAdmin_Get_WhenTodayLogDoesNotExist_DisplaysNoLogMessageAndReturns200()
+    {
+        using var factory = CreateEdgeFactory();
+        using var client = factory.CreateClient();
+
+        var response = await client.GetAsync("/edge-admin");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var html = await response.Content.ReadAsStringAsync();
+        Assert.Contains("今天尚無 log 檔", html);
+    }
+
+    [Fact]
+    public async Task EdgeAdmin_Get_WhenTodayLogExists_DisplaysLogContentInPre()
+    {
+        var logsDir = Path.Combine(_tempDir, "logs");
+        Directory.CreateDirectory(logsDir);
+        var todayStr = DateTime.Now.ToString("yyyy-MM-dd");
+        var logFile = Path.Combine(logsDir, $"messageservice-{todayStr}.log");
+        await File.WriteAllTextAsync(logFile, "2026-09-01 10:00:00|INFO|App|Service started <script>\n2026-09-01 10:01:00|WARN|App|Disk check\n", Encoding.UTF8);
+
+        using var factory = CreateEdgeFactory();
+        using var client = factory.CreateClient();
+
+        var response = await client.GetAsync("/edge-admin");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var html = await response.Content.ReadAsStringAsync();
+        Assert.Contains("<pre class=\"log-pre\">", html);
+        Assert.Contains("2026-09-01 10:00:00|INFO|App|Service started &lt;script&gt;", html);
+        Assert.Contains("2026-09-01 10:01:00|WARN|App|Disk check", html);
+        Assert.DoesNotContain("<script>", html);
+    }
+
+    [Fact]
+    public async Task EdgeAdmin_Get_WhenTodayLogHasMoreThan100Lines_DisplaysLast100Lines()
+    {
+        var logsDir = Path.Combine(_tempDir, "logs");
+        Directory.CreateDirectory(logsDir);
+        var todayStr = DateTime.Now.ToString("yyyy-MM-dd");
+        var logFile = Path.Combine(logsDir, $"messageservice-{todayStr}.log");
+
+        var sb = new StringBuilder();
+        for (var i = 1; i <= 150; i++)
+        {
+            sb.AppendLine($"Log line #{i:D3}");
+        }
+        await File.WriteAllTextAsync(logFile, sb.ToString(), Encoding.UTF8);
+
+        using var factory = CreateEdgeFactory();
+        using var client = factory.CreateClient();
+
+        var response = await client.GetAsync("/edge-admin");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var html = await response.Content.ReadAsStringAsync();
+
+        // 包含第 150 行與第 51 行（最後 100 行）
+        Assert.Contains("Log line #150", html);
+        Assert.Contains("Log line #051", html);
+
+        // 不包含前 50 行（如第 1 行與第 50 行）
+        Assert.DoesNotContain("Log line #001", html);
+        Assert.DoesNotContain("Log line #050", html);
+    }
+
+    [Fact]
+    public async Task EdgeAdmin_Get_WhenNotUsingEdgeProxy_DisplaysNotUsingEdgeProxy()
+    {
+        using var factory = CreateEdgeFactory(builder =>
+        {
+            builder.UseSetting("Line:OutboundVia", "Direct");
+        });
+        using var client = factory.CreateClient();
+
+        var response = await client.GetAsync("/edge-admin");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var html = await response.Content.ReadAsStringAsync();
+        Assert.Contains("本主機未使用 EdgeProxy", html);
+    }
+
+    [Fact]
+    public async Task EdgeAdmin_Get_WhenEdgeProxyConfigured_FetchFails_DisplaysFailureMessageAndReturns200()
+    {
+        using var factory = CreateEdgeFactory(builder =>
+        {
+            builder.UseSetting("Line:OutboundVia", "EdgeProxy");
+            builder.UseSetting("Line:OutboundProxyBaseUrl", "http://192.0.2.10/MSLine");
+
+            builder.ConfigureServices(services =>
+            {
+                services.AddHttpClient("edge-proxy-errors")
+                    .ConfigurePrimaryHttpMessageHandler(() => new FakeHttpMessageHandler(req =>
+                        new HttpResponseMessage(HttpStatusCode.InternalServerError)
+                        {
+                            ReasonPhrase = "Proxy Unavailable"
+                        }));
+            });
+        });
+
+        using var client = factory.CreateClient();
+        var response = await client.GetAsync("/edge-admin");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var html = await response.Content.ReadAsStringAsync();
+        Assert.Contains("無法連上 EdgeProxy", html);
+        Assert.Contains("請直接查看該主機的 logs 目錄", html);
+    }
+
+    [Fact]
+    public async Task EdgeAdmin_Get_WhenEdgeProxyConfigured_FetchThrowsException_DisplaysFailureMessageAndReturns200()
+    {
+        using var factory = CreateEdgeFactory(builder =>
+        {
+            builder.UseSetting("Line:OutboundVia", "EdgeProxy");
+            builder.UseSetting("Line:OutboundProxyBaseUrl", "http://192.0.2.10/MSLine");
+
+            builder.ConfigureServices(services =>
+            {
+                services.AddHttpClient("edge-proxy-errors")
+                    .ConfigurePrimaryHttpMessageHandler(() => new FakeHttpMessageHandler(req =>
+                        throw new HttpRequestException("Connection refused by proxy")));
+            });
+        });
+
+        using var client = factory.CreateClient();
+        var response = await client.GetAsync("/edge-admin");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var html = await response.Content.ReadAsStringAsync();
+        Assert.Contains("無法連上 EdgeProxy", html);
+        Assert.Contains("Connection refused by proxy", html);
+        Assert.Contains("請直接查看該主機的 logs 目錄", html);
+    }
+
+    [Fact]
+    public async Task EdgeAdmin_Get_WhenEdgeProxyConfigured_FetchSucceeds_DisplaysProxyEntries()
+    {
+        var proxyResponse = new ProxyAdminErrorsResponse(
+            MachineName: "ProxyServer01",
+            ProcessStartTimeUtc: DateTimeOffset.UtcNow.AddHours(-2),
+            Entries:
+            [
+                new LogBufferEntry(
+                    TimestampUtc: DateTimeOffset.UtcNow.AddMinutes(-5),
+                    Level: LogLevel.Error,
+                    Category: "EdgeProxy.Forwarder",
+                    Message: "Proxy forwarded error test",
+                    ExceptionSummary: "TimeoutException: downstream timed out")
+            ]);
+
+        var json = System.Text.Json.JsonSerializer.Serialize(proxyResponse);
+
+        using var factory = CreateEdgeFactory(builder =>
+        {
+            builder.UseSetting("Line:OutboundVia", "EdgeProxy");
+            builder.UseSetting("Line:OutboundProxyBaseUrl", "http://192.0.2.10/MSLine");
+
+            builder.ConfigureServices(services =>
+            {
+                services.AddHttpClient("edge-proxy-errors")
+                    .ConfigurePrimaryHttpMessageHandler(() => new FakeHttpMessageHandler(req =>
+                        new HttpResponseMessage(HttpStatusCode.OK)
+                        {
+                            Content = new StringContent(json, Encoding.UTF8, "application/json")
+                        }));
+            });
+        });
+
+        using var client = factory.CreateClient();
+        var response = await client.GetAsync("/edge-admin");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var html = await response.Content.ReadAsStringAsync();
+        Assert.Contains("EdgeProxy.Forwarder", html);
+        Assert.Contains("Proxy forwarded error test", html);
+        Assert.Contains("TimeoutException: downstream timed out", html);
     }
 }
