@@ -105,12 +105,13 @@ public class LineProfileClient : ILineProfileClient
             return (null, null);
         }
 
+        string? requestUrl = null;
         try
         {
             var proxyBaseAddress = !string.IsNullOrWhiteSpace(_options.OutboundProxyBaseUrl)
                 ? HttpBaseAddress.Create(_options.OutboundProxyBaseUrl)
                 : null;
-            var requestUrl = LineImageUrlRewriter.Rewrite(pictureUrl, _options.OutboundVia, proxyBaseAddress);
+            requestUrl = LineImageUrlRewriter.Rewrite(pictureUrl, _options.OutboundVia, proxyBaseAddress);
 
             // 設定要走 proxy、URL 卻沒被改寫，代表 LINE 換了頭貼 CDN 的網域、不在改寫器的
             // 允許清單裡。這時會退回直連（不丟掉頭貼），但 Edge 沒有對外網路的部署會下載失敗——
@@ -142,7 +143,9 @@ public class LineProfileClient : ILineProfileClient
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            _logger.LogWarning(ex, "Failed to download profile picture from {PictureUrl}", pictureUrl);
+            var targetHost = requestUrl ?? pictureUrl;
+            _logger.LogWarning(ex, "Failed to download profile picture from {PictureUrl}: {FailureReason}",
+                pictureUrl, OutboundFailureClassifier.Classify(ex, targetHost));
             return (null, null);
         }
     }

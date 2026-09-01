@@ -205,6 +205,11 @@ public class ContentDownloadService(
             return;
         }
 
+        // 貼圖走 CDN、其餘走 content API；走 EdgeProxy 時兩者都是 proxy 的 host
+        var targetHost = HttpBaseAddress.ResolveOutboundHost(
+            scope.ServiceProvider.GetService<IOptions<LineOptions>>()?.Value,
+            item.MessageType == "sticker" ? "stickershop.line-scdn.net" : "api-data.line.me");
+        Exception? lastException = null;
         for (var attempt = 1; attempt <= _options.MaxRetries; attempt++)
         {
             try
@@ -224,8 +229,9 @@ public class ContentDownloadService(
             }
             catch (Exception ex)
             {
-                logger.LogWarning(ex, "Download attempt {Attempt}/{MaxRetries} failed for message content {MessageContentId}",
-                    attempt, _options.MaxRetries, messageContentId);
+                lastException = ex;
+                logger.LogWarning(ex, "Download attempt {Attempt}/{MaxRetries} failed for message content {MessageContentId}: {FailureReason}",
+                    attempt, _options.MaxRetries, messageContentId, OutboundFailureClassifier.Classify(ex, targetHost));
 
                 if (attempt < _options.MaxRetries)
                 {
@@ -234,8 +240,12 @@ public class ContentDownloadService(
             }
         }
 
-        logger.LogError("All {MaxRetries} download attempts failed for message content {MessageContentId}, marking as Failed",
-            _options.MaxRetries, messageContentId);
+        var exhaustedReason = lastException != null
+            ? OutboundFailureClassifier.Classify(lastException, targetHost)
+            : null;
+
+        logger.LogError("All {MaxRetries} download attempts failed for message content {MessageContentId}, marking as Failed: {FailureReason}",
+            _options.MaxRetries, messageContentId, exhaustedReason);
         await workSource.FailAsync(messageContentId, _ownerId, cancellationToken);
     }
 

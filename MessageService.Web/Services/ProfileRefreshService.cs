@@ -65,6 +65,8 @@ public class ProfileRefreshService(
         using var scope = scopeFactory.CreateScope();
         var profileStore = scope.ServiceProvider.GetRequiredService<IProfileStore>();
         var profileClient = scope.ServiceProvider.GetRequiredService<ILineProfileClient>();
+        var targetHost = HttpBaseAddress.ResolveOutboundHost(
+            scope.ServiceProvider.GetService<IOptions<LineOptions>>()?.Value, "api.line.me");
         var cutoff = DateTimeOffset.UtcNow - _options.RefreshAfter;
 
         // 一次查完群組與成員的 staleness——TTL 判斷一定要在打 LINE API 之前完成才省得到配額，
@@ -75,7 +77,7 @@ public class ProfileRefreshService(
         {
             if (staleness.GroupStale)
             {
-                await RefreshGroupAsync(profileStore, profileClient, task.GroupId, staleness.GroupPictureFetchedUrl, staleness.HasGroupPicture, cancellationToken);
+                await RefreshGroupAsync(profileStore, profileClient, task.GroupId, staleness.GroupPictureFetchedUrl, staleness.HasGroupPicture, targetHost, cancellationToken);
             }
             else
             {
@@ -88,7 +90,7 @@ public class ProfileRefreshService(
             var memberKey = MemberKey(task.GroupId, task.UserId);
             if (staleness.MemberStale)
             {
-                await RefreshMemberAsync(profileStore, profileClient, task.GroupId, task.UserId, staleness.MemberPictureFetchedUrl, staleness.HasMemberPicture, cancellationToken);
+                await RefreshMemberAsync(profileStore, profileClient, task.GroupId, task.UserId, staleness.MemberPictureFetchedUrl, staleness.HasMemberPicture, targetHost, cancellationToken);
             }
             else
             {
@@ -132,7 +134,7 @@ public class ProfileRefreshService(
     // LINE API：429 的情況等於用訊息速率持續加壓，把限流拖得更久。原本實際被保護到的只剩
     // 「bot 被踢出群組／使用者退群」這個 404 情境，跟這個功能的初衷正好相反。
     private async Task RefreshGroupAsync(
-        IProfileStore profileStore, ILineProfileClient profileClient, string groupId, string? knownPictureUrl, bool hasPicture, CancellationToken cancellationToken)
+        IProfileStore profileStore, ILineProfileClient profileClient, string groupId, string? knownPictureUrl, bool hasPicture, string? targetHost, CancellationToken cancellationToken)
     {
         GroupSummary? summary;
         try
@@ -142,7 +144,8 @@ public class ProfileRefreshService(
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             RecordFailure(groupId);
-            logger.LogWarning(ex, "Group summary lookup failed for group {GroupId}; backing off", groupId);
+            logger.LogWarning(ex, "Group summary lookup failed for group {GroupId}; backing off: {FailureReason}",
+                groupId, OutboundFailureClassifier.Classify(ex, targetHost));
             return;
         }
 
@@ -158,7 +161,7 @@ public class ProfileRefreshService(
     }
 
     private async Task RefreshMemberAsync(
-        IProfileStore profileStore, ILineProfileClient profileClient, string groupId, string userId, string? knownPictureUrl, bool hasPicture, CancellationToken cancellationToken)
+        IProfileStore profileStore, ILineProfileClient profileClient, string groupId, string userId, string? knownPictureUrl, bool hasPicture, string? targetHost, CancellationToken cancellationToken)
     {
         MemberProfile? profile;
         try
@@ -168,7 +171,8 @@ public class ProfileRefreshService(
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             RecordFailure(MemberKey(groupId, userId));
-            logger.LogWarning(ex, "Member profile lookup failed for group {GroupId} user {UserId}; backing off", groupId, userId);
+            logger.LogWarning(ex, "Member profile lookup failed for group {GroupId} user {UserId}; backing off: {FailureReason}",
+                groupId, userId, OutboundFailureClassifier.Classify(ex, targetHost));
             return;
         }
 
