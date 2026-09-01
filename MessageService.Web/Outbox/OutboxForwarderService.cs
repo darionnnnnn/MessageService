@@ -19,12 +19,16 @@ public class OutboxForwarderService(
     EdgeChannelState channelState,
     IOptions<OutboxOptions> options,
     IOptions<HeartbeatOptions> heartbeatOptions,
+    IOptions<IngestOptions> ingestOptions,
     ILogger<OutboxForwarderService> logger) : BackgroundService
 {
     private static readonly TimeSpan DeadLetterCheckInterval = TimeSpan.FromHours(1);
 
     private readonly OutboxOptions _options = options.Value;
     private readonly HeartbeatOptions _heartbeatOptions = heartbeatOptions.Value;
+    private readonly string _targetDescription = string.IsNullOrWhiteSpace(ingestOptions.Value.BaseUrl)
+        ? "未設定 Ingest:BaseUrl"
+        : HttpBaseAddress.Create(ingestOptions.Value.BaseUrl).ToString();
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -258,11 +262,13 @@ public class OutboxForwarderService(
             if (!wasPaused && channelState.PushPaused)
             {
                 logger.LogWarning(batchFailure,
-                    "推送到 Core 失敗，暫停主動推送改由對方輪詢接手，之後每隔一個探測週期再試一次。");
+                    "推送到 Core（{Target}）失敗，暫停主動推送改由對方輪詢接手，之後每隔一個探測週期再試一次。",
+                    _targetDescription);
             }
 
             logger.LogWarning(batchFailure,
-                "Failed to forward outbox batch of {Count} entries, retrying at backoff", entriesByWebhookEventId.Count);
+                "Failed to forward outbox batch of {Count} entries to {Target}, retrying at backoff",
+                entriesByWebhookEventId.Count, _targetDescription);
         }
 
         await dbContext.SaveChangesAsync(cancellationToken);

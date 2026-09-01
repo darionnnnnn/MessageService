@@ -4,9 +4,11 @@ using System.Text;
 using MessageService.Options;
 using MessageService.Tests.TestSupport;
 using MessageService.Web.Middleware;
+using MessageService.Web.Services;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 
 namespace MessageService.Web.Tests.Middleware;
 
@@ -341,5 +343,92 @@ public class EdgeProxyLineForwarderTests
         var response = await client.GetAsync("/line/api/v2/bot/group/G1/summary");
 
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    private sealed class CapturingLogger<T> : ILogger<T>
+    {
+        public List<(LogLevel Level, string Message)> Logs { get; } = [];
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            LogLevel logLevel,
+            EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            Logs.Add((logLevel, formatter(state, exception)));
+        }
+    }
+
+    private sealed class FakeDnsLookup(Func<string, IPAddress[]> factory) : IDnsLookup
+    {
+        public Task<IPAddress[]> GetHostAddressesAsync(string host, CancellationToken cancellationToken)
+            => Task.FromResult(factory(host));
+    }
+
+    private WebApplicationFactory<Program> CreateFactoryWithLogging(
+        Func<HttpRequestMessage, HttpResponseMessage> responder,
+        IDnsLookup dnsLookup,
+        ILogger<EdgeProxyLineForwarder> logger)
+    {
+        return new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
+        {
+            builder.UseEnvironment("Testing");
+            builder.UseSetting("Deployment:Mode", "EdgeProxy");
+            builder.UseSetting("EdgeProxy:TargetBaseUrl", "http://192.0.2.10/MSLine");
+            builder.UseSetting("EdgeProxy:AllowedClientIps:0", "127.0.0.1");
+
+            builder.ConfigureServices(services =>
+            {
+                services.AddSingleton<IStartupFilter>(new FakeRemoteIpStartupFilter(IPAddress.Parse("127.0.0.1")));
+                services.AddHttpClient(EdgeProxyLineForwarder.HttpClientName)
+                    .ConfigurePrimaryHttpMessageHandler(() => new FakeHttpMessageHandler(responder));
+                services.AddSingleton(dnsLookup);
+                services.AddSingleton(logger);
+            });
+        });
+    }
+
+    [Fact]
+    public async Task Get_UpstreamException_LogsWarningWithTargetUrlAndResolvedIp()
+    {
+        var capturingLogger = new CapturingLogger<EdgeProxyLineForwarder>();
+        var fakeDns = new FakeDnsLookup(_ => [IPAddress.Parse("203.0.113.10")]);
+
+        using var factory = CreateFactoryWithLogging(
+            _ => throw new HttpRequestException("Network failure"),
+            fakeDns,
+            capturingLogger);
+        using var client = factory.CreateClient();
+
+        var response = await client.GetAsync("/line/api/v2/bot/group/G1/summary");
+
+        Assert.Equal(HttpStatusCode.BadGateway, response.StatusCode);
+        var log = Assert.Single(capturingLogger.Logs, l => l.Level == LogLevel.Warning);
+        Assert.Contains("https://api.line.me/v2/bot/group/G1/summary", log.Message);
+        Assert.Contains("（IP：203.0.113.10）", log.Message);
+    }
+
+    [Fact]
+    public async Task Get_UpstreamException_DnsFails_LogsWarningWithTargetUrlAndResolutionFailure()
+    {
+        var capturingLogger = new CapturingLogger<EdgeProxyLineForwarder>();
+        var fakeDns = new FakeDnsLookup(_ => throw new System.Net.Sockets.SocketException());
+
+        using var factory = CreateFactoryWithLogging(
+            _ => throw new HttpRequestException("Network failure"),
+            fakeDns,
+            capturingLogger);
+        using var client = factory.CreateClient();
+
+        var response = await client.GetAsync("/line/api/v2/bot/group/G1/summary");
+
+        Assert.Equal(HttpStatusCode.BadGateway, response.StatusCode);
+        var log = Assert.Single(capturingLogger.Logs, l => l.Level == LogLevel.Warning);
+        Assert.Contains("https://api.line.me/v2/bot/group/G1/summary", log.Message);
+        Assert.Contains("（IP 解析失敗）", log.Message);
     }
 }

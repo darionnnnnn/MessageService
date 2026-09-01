@@ -39,24 +39,28 @@ public class OutboxForwarderServiceTests : IDisposable
     }
 
     private OutboxForwarderService CreateForwarder(
-        OutboxOptions? options = null, HeartbeatOptions? heartbeatOptions = null, ILogger<OutboxForwarderService>? logger = null,
+        OutboxOptions? options = null,
+        HeartbeatOptions? heartbeatOptions = null,
+        Microsoft.Extensions.Options.IOptions<IngestOptions>? ingestOptions = null,
+        ILogger<OutboxForwarderService>? logger = null,
         EdgeChannelState? channelState = null) =>
         new(
             _provider.GetRequiredService<IServiceScopeFactory>(),
             new FakeOutboxSignal(),
             _downloadQueue,
             _profileRefreshQueue,
-            channelState ?? new EdgeChannelState(
-                OptionsFactory.Create(new DeploymentOptions()), OptionsFactory.Create(new IngestOptions()),
+            channelState != null ? channelState : new EdgeChannelState(
+                OptionsFactory.Create(new DeploymentOptions()), ingestOptions != null ? ingestOptions : OptionsFactory.Create(new IngestOptions()),
                 TimeProvider.System),
-            OptionsFactory.Create(options ?? new OutboxOptions
+            OptionsFactory.Create(options != null ? options : new OutboxOptions
             {
                 BatchSize = 50,
                 BaseRetryDelaySeconds = 5,
                 MaxRetryDelaySeconds = 300
             }),
-            OptionsFactory.Create(heartbeatOptions ?? new HeartbeatOptions()),
-            logger ?? NullLogger<OutboxForwarderService>.Instance);
+            OptionsFactory.Create(heartbeatOptions != null ? heartbeatOptions : new HeartbeatOptions()),
+            ingestOptions != null ? ingestOptions : OptionsFactory.Create(new IngestOptions()),
+            logger != null ? logger : NullLogger<OutboxForwarderService>.Instance);
 
     private static IngestEnvelope SampleEnvelope(string webhookEventId = "evt-1") => new(
         WebhookEventId: webhookEventId,
@@ -410,6 +414,7 @@ public class OutboxForwarderServiceTests : IDisposable
     private sealed class CapturingLogger : ILogger<OutboxForwarderService>
     {
         public List<string> Errors { get; } = [];
+        public List<string> Warnings { get; } = [];
         public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
         public bool IsEnabled(LogLevel logLevel) => true;
         public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
@@ -417,6 +422,10 @@ public class OutboxForwarderServiceTests : IDisposable
             if (logLevel == LogLevel.Error)
             {
                 Errors.Add(formatter(state, exception));
+            }
+            if (logLevel == LogLevel.Warning)
+            {
+                Warnings.Add(formatter(state, exception));
             }
         }
     }
@@ -475,5 +484,37 @@ public class OutboxForwarderServiceTests : IDisposable
         await forwarder.LogDeadLetterCountAsync(CancellationToken.None);
 
         Assert.Empty(logger.Errors);
+    }
+
+    [Fact]
+    public async Task ProcessBatchAsync_BatchFailure_WithBaseUrl_LogsWarningWithTargetUrl()
+    {
+        await SeedEntryAsync(SampleEnvelope("evt-fail"));
+        _sink.ThrowOnNextSubmit = new HttpRequestException("core unreachable");
+        var logger = new CapturingLogger();
+        var ingestOptions = OptionsFactory.Create(new IngestOptions { BaseUrl = "https://core-host.example" });
+        var forwarder = CreateForwarder(ingestOptions: ingestOptions, logger: logger);
+
+        var processedAny = await forwarder.ProcessBatchAsync(CancellationToken.None);
+
+        Assert.True(processedAny);
+        Assert.NotEmpty(logger.Warnings);
+        Assert.All(logger.Warnings, msg => Assert.Contains("https://core-host.example/", msg));
+    }
+
+    [Fact]
+    public async Task ProcessBatchAsync_BatchFailure_WithoutBaseUrl_LogsWarningWithMissingBaseUrlMessage()
+    {
+        await SeedEntryAsync(SampleEnvelope("evt-fail"));
+        _sink.ThrowOnNextSubmit = new HttpRequestException("core unreachable");
+        var logger = new CapturingLogger();
+        var ingestOptions = OptionsFactory.Create(new IngestOptions { BaseUrl = null });
+        var forwarder = CreateForwarder(ingestOptions: ingestOptions, logger: logger);
+
+        var processedAny = await forwarder.ProcessBatchAsync(CancellationToken.None);
+
+        Assert.True(processedAny);
+        Assert.NotEmpty(logger.Warnings);
+        Assert.All(logger.Warnings, msg => Assert.Contains("未設定 Ingest:BaseUrl", msg));
     }
 }

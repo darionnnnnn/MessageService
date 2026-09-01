@@ -1,4 +1,5 @@
 using System.Net.Http.Headers;
+using MessageService.Web.Services;
 
 namespace MessageService.Web.Middleware;
 
@@ -13,6 +14,7 @@ namespace MessageService.Web.Middleware;
 public class EdgeProxyLineForwarder(
     RequestDelegate next,
     IHttpClientFactory httpClientFactory,
+    OutboundTargetResolver resolver,
     ILogger<EdgeProxyLineForwarder> logger)
 {
     public const string HttpClientName = "edge-proxy-line";
@@ -198,7 +200,17 @@ public class EdgeProxyLineForwarder(
         catch (Exception ex)
         {
             // 轉發失敗（連線失敗、逾時）-> 回 502
-            logger.LogWarning(ex, "轉發 LINE outbound 請求至 {TargetUrl} 失敗", targetUrlForLog);
+            string resolvedTarget;
+            if (targetUrlForLog is not null && Uri.TryCreate(targetUrlForLog, UriKind.Absolute, out var uri))
+            {
+                resolvedTarget = await resolver.ResolveAndFormatAsync(uri.Host, CancellationToken.None);
+            }
+            else
+            {
+                resolvedTarget = OutboundTargetResolver.FormatTarget(targetUrlForLog ?? string.Empty, null);
+            }
+
+            logger.LogWarning(ex, "轉發 LINE outbound 請求至 {TargetUrl} 失敗（目標 {ResolvedTarget}）", targetUrlForLog, resolvedTarget);
             if (!context.Response.HasStarted)
             {
                 context.Response.StatusCode = StatusCodes.Status502BadGateway;

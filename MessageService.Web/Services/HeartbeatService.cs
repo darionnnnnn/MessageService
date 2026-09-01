@@ -14,9 +14,13 @@ public class HeartbeatService(
     DeploymentCapabilities capabilities,
     TimeProvider timeProvider,
     IOptions<HeartbeatOptions> options,
+    IOptions<IngestOptions> ingestOptions,
     ILogger<HeartbeatService> logger) : BackgroundService
 {
     private readonly HeartbeatOptions _options = options.Value;
+    private readonly string _targetDescription = string.IsNullOrWhiteSpace(ingestOptions.Value.BaseUrl)
+        ? "本機資料庫"
+        : new Uri(HttpBaseAddress.Create(ingestOptions.Value.BaseUrl), "api/ingest/heartbeat").ToString();
 
     /// <summary>連續失敗的告警節流時點。單向防火牆拓撲（只開通 core→edge）下，Edge 送不到
     /// 心跳是**穩態**而不是異常——每個週期噴一次完整堆疊，一天就是上千筆雜訊，真正的問題
@@ -73,7 +77,8 @@ public class HeartbeatService(
             _failing = true;
             _lastFailureLogAt = now;
             logger.LogWarning(ex,
-                "Failed to report heartbeat：{FailureReason}；持續失敗期間這則告警每 10 分鐘最多再記一次。",
+                "Failed to report heartbeat（目標 {Target}）：{FailureReason}；持續失敗期間這則告警每 10 分鐘最多再記一次。",
+                _targetDescription,
                 OutboundFailureClassifier.Classify(ex));
             return;
         }
@@ -81,7 +86,8 @@ public class HeartbeatService(
         if (_lastFailureLogAt is { } last && now - last >= TimeSpan.FromMinutes(10))
         {
             _lastFailureLogAt = now;
-            logger.LogWarning("Failed to report heartbeat（仍然失敗）：{FailureReason}",
+            logger.LogWarning("Failed to report heartbeat（目標 {Target}，仍然失敗）：{FailureReason}",
+                _targetDescription,
                 OutboundFailureClassifier.Classify(ex));
         }
     }

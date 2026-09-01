@@ -25,6 +25,7 @@ public class EdgeProxyForwarderMiddlewareTests
     {
         public int Warnings { get; private set; }
         public int Infos { get; private set; }
+        public List<string> WarningMessages { get; } = [];
 
         public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
         public bool IsEnabled(LogLevel logLevel) => true;
@@ -33,7 +34,11 @@ public class EdgeProxyForwarderMiddlewareTests
             LogLevel logLevel, EventId eventId,
             TState state, Exception? exception, Func<TState, Exception?, string> formatter)
         {
-            if (logLevel == LogLevel.Warning) Warnings++;
+            if (logLevel == LogLevel.Warning)
+            {
+                Warnings++;
+                WarningMessages.Add(formatter(state, exception));
+            }
             if (logLevel == LogLevel.Information) Infos++;
         }
     }
@@ -432,5 +437,49 @@ public class EdgeProxyForwarderMiddlewareTests
 
         Assert.Equal(2, logger.Warnings);
         Assert.Equal(2, logger.Infos);
+    }
+
+    [Fact]
+    public async Task WebhookForwarding_HttpException_LogsWarningWithTargetDescription()
+    {
+        var logger = new CountingLogger();
+        using var factory = CreateEdgeProxyFactory(
+            _ => throw new HttpRequestException("Network failure to reach Edge host"),
+            targetBaseUrl: "http://edge-host.example/MSLine",
+            logger: logger);
+        using var client = factory.CreateClient();
+
+        using var content = new StringContent("{}", Encoding.UTF8, "application/json");
+        var response = await client.PostAsync("/api/line/webhook", content);
+
+        Assert.Equal(HttpStatusCode.BadGateway, response.StatusCode);
+        Assert.Equal(1, logger.Warnings);
+        var msg = Assert.Single(logger.WarningMessages);
+        Assert.Contains("http://edge-host.example/MSLine/api/line/webhook", msg);
+    }
+
+    [Fact]
+    public async Task Middleware_NoBaseAddress_Failure_LogsWarningWithMissingTargetDescription()
+    {
+        var logger = new CountingLogger();
+        var timeProvider = new FakeTimeProvider();
+        var handler = new FakeHttpMessageHandler(_ => throw new HttpRequestException("Network failure"));
+        var client = new HttpClient(handler, disposeHandler: false);
+        var factory = new DirectHttpClientFactory(client);
+        var middleware = new EdgeProxyForwarderMiddleware(
+            _ => Task.CompletedTask, factory, timeProvider, logger);
+
+        var context = NewWebhookContext();
+        await middleware.InvokeAsync(context);
+
+        Assert.Equal(StatusCodes.Status502BadGateway, context.Response.StatusCode);
+        Assert.Equal(1, logger.Warnings);
+        var msg = Assert.Single(logger.WarningMessages);
+        Assert.Contains("未設定 EdgeProxy 目標位址", msg);
+    }
+
+    private sealed class DirectHttpClientFactory(HttpClient client) : IHttpClientFactory
+    {
+        public HttpClient CreateClient(string name) => client;
     }
 }
