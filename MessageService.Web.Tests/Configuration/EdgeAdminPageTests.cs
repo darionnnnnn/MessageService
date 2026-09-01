@@ -380,4 +380,93 @@ public class EdgeAdminPageTests
         Assert.Contains("EdgeProxy.Forwarder", htmlProxyOk);
         Assert.Contains("Proxy warning message", htmlProxyOk);
     }
+
+    [Fact]
+    public void Render_ConnectionTab_WhenOutboundHereFalse_DisplaysDisabledMessageAndNoButtons()
+    {
+        var model = new EdgeAdminViewModel(
+            LineChannelSecret: null,
+            LineChannelAccessToken: null,
+            IngestApiKey: null,
+            IngestAllowedClientIps: [],
+            WebhookSourceMode: "Any",
+            WebhookSourceAllowedIps: [],
+            OutboundHere: false);
+
+        var html = EdgeAdminPage.Render(model);
+
+        Assert.Contains("此主機未啟用 LINE outbound，無法測試", html);
+        Assert.DoesNotContain("測試目前生效的 Token", html);
+        Assert.DoesNotContain("用這個 Token 測試（不儲存）", html);
+    }
+
+    [Fact]
+    public void Render_ConnectionTab_WhenTestResultSuccess_DisplaysGreenAlertAndEscapesBotName()
+    {
+        var model = new EdgeAdminViewModel(
+            LineChannelSecret: null,
+            LineChannelAccessToken: null,
+            IngestApiKey: null,
+            IngestAllowedClientIps: [],
+            WebhookSourceMode: "Any",
+            WebhookSourceAllowedIps: [],
+            OutboundHere: true,
+            LineTestResult: new MessageService.Web.Services.LineConnectivityTestResult(
+                Success: true,
+                BotDisplayName: "我的 <script>Bot</script>",
+                ErrorMessage: null,
+                Via: "Direct"),
+            ActiveTab: "connection");
+
+        var html = EdgeAdminPage.Render(model);
+
+        Assert.Contains("alert-success", html);
+        Assert.Contains("連線成功：我的 &lt;script&gt;Bot&lt;/script&gt;（經由 Direct）", html);
+        Assert.DoesNotContain("<script>Bot</script>", html);
+        Assert.Contains("id=\"tab-nav-connection\" name=\"admin-tab\" class=\"tab-radio\" checked", html);
+    }
+
+    [Fact]
+    public void Render_ConnectionTab_WhenTestResultFailed_DisplaysRedAlertAndEscapesError()
+    {
+        var model = new EdgeAdminViewModel(
+            LineChannelSecret: null,
+            LineChannelAccessToken: null,
+            IngestApiKey: null,
+            IngestAllowedClientIps: [],
+            WebhookSourceMode: "Any",
+            WebhookSourceAllowedIps: [],
+            OutboundHere: true,
+            LineTestResult: new MessageService.Web.Services.LineConnectivityTestResult(
+                Success: false,
+                BotDisplayName: null,
+                ErrorMessage: "HTTP 401 <b>Unauthorized</b>",
+                Via: "EdgeProxy(https://proxy.example/MSLine/)"),
+            ActiveTab: "connection");
+
+        var html = EdgeAdminPage.Render(model);
+
+        Assert.Contains("alert-danger", html);
+        Assert.Contains("連線失敗：HTTP 401 &lt;b&gt;Unauthorized&lt;/b&gt;（經由 EdgeProxy(https://proxy.example/MSLine/)）", html);
+        Assert.DoesNotContain("<b>Unauthorized</b>", html);
+    }
+
+    [Fact]
+    public void Render_ActiveTab_DefaultIsSettings()
+    {
+        var model = new EdgeAdminViewModel(
+            LineChannelSecret: null,
+            LineChannelAccessToken: null,
+            IngestApiKey: null,
+            IngestAllowedClientIps: [],
+            WebhookSourceMode: "Any",
+            WebhookSourceAllowedIps: []);
+
+        var html = EdgeAdminPage.Render(model);
+
+        Assert.Contains("id=\"tab-nav-settings\" name=\"admin-tab\" class=\"tab-radio\" checked", html);
+        Assert.Contains("id=\"tab-nav-connection\" name=\"admin-tab\" class=\"tab-radio\" />", html);
+        Assert.Contains("id=\"tab-nav-troubleshooting\" name=\"admin-tab\" class=\"tab-radio\" />", html);
+    }
 }
+

@@ -716,4 +716,279 @@ public class EdgeAdminEndpointsTests : IDisposable
         Assert.Contains("Proxy forwarded error test", html);
         Assert.Contains("TimeoutException: downstream timed out", html);
     }
+
+    [Fact]
+    public async Task EdgeAdmin_TestLine_200Success_ReturnsOkWithDisplayNameAndConnectionTabActive()
+    {
+        using var factory = CreateEdgeFactory(builder =>
+        {
+            builder.UseSetting("Line:OutboundHere", "true");
+            builder.UseSetting("Line:OutboundVia", "Direct");
+
+            builder.ConfigureServices(services =>
+            {
+                services.AddHttpClient(MessageService.Services.LineProfileClient.HttpClientName)
+                    .ConfigurePrimaryHttpMessageHandler(() => new FakeHttpMessageHandler(req =>
+                        new HttpResponseMessage(HttpStatusCode.OK)
+                        {
+                            Content = new StringContent("{\"displayName\":\"我的機器人\"}", Encoding.UTF8, "application/json")
+                        }));
+            });
+        });
+
+        using var client = factory.CreateClient();
+        var form = new Dictionary<string, string>
+        {
+            ["overrideToken"] = ""
+        };
+
+        var response = await client.PostAsync("/edge-admin/test-line", new FormUrlEncodedContent(form));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var html = await response.Content.ReadAsStringAsync();
+
+        // 驗證連線成功與 bot 名稱
+        Assert.Contains("alert-success", html);
+        Assert.Contains("連線成功：我的機器人", html);
+        Assert.Contains("（經由 Direct）", html);
+
+        // 驗證連線測試分頁為 checked
+        Assert.Contains("id=\"tab-nav-connection\" name=\"admin-tab\" class=\"tab-radio\" checked", html);
+    }
+
+    [Fact]
+    public async Task EdgeAdmin_TestLine_401Unauthorized_ReturnsOkWithFailureMessageAnd401()
+    {
+        using var factory = CreateEdgeFactory(builder =>
+        {
+            builder.UseSetting("Line:OutboundHere", "true");
+            builder.UseSetting("Line:OutboundVia", "Direct");
+
+            builder.ConfigureServices(services =>
+            {
+                services.AddHttpClient(MessageService.Services.LineProfileClient.HttpClientName)
+                    .ConfigurePrimaryHttpMessageHandler(() => new FakeHttpMessageHandler(req =>
+                        new HttpResponseMessage(HttpStatusCode.Unauthorized)
+                        {
+                            ReasonPhrase = "Unauthorized",
+                            Content = new StringContent("{\"message\":\"Invalid OAuth access token\"}", Encoding.UTF8, "application/json")
+                        }));
+            });
+        });
+
+        using var client = factory.CreateClient();
+        var form = new Dictionary<string, string>
+        {
+            ["overrideToken"] = ""
+        };
+
+        var response = await client.PostAsync("/edge-admin/test-line", new FormUrlEncodedContent(form));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var html = await response.Content.ReadAsStringAsync();
+
+        // 驗證連線失敗與 401
+        Assert.Contains("alert-danger", html);
+        Assert.Contains("連線失敗：", html);
+        Assert.Contains("401", html);
+        Assert.Contains("Invalid OAuth access token", html);
+    }
+
+    [Fact]
+    public async Task EdgeAdmin_TestLine_WhenHandlerThrowsHttpRequestException_Returns200WithFailureMessage()
+    {
+        using var factory = CreateEdgeFactory(builder =>
+        {
+            builder.UseSetting("Line:OutboundHere", "true");
+            builder.UseSetting("Line:OutboundVia", "Direct");
+
+            builder.ConfigureServices(services =>
+            {
+                services.AddHttpClient(MessageService.Services.LineProfileClient.HttpClientName)
+                    .ConfigurePrimaryHttpMessageHandler(() => new FakeHttpMessageHandler(req =>
+                        throw new HttpRequestException("Network connection failed to LINE API")));
+            });
+        });
+
+        using var client = factory.CreateClient();
+        var form = new Dictionary<string, string>
+        {
+            ["overrideToken"] = ""
+        };
+
+        var response = await client.PostAsync("/edge-admin/test-line", new FormUrlEncodedContent(form));
+
+        // 回應碼為 200（不是 500）
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var html = await response.Content.ReadAsStringAsync();
+
+        // 驗證連線失敗與例外訊息
+        Assert.Contains("alert-danger", html);
+        Assert.Contains("連線失敗：", html);
+        Assert.Contains("HttpRequestException", html);
+        Assert.Contains("Network connection failed to LINE API", html);
+    }
+
+    [Fact]
+    public async Task EdgeAdmin_TestLine_WithOverrideToken_SendsOverrideTokenInAuthorizationHeader()
+    {
+        HttpRequestMessage? capturedRequest = null;
+
+        using var factory = CreateEdgeFactory(builder =>
+        {
+            builder.UseSetting("Line:OutboundHere", "true");
+            builder.UseSetting("Line:ChannelAccessToken", "configured-token-xyz");
+
+            builder.ConfigureServices(services =>
+            {
+                services.AddHttpClient(MessageService.Services.LineProfileClient.HttpClientName)
+                    .ConfigurePrimaryHttpMessageHandler(() => new FakeHttpMessageHandler(req =>
+                    {
+                        capturedRequest = req;
+                        return new HttpResponseMessage(HttpStatusCode.OK)
+                        {
+                            Content = new StringContent("{\"displayName\":\"Override Bot\"}", Encoding.UTF8, "application/json")
+                        };
+                    }));
+            });
+        });
+
+        using var client = factory.CreateClient();
+        var form = new Dictionary<string, string>
+        {
+            ["overrideToken"] = "my-override-token-1234"
+        };
+
+        var response = await client.PostAsync("/edge-admin/test-line", new FormUrlEncodedContent(form));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.NotNull(capturedRequest);
+        Assert.Equal("Bearer", capturedRequest!.Headers.Authorization?.Scheme);
+        Assert.Equal("my-override-token-1234", capturedRequest.Headers.Authorization?.Parameter);
+
+        // 覆寫 token 絕不回顯在頁面上
+        var html = await response.Content.ReadAsStringAsync();
+        Assert.DoesNotContain("my-override-token-1234", html);
+    }
+
+    [Fact]
+    public async Task EdgeAdmin_TestLine_WithoutOverrideToken_SendsConfiguredTokenInAuthorizationHeader()
+    {
+        HttpRequestMessage? capturedRequest = null;
+
+        using var factory = CreateEdgeFactory(builder =>
+        {
+            builder.UseSetting("Line:OutboundHere", "true");
+            builder.UseSetting("Line:ChannelAccessToken", "initial-configured-token");
+
+            builder.ConfigureServices(services =>
+            {
+                services.AddHttpClient(MessageService.Services.LineProfileClient.HttpClientName)
+                    .ConfigurePrimaryHttpMessageHandler(() => new FakeHttpMessageHandler(req =>
+                    {
+                        capturedRequest = req;
+                        return new HttpResponseMessage(HttpStatusCode.OK)
+                        {
+                            Content = new StringContent("{\"displayName\":\"Configured Bot\"}", Encoding.UTF8, "application/json")
+                        };
+                    }));
+            });
+        });
+
+        using var client = factory.CreateClient();
+        var form = new Dictionary<string, string>
+        {
+            ["overrideToken"] = ""
+        };
+
+        var response = await client.PostAsync("/edge-admin/test-line", new FormUrlEncodedContent(form));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.NotNull(capturedRequest);
+        Assert.Equal("Bearer", capturedRequest!.Headers.Authorization?.Scheme);
+        Assert.Equal("initial-configured-token", capturedRequest.Headers.Authorization?.Parameter);
+    }
+
+    [Fact]
+    public async Task EdgeAdmin_TestLine_WhenBotDisplayNameContainsScript_EscapesHtml()
+    {
+        using var factory = CreateEdgeFactory(builder =>
+        {
+            builder.UseSetting("Line:OutboundHere", "true");
+
+            builder.ConfigureServices(services =>
+            {
+                services.AddHttpClient(MessageService.Services.LineProfileClient.HttpClientName)
+                    .ConfigurePrimaryHttpMessageHandler(() => new FakeHttpMessageHandler(req =>
+                        new HttpResponseMessage(HttpStatusCode.OK)
+                        {
+                            Content = new StringContent("{\"displayName\":\"<script>alert('xss')</script>\"}", Encoding.UTF8, "application/json")
+                        }));
+            });
+        });
+
+        using var client = factory.CreateClient();
+        var form = new Dictionary<string, string>
+        {
+            ["overrideToken"] = ""
+        };
+
+        var response = await client.PostAsync("/edge-admin/test-line", new FormUrlEncodedContent(form));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var html = await response.Content.ReadAsStringAsync();
+
+        // 必須逸出
+        Assert.DoesNotContain("<script>alert('xss')</script>", html);
+        Assert.Contains("&lt;script&gt;alert(&#39;xss&#39;)&lt;/script&gt;", html);
+    }
+
+    [Fact]
+    public async Task EdgeAdmin_WhenOutboundHereFalse_ConnectionTabShowsDisabledMessage_AndPostTestLineDoesNot500()
+    {
+        using var factory = CreateEdgeFactory(builder =>
+        {
+            builder.UseSetting("Line:OutboundHere", "false");
+        });
+
+        using var client = factory.CreateClient();
+
+        // GET 頁面時顯示未啟用訊息且不顯示按鈕
+        var getResponse = await client.GetAsync("/edge-admin");
+        Assert.Equal(HttpStatusCode.OK, getResponse.StatusCode);
+        var getHtml = await getResponse.Content.ReadAsStringAsync();
+        Assert.Contains("此主機未啟用 LINE outbound，無法測試", getHtml);
+        Assert.DoesNotContain("測試目前生效的 Token", getHtml);
+        Assert.DoesNotContain("用這個 Token 測試（不儲存）", getHtml);
+
+        // POST /edge-admin/test-line 時不 500，安全回傳 200 與同一句話
+        var form = new Dictionary<string, string>
+        {
+            ["overrideToken"] = "some-token"
+        };
+        var postResponse = await client.PostAsync("/edge-admin/test-line", new FormUrlEncodedContent(form));
+        Assert.Equal(HttpStatusCode.OK, postResponse.StatusCode);
+        var postHtml = await postResponse.Content.ReadAsStringAsync();
+        Assert.Contains("此主機未啟用 LINE outbound，無法測試", postHtml);
+        Assert.DoesNotContain("測試目前生效的 Token", postHtml);
+    }
+
+    [Fact]
+    public async Task EdgeAdmin_TestLine_DisallowedClientIp_Returns403()
+    {
+        using var factory = CreateEdgeFactory(builder =>
+        {
+            builder.UseSetting("EdgeAdmin:AllowedClientIps:0", "192.0.2.1");
+        }, clientIp: "127.0.0.1");
+
+        using var client = factory.CreateClient();
+        var form = new Dictionary<string, string>
+        {
+            ["overrideToken"] = ""
+        };
+
+        var response = await client.PostAsync("/edge-admin/test-line", new FormUrlEncodedContent(form));
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
 }
+

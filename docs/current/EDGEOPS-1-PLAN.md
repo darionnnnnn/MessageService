@@ -130,7 +130,7 @@
 |---|---|---|---|---|
 | A1 | agy | 完成 | 1081 綠（基準 1045） | 驗收抓到規格自身的洞：一致性檢查若讀「整條設定鏈」，會因基底 appsettings.json 本來就宣告 `Mode: AllInOne` 而讓「後綴檔不寫模式鍵」（本機制的正常用法）誤判成不一致、擋住啟動。改成只讀後綴檔本身宣告的值（`ReadDeclaredMode`），並補 3 筆測試釘住。Claude 手改。 |
 | A2 | Claude | — | — | — |
-| B1+B2 | agy | — | — | — |
+| B1+B2 | agy | 完成 | 1152 綠（+27） | 兩處手改：(1) `LineConnectivityTester` 多了一個沒人用的 `IOptions` 建構子與私有 `StaticOptionsMonitor`（規格外的抽象），刪除；(2) GET 與 test-line POST 各寫一份檢視模型組法（逐字相近區塊），抽成 `BuildViewModelAsync` 單一來源。`LineAuthorizationHandler` 改成「已有 Authorization 就不覆寫」，兩個方向都有測試釘住。 |
 | C1 | agy | 完成 | 1102 綠（+21） | 無落差。agy 另補了「Edge/EdgeProxy 才註冊、其他模式不註冊」的 DI 整合測試，超出規格但正確，保留。 |
 | C2 | agy | 完成 | 1110 綠（+8） | 無落差。白名單掛在全域轉發之前、沿用 `EdgeProxy:AllowedClientIps`、未引入金鑰，四類情境（允許/拒絕/空清單/非 EdgeProxy 404）皆走真實管線斷言。 |
 | C3 | agy | 完成 | 1125 綠（+15） | CSS-only radio 分頁、三區塊皆逸出、既有表單測試零刪除零放寬。落差一項：GET handler 把 `LogRingBuffer` 宣告成可選參數（`= null`）並用 `?.`，是規格沒要求的防禦——Edge 模式一定註冊得到，可選化只會讓緩衝解析失敗時靜默顯示空表。改成必要相依，測試仍全綠（Claude 手改）。 |

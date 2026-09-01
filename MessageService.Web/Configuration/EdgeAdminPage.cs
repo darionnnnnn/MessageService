@@ -1,6 +1,7 @@
 using System.Net;
 using System.Text;
 using MessageService.Web.Diagnostics;
+using MessageService.Web.Services;
 using Microsoft.Extensions.Logging;
 
 namespace MessageService.Web.Configuration;
@@ -21,7 +22,10 @@ public record EdgeAdminViewModel(
     string? TodayLogContent = null,
     string? TodayLogErrorMessage = null,
     IReadOnlyList<LogBufferEntry>? ProxyErrors = null,
-    string? ProxyStatusMessage = null);
+    string? ProxyStatusMessage = null,
+    bool OutboundHere = true,
+    LineConnectivityTestResult? LineTestResult = null,
+    string? ActiveTab = null);
 
 /// <summary>
 /// 提供純函式產生 Edge 端管理設定頁 HTML。
@@ -131,8 +135,71 @@ public static class EdgeAdminPage
         return RenderLogEntriesTable(entries);
     }
 
+    public static string RenderConnectionTab(bool outboundHere, LineConnectivityTestResult? testResult)
+    {
+        var sb = new StringBuilder();
+        sb.Append("""
+            <div id="tab-connection" class="tab-pane tab-pane-connection">
+                <h2>連線測試</h2>
+""");
+
+        if (!outboundHere)
+        {
+            sb.Append("""
+                <div class="status-msg">此主機未啟用 LINE outbound，無法測試</div>
+            </div>
+""");
+            return sb.ToString();
+        }
+
+        if (testResult is not null)
+        {
+            var viaEncoded = WebUtility.HtmlEncode(testResult.Via ?? "");
+            if (testResult.Success)
+            {
+                var nameEncoded = WebUtility.HtmlEncode(testResult.BotDisplayName ?? "");
+                sb.Append($"""
+                <div class="alert-success">連線成功：{nameEncoded}（經由 {viaEncoded}）</div>
+""");
+            }
+            else
+            {
+                var errEncoded = WebUtility.HtmlEncode(testResult.ErrorMessage ?? "");
+                sb.Append($"""
+                <div class="alert-danger">連線失敗：{errEncoded}（經由 {viaEncoded}）</div>
+""");
+            }
+        }
+
+        sb.Append("""
+                <div class="note">測試會對 LINE 官方 <code>v2/bot/info</code> 發一次請求。</div>
+                <form method="post" action="/edge-admin/test-line">
+                    <button type="submit" class="btn-submit">測試目前生效的 Token</button>
+                </form>
+                <form method="post" action="/edge-admin/test-line" style="margin-top: 24px;">
+                    <div class="form-group">
+                        <label for="overrideToken">覆寫 Channel Access Token 測試</label>
+                        <input type="password" id="overrideToken" name="overrideToken" placeholder="輸入要測試的 Token（留空不覆寫）" />
+                        <div class="field-desc">僅用於本次連線測試，不會儲存至設定檔</div>
+                    </div>
+                    <button type="submit" class="btn-submit">用這個 Token 測試（不儲存）</button>
+                </form>
+            </div>
+""");
+
+        return sb.ToString();
+    }
+
     public static string Render(EdgeAdminViewModel model)
     {
+        var isConnectionTab = string.Equals(model.ActiveTab, "connection", StringComparison.OrdinalIgnoreCase);
+        var isTroubleshootingTab = string.Equals(model.ActiveTab, "troubleshooting", StringComparison.OrdinalIgnoreCase);
+        var isSettingsTab = !isConnectionTab && !isTroubleshootingTab;
+
+        var settingsChecked = isSettingsTab ? " checked" : "";
+        var connectionChecked = isConnectionTab ? " checked" : "";
+        var troubleshootingChecked = isTroubleshootingTab ? " checked" : "";
+
         var maskedLineSecret = MaskSecret(model.LineChannelSecret);
         var maskedLineToken = MaskSecret(model.LineChannelAccessToken);
         var maskedIngestKey = MaskSecret(model.IngestApiKey);
@@ -163,6 +230,7 @@ public static class EdgeAdminPage
         var localErrorsHtml = RenderLogEntriesTable(model.LocalErrors);
         var todayLogHtml = RenderTodayLog(model.TodayLogContent, model.TodayLogErrorMessage);
         var proxyErrorsHtml = RenderProxyErrors(model.ProxyErrors, model.ProxyStatusMessage);
+        var connectionTabHtml = RenderConnectionTab(model.OutboundHere, model.LineTestResult);
 
         return $$"""
 <!DOCTYPE html>
@@ -421,9 +489,9 @@ public static class EdgeAdminPage
     <div class="note">儲存後立即生效，不需重啟站台。機密欄位留空表示維持原值不變。</div>
 
     <div class="tabs-container">
-        <input type="radio" id="tab-nav-settings" name="admin-tab" class="tab-radio" checked />
-        <input type="radio" id="tab-nav-connection" name="admin-tab" class="tab-radio" />
-        <input type="radio" id="tab-nav-troubleshooting" name="admin-tab" class="tab-radio" />
+        <input type="radio" id="tab-nav-settings" name="admin-tab" class="tab-radio"{{settingsChecked}} />
+        <input type="radio" id="tab-nav-connection" name="admin-tab" class="tab-radio"{{connectionChecked}} />
+        <input type="radio" id="tab-nav-troubleshooting" name="admin-tab" class="tab-radio"{{troubleshootingChecked}} />
 
         <div class="tab-nav">
             <label for="tab-nav-settings" class="tab-button" id="tab-label-settings">設定</label>
@@ -471,9 +539,7 @@ public static class EdgeAdminPage
                     <button type="submit" class="btn-submit">儲存設定</button>
                 </form>
             </div>
-            <div id="tab-connection" class="tab-pane tab-pane-connection">
-                <h2>連線測試</h2>
-            </div>
+            {{connectionTabHtml}}
             <div id="tab-troubleshooting" class="tab-pane tab-pane-troubleshooting">
                 <div class="section">
                     <h2>本機最近錯誤</h2>

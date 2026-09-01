@@ -11,7 +11,10 @@ public class LineAuthorizationHandler(IOptionsMonitor<LineOptions> monitor) : De
 {
     protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
-        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", monitor.CurrentValue.ChannelAccessToken);
+        if (request.Headers.Authorization is null)
+        {
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", monitor.CurrentValue.ChannelAccessToken);
+        }
         return base.SendAsync(request, cancellationToken);
     }
 }

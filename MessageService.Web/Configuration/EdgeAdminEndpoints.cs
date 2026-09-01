@@ -1,13 +1,16 @@
 using System.Net.Http.Json;
 using System.Text;
+using MessageService.Options;
 using MessageService.Services;
 using MessageService.Web.Diagnostics;
+using MessageService.Web.Services;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Options;
 
 namespace MessageService.Web.Configuration;
 
@@ -28,45 +31,47 @@ public static class EdgeAdminEndpoints
             HttpContext context,
             IHttpClientFactory httpClientFactory,
             IHostEnvironment hostEnvironment,
-            LogRingBuffer ringBuffer) =>
+            LogRingBuffer ringBuffer,
+            DeploymentCapabilities capabilities) =>
         {
-            var saved = context.Request.Query.ContainsKey("saved");
-
-            // 讀取目前生效設定值（包含加密設定檔覆蓋）
-            var lineSecret = config["Line:ChannelSecret"];
-            var lineToken = config["Line:ChannelAccessToken"];
-            var ingestKey = config["Ingest:ApiKey"];
-            var ingestIps = config.GetSection(PrefixIngestIps).Get<string[]>() ?? [];
-            var webhookMode = config["WebhookSource:Mode"] ?? "Any";
-            var webhookIps = config.GetSection(PrefixWebhookIps).Get<string[]>() ?? [];
-            var isUnreadable = store.LoadStatus == EncryptedSettingsLoadStatus.Unreadable;
-
-            // 錯誤排查：本機緩衝快照
-            var localErrors = ringBuffer.Snapshot();
-
-            // 錯誤排查：今日 log 檔尾
-            var (todayLogContent, todayLogErrorMessage) = ReadTodayLogTail(hostEnvironment.ContentRootPath);
-
-            // 錯誤排查：EdgeProxy 錯誤
-            var (proxyErrors, proxyStatusMessage) = await FetchProxyErrorsAsync(httpClientFactory, config);
-
-            var model = new EdgeAdminViewModel(
-                lineSecret,
-                lineToken,
-                ingestKey,
-                ingestIps,
-                webhookMode,
-                webhookIps,
-                Saved: saved,
-                IsUnreadable: isUnreadable,
-                LocalErrors: localErrors,
-                TodayLogContent: todayLogContent,
-                TodayLogErrorMessage: todayLogErrorMessage,
-                ProxyErrors: proxyErrors,
-                ProxyStatusMessage: proxyStatusMessage);
+            var model = await BuildViewModelAsync(
+                config, store, httpClientFactory, hostEnvironment, ringBuffer, capabilities,
+                saved: context.Request.Query.ContainsKey("saved"));
 
             var html = EdgeAdminPage.Render(model);
             // 頁面帶有機密的末四碼，不能進瀏覽器磁碟快取或中間代理
+            context.Response.Headers.CacheControl = "no-store, no-cache, must-revalidate";
+            context.Response.Headers.Pragma = "no-cache";
+            return Results.Content(html, "text/html; charset=utf-8");
+        });
+
+        endpoints.MapPost("/edge-admin/test-line", async (
+            HttpContext context,
+            IConfiguration config,
+            EdgeSettingsStore store,
+            IHttpClientFactory httpClientFactory,
+            IOptionsMonitor<LineOptions> lineOptionsMonitor,
+            DeploymentCapabilities capabilities,
+            IHostEnvironment hostEnvironment,
+            LogRingBuffer ringBuffer) =>
+        {
+            // OutboundHere=false 的主機根本沒有 LINE 具名 client，直接渲染頁面上的說明即可
+            LineConnectivityTestResult? testResult = null;
+            if (capabilities.OutboundHere)
+            {
+                var form = await context.Request.ReadFormAsync();
+                var overrideToken = form["overrideToken"].ToString();
+                var tokenToUse = string.IsNullOrWhiteSpace(overrideToken) ? null : overrideToken.Trim();
+
+                var tester = new LineConnectivityTester(httpClientFactory, lineOptionsMonitor);
+                testResult = await tester.TestConnectivityAsync(tokenToUse, context.RequestAborted);
+            }
+
+            var model = await BuildViewModelAsync(
+                config, store, httpClientFactory, hostEnvironment, ringBuffer, capabilities,
+                saved: false, lineTestResult: testResult, activeTab: "connection");
+
+            var html = EdgeAdminPage.Render(model);
             context.Response.Headers.CacheControl = "no-store, no-cache, must-revalidate";
             context.Response.Headers.Pragma = "no-cache";
             return Results.Content(html, "text/html; charset=utf-8");
@@ -175,6 +180,43 @@ public static class EdgeAdminEndpoints
             .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             .Where(line => !string.IsNullOrWhiteSpace(line))
             .ToList();
+    }
+
+    /// <summary>GET 與連線測試 POST 都要渲染同一張頁面，檢視模型的組法只寫這一份。</summary>
+    private static async Task<EdgeAdminViewModel> BuildViewModelAsync(
+        IConfiguration config,
+        EdgeSettingsStore store,
+        IHttpClientFactory httpClientFactory,
+        IHostEnvironment hostEnvironment,
+        LogRingBuffer ringBuffer,
+        DeploymentCapabilities capabilities,
+        bool saved,
+        LineConnectivityTestResult? lineTestResult = null,
+        string? activeTab = null)
+    {
+        // 錯誤排查：本機緩衝快照、今日 log 檔尾、EdgeProxy 端錯誤
+        var localErrors = ringBuffer.Snapshot();
+        var (todayLogContent, todayLogErrorMessage) = ReadTodayLogTail(hostEnvironment.ContentRootPath);
+        var (proxyErrors, proxyStatusMessage) = await FetchProxyErrorsAsync(httpClientFactory, config);
+
+        return new EdgeAdminViewModel(
+            // 讀取目前生效設定值（包含加密設定檔覆蓋）
+            config["Line:ChannelSecret"],
+            config["Line:ChannelAccessToken"],
+            config["Ingest:ApiKey"],
+            config.GetSection(PrefixIngestIps).Get<string[]>() ?? [],
+            config["WebhookSource:Mode"] ?? "Any",
+            config.GetSection(PrefixWebhookIps).Get<string[]>() ?? [],
+            Saved: saved,
+            IsUnreadable: store.LoadStatus == EncryptedSettingsLoadStatus.Unreadable,
+            LocalErrors: localErrors,
+            TodayLogContent: todayLogContent,
+            TodayLogErrorMessage: todayLogErrorMessage,
+            ProxyErrors: proxyErrors,
+            ProxyStatusMessage: proxyStatusMessage,
+            OutboundHere: capabilities.OutboundHere,
+            LineTestResult: lineTestResult,
+            ActiveTab: activeTab);
     }
 
     private static (string? Content, string? ErrorMessage) ReadTodayLogTail(string contentRootPath)
