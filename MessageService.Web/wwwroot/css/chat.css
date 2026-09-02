@@ -799,6 +799,12 @@ body.chat-page .chat-app {
     word-break: break-all;
 }
 
+/* 命中訊息高亮關鍵字：粗體＋放大 1px（1px 是使用者要求的絕對值，不隨字級等比縮放） */
+.highlight-keyword {
+    font-weight: 700;
+    font-size: calc(1em + 1px);
+}
+
 /* 同一組第一顆泡泡指向頭貼的小尾巴，仿 LINE 樣式。頭貼是頂端對齊，尾巴要在左上角
    才指得到頭貼——尺寸用 em 跟著字級縮放，字級放大後圓角變大時尾巴才不會脫節；
    左上圓角同步縮小，讓尾巴與泡泡邊緣自然銜接 */
@@ -850,7 +856,7 @@ html.highlight-flowing .bubble.highlighted:not(.sticker) {
     background: transparent;
     border: none;
     box-shadow: none;
-    filter: drop-shadow(0 0 8px var(--highlight-glow, rgba(6, 199, 85, .45)));
+    filter: drop-shadow(0 0 8px var(--highlight-glow, rgba(6, 199, 85, .35)));
 }
 
 /* 貼圖跟 LINE 一樣浮貼在背景上，不裝進白色泡泡；固定尺寸不跟字級縮放

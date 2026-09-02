@@ -140,12 +140,17 @@
     const {
         buildHighlightGradient,
         hexToGlow,
+        computeHighlightGlow,
         normalizeHexColor,
         loadHighlightFlow,
         loadHighlightColors,
+        loadHighlightOpacity,
+        applyHighlightVisualSettings,
         HIGHLIGHT_FLOW_STORAGE_KEY,
         HIGHLIGHT_COLORS_STORAGE_KEY,
+        HIGHLIGHT_OPACITY_STORAGE_KEY,
         DEFAULT_HIGHLIGHT_COLORS,
+        DEFAULT_HIGHLIGHT_OPACITY,
         MAX_HIGHLIGHT_COLORS
     } = window.messageServiceHighlight;
     const MIN_HIGHLIGHT_COLORS = 1;
@@ -324,13 +329,23 @@
         }
     }
 
+    function saveHighlightOpacity(opacity) {
+        try {
+            localStorage.setItem(HIGHLIGHT_OPACITY_STORAGE_KEY, String(opacity));
+        } catch {
+            // localStorage 不可用就只套用當次工作階段
+        }
+    }
+
     function updateHighlightPreview() {
         if (!els.highlightPreviewBubble) {
             return;
         }
-        const gradient = buildHighlightGradient(highlightColors);
+        const rawOpacity = els.highlightOpacityRange ? parseFloat(els.highlightOpacityRange.value) : loadHighlightOpacity();
+        const opacity = (!Number.isNaN(rawOpacity) && rawOpacity >= 0.1 && rawOpacity <= 1.0) ? rawOpacity : DEFAULT_HIGHLIGHT_OPACITY;
+        const gradient = buildHighlightGradient(highlightColors, opacity);
         els.highlightPreviewBubble.style.setProperty('--highlight-preview-gradient', gradient);
-        els.highlightPreviewBubble.style.setProperty('--highlight-preview-glow', hexToGlow(highlightColors[0], 0.45));
+        els.highlightPreviewBubble.style.setProperty('--highlight-preview-glow', computeHighlightGlow(highlightColors[0], opacity));
         const flowEnabled = els.highlightFlowToggle.checked;
         els.highlightPreviewBubble.classList.toggle('flowing', flowEnabled);
     }
@@ -445,6 +460,13 @@
     function initHighlightVisualSettings() {
         const flowEnabled = loadHighlightFlow();
         els.highlightFlowToggle.checked = flowEnabled;
+        const opacity = loadHighlightOpacity();
+        if (els.highlightOpacityRange) {
+            els.highlightOpacityRange.value = String(opacity);
+        }
+        if (els.highlightOpacityValue) {
+            els.highlightOpacityValue.textContent = `${Math.round(opacity * 100)}%`;
+        }
         highlightColors = loadHighlightColors();
 
         renderHighlightVisualUI();
@@ -455,6 +477,22 @@
             settingsDirty = true;
             updateHighlightPreview();
         });
+
+        if (els.highlightOpacityRange) {
+            els.highlightOpacityRange.addEventListener('input', () => {
+                const rawVal = parseFloat(els.highlightOpacityRange.value);
+                const val = (!Number.isNaN(rawVal) && rawVal >= 0.1 && rawVal <= 1.0) ? rawVal : DEFAULT_HIGHLIGHT_OPACITY;
+                if (els.highlightOpacityValue) {
+                    els.highlightOpacityValue.textContent = `${Math.round(val * 100)}%`;
+                }
+                saveHighlightOpacity(val);
+                settingsDirty = true;
+                updateHighlightPreview();
+                // 強度是要「邊調邊看」的設定，光看 modal 裡的預覽泡泡判斷不了實際訊息串的效果。
+                // 比照字體大小的既有作法，即時套到背後的聊天畫面上（設定 modal 跟聊天頁是同一個頁面）
+                applyHighlightVisualSettings();
+            });
+        }
 
         els.highlightAddColorBtn.addEventListener('click', handleAddCustomColor);
     }
@@ -940,6 +978,8 @@
         els.highlightUserTbody = $('highlight-user-tbody');
         els.highlightUsersEmpty = $('highlight-users-empty');
         els.highlightFlowToggle = $('highlight-flow-toggle');
+        els.highlightOpacityRange = $('highlight-opacity-range');
+        els.highlightOpacityValue = $('highlight-opacity-value');
         els.highlightPresetColors = $('highlight-preset-colors');
         els.highlightCustomColorInput = $('highlight-custom-color-input');
         els.highlightAddColorBtn = $('highlight-add-color-btn');

@@ -243,6 +243,15 @@
                                 <p class="form-text">關閉後邊框仍會發光，但不會流動。系統設定為減少動態效果時一律不流動。</p>
 
                                 <div class="mb-3">
+                                    <div class="d-flex justify-content-between align-items-center mb-1">
+                                        <label for="highlight-opacity-range" class="form-label mb-0">高亮強度</label>
+                                        <span id="highlight-opacity-value" class="text-muted small">50%</span>
+                                    </div>
+                                    <input type="range" class="form-range" id="highlight-opacity-range" min="0.1" max="1" step="0.05">
+                                    <p class="form-text">數值越低邊框越淡，適合訊息量大時降低干擾。</p>
+                                </div>
+
+                                <div class="mb-3">
                                     <label class="form-label d-block">預設色票（點擊加入或移除）</label>
                                     <div id="highlight-preset-colors" class="d-flex flex-wrap gap-2 align-items-center"></div>
                                 </div>

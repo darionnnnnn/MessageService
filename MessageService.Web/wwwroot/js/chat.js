@@ -25,6 +25,8 @@
     const DEFAULT_FONT_SIZE = 'medium';
     const HIGHLIGHT_FLOW_STORAGE_KEY = 'chat-highlight-flow';
     const HIGHLIGHT_COLORS_STORAGE_KEY = 'chat-highlight-colors';
+    const HIGHLIGHT_OPACITY_STORAGE_KEY = 'chat-highlight-opacity';
+    const DEFAULT_HIGHLIGHT_OPACITY = 0.5;
     // 顏色數量上限只有這一份定義，設定頁透過共享出口取用
     const MAX_HIGHLIGHT_COLORS = 8;
     const DEFAULT_HIGHLIGHT_COLORS = ['#06c755', '#ffc53d', '#ff6b57', '#a66cff'];
@@ -140,14 +142,18 @@
         return `rgba(${r}, ${g}, ${b}, ${alpha})`;
     }
 
-    function buildHighlightGradient(colors) {
-        if (!colors || colors.length === 0) {
-            return 'linear-gradient(135deg, #06c755, #ffc53d, #ff6b57, #a66cff)';
+    // 光暈透明度統一以 opacity * 0.7 計算，聊天頁與設定頁預覽共用
+    function computeHighlightGlow(hex, opacity) {
+        return hexToGlow(hex, opacity * 0.7);
+    }
+
+    function buildHighlightGradient(colors, opacity = DEFAULT_HIGHLIGHT_OPACITY) {
+        const list = (colors && colors.length > 0) ? colors : DEFAULT_HIGHLIGHT_COLORS;
+        const rgbaColors = list.map(c => hexToGlow(c, opacity));
+        if (rgbaColors.length === 1) {
+            return `linear-gradient(135deg, ${rgbaColors[0]}, ${rgbaColors[0]})`;
         }
-        if (colors.length === 1) {
-            return `linear-gradient(135deg, ${colors[0]}, ${colors[0]})`;
-        }
-        return `linear-gradient(135deg, ${colors.join(', ')})`;
+        return `linear-gradient(135deg, ${rgbaColors.join(', ')})`;
     }
 
     function loadHighlightFlow() {
@@ -176,11 +182,26 @@
         return [...DEFAULT_HIGHLIGHT_COLORS];
     }
 
+    function loadHighlightOpacity() {
+        try {
+            const saved = localStorage.getItem(HIGHLIGHT_OPACITY_STORAGE_KEY);
+            if (saved !== null) {
+                const parsed = parseFloat(saved);
+                if (!Number.isNaN(parsed) && parsed >= 0.1 && parsed <= 1.0) {
+                    return parsed;
+                }
+            }
+        } catch {
+        }
+        return DEFAULT_HIGHLIGHT_OPACITY;
+    }
+
     function applyHighlightVisualSettings() {
         const colors = loadHighlightColors();
         const flowEnabled = loadHighlightFlow();
-        const gradient = buildHighlightGradient(colors);
-        const glow = hexToGlow(colors[0], 0.35);
+        const opacity = loadHighlightOpacity();
+        const gradient = buildHighlightGradient(colors, opacity);
+        const glow = computeHighlightGlow(colors[0], opacity);
 
         document.documentElement.style.setProperty('--highlight-gradient', gradient);
         document.documentElement.style.setProperty('--highlight-glow', glow);
@@ -190,12 +211,17 @@
     window.messageServiceHighlight = {
         buildHighlightGradient,
         hexToGlow,
+        computeHighlightGlow,
         normalizeHexColor,
         loadHighlightFlow,
         loadHighlightColors,
+        loadHighlightOpacity,
+        applyHighlightVisualSettings,
         HIGHLIGHT_FLOW_STORAGE_KEY,
         HIGHLIGHT_COLORS_STORAGE_KEY,
+        HIGHLIGHT_OPACITY_STORAGE_KEY,
         DEFAULT_HIGHLIGHT_COLORS,
+        DEFAULT_HIGHLIGHT_OPACITY,
         MAX_HIGHLIGHT_COLORS
     };
 
@@ -354,40 +380,45 @@
         }
     }
 
+    // 取得訊息命中高亮規則的所有關鍵字（去重、依長度由長到短排序，避免短關鍵字先切斷長關鍵字）
+    function matchedHighlightKeywords(message) {
+        if (!message || typeof message.text !== 'string' || message.text.length === 0) {
+            return [];
+        }
+        const keywords = state.highlightRules?.keywords;
+        if (!Array.isArray(keywords) || keywords.length === 0) {
+            return [];
+        }
+
+        const textLower = message.text.toLowerCase();
+        const currentGroupId = state.groupId;
+        const matched = new Set();
+
+        for (const kwRule of keywords) {
+            if (!kwRule || !kwRule.keyword) {
+                continue;
+            }
+            const matchScope = kwRule.applyToAllGroups === true ||
+                (Array.isArray(kwRule.groupIds) && currentGroupId && kwRule.groupIds.includes(currentGroupId));
+            if (matchScope && textLower.includes(kwRule.keyword.toLowerCase())) {
+                matched.add(kwRule.keyword);
+            }
+        }
+
+        return Array.from(matched).sort((a, b) => b.length - a.length);
+    }
+
     function isHighlighted(message) {
         if (!message) {
             return false;
         }
-        const rules = state.highlightRules;
-        if (!rules) {
-            return false;
-        }
-        const keywords = rules.keywords;
-        const users = rules.users;
-        const hasKeywords = Array.isArray(keywords) && keywords.length > 0;
-        const hasUsers = Array.isArray(users) && users.length > 0;
-        if (!hasKeywords && !hasUsers) {
-            return false;
-        }
-
-        // 關鍵字命中判定：message.text 為非空字串時，不分大小寫比對
-        if (hasKeywords && typeof message.text === 'string' && message.text.length > 0) {
-            const textLower = message.text.toLowerCase();
-            const currentGroupId = state.groupId;
-            for (const kwRule of keywords) {
-                if (!kwRule || !kwRule.keyword) {
-                    continue;
-                }
-                const matchScope = kwRule.applyToAllGroups === true ||
-                    (Array.isArray(kwRule.groupIds) && currentGroupId && kwRule.groupIds.includes(currentGroupId));
-                if (matchScope && textLower.includes(kwRule.keyword.toLowerCase())) {
-                    return true;
-                }
-            }
+        if (matchedHighlightKeywords(message).length > 0) {
+            return true;
         }
 
         // 人員命中判定：message.userId 非空時比對
-        if (hasUsers && message.userId) {
+        const users = state.highlightRules?.users;
+        if (Array.isArray(users) && users.length > 0 && message.userId) {
             const currentGroupId = state.groupId;
             for (const userRule of users) {
                 if (userRule && userRule.userId === message.userId) {
@@ -835,6 +866,94 @@
         }
     }
 
+    // 把 text 裡命中的關鍵字片段包成 <span class="highlight-keyword">，其餘為純文字節點。
+    // 關鍵字已依長度由長到短排序，以先命中者為準、不巢狀包裹
+    function buildKeywordHighlightedFragment(text, keywords) {
+        const fragment = document.createDocumentFragment();
+        if (!text || !keywords || keywords.length === 0) {
+            fragment.appendChild(document.createTextNode(text));
+            return fragment;
+        }
+
+        const lowerText = text.toLowerCase();
+        const intervals = [];
+
+        for (const kw of keywords) {
+            if (!kw) {
+                continue;
+            }
+            const lowerKw = kw.toLowerCase();
+            if (!lowerKw) {
+                continue;
+            }
+            let cursor = 0;
+            while (cursor < lowerText.length) {
+                const idx = lowerText.indexOf(lowerKw, cursor);
+                if (idx === -1) {
+                    break;
+                }
+                const end = idx + lowerKw.length;
+                const overlaps = intervals.some(iv => idx < iv.end && end > iv.start);
+                if (!overlaps) {
+                    intervals.push({ start: idx, end });
+                }
+                cursor = idx + 1;
+            }
+        }
+
+        if (intervals.length === 0) {
+            fragment.appendChild(document.createTextNode(text));
+            return fragment;
+        }
+
+        intervals.sort((a, b) => a.start - b.start);
+
+        let lastIndex = 0;
+        for (const { start, end } of intervals) {
+            if (start > lastIndex) {
+                fragment.appendChild(document.createTextNode(text.slice(lastIndex, start)));
+            }
+            const span = document.createElement('span');
+            span.className = 'highlight-keyword';
+            span.textContent = text.slice(start, end);
+            fragment.appendChild(span);
+            lastIndex = end;
+        }
+        if (lastIndex < text.length) {
+            fragment.appendChild(document.createTextNode(text.slice(lastIndex)));
+        }
+
+        return fragment;
+    }
+
+    // 對容器內不在 <a> 內部的文字節點進行關鍵字加粗放大標記
+    function applyHighlightKeywordsToContainer(container, keywords) {
+        if (!container || !keywords || keywords.length === 0) {
+            return;
+        }
+        const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+        const textNodes = [];
+        let node = walker.nextNode();
+        while (node) {
+            if (!node.parentElement?.closest('a')) {
+                textNodes.push(node);
+            }
+            node = walker.nextNode();
+        }
+        for (const textNode of textNodes) {
+            const text = textNode.textContent;
+            if (!text) {
+                continue;
+            }
+            const lowerText = text.toLowerCase();
+            const hasAnyMatch = keywords.some(kw => kw && lowerText.includes(kw.toLowerCase()));
+            if (!hasAnyMatch) {
+                continue;
+            }
+            textNode.replaceWith(buildKeywordHighlightedFragment(text, keywords));
+        }
+    }
+
     // 把 text 裡所有（不分大小寫）符合 query 的片段包成 <mark>，其餘仍是純文字節點；
     // 搜尋結果列表跟訊息串裡的關鍵字高亮共用同一份邏輯
     function buildHighlightedFragment(text, query) {
@@ -865,9 +984,8 @@
         return fragment;
     }
 
-    // 跳轉到搜尋結果後，把目前渲染出來的訊息串裡符合關鍵字的文字節點換成上面那份高亮結果
-    // （只處理純文字節點、跳過 <a> 連結內部，避免弄壞連結）；每個文字節點只標第一個符合的地方，
-    // 對聊天訊息這種短文字已經夠用，不做進一步的多重比對
+    // 跳轉到搜尋結果後，把目前渲染出來的訊息串裡符合搜尋關鍵字的文字節點換成搜尋標記
+    // （只處理純文字節點、跳過 <a> 連結內部，標記所有符合之處）
     function highlightQueryInMessageList(query) {
         if (!query) {
             return;
@@ -878,7 +996,9 @@
             const textNodes = [];
             let node = walker.nextNode();
             while (node) {
-                textNodes.push(node);
+                if (!node.parentElement?.closest('a')) {
+                    textNodes.push(node);
+                }
                 node = walker.nextNode();
             }
             for (const textNode of textNodes) {
@@ -1018,6 +1138,10 @@
         if (type === 'text') {
             const div = document.createElement('div');
             appendLinkifiedText(div, message.text ?? '');
+            const matched = matchedHighlightKeywords(message);
+            if (matched.length > 0) {
+                applyHighlightKeywordsToContainer(div, matched);
+            }
             return div;
         }
         if (type === 'sticker') {
