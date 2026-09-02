@@ -830,6 +830,27 @@ body.chat-page .chat-app {
     display: none;
 }
 
+/* 命中訊息高亮：流動漸層邊框＋光暈 */
+.bubble.highlighted {
+    border: 2px solid transparent;
+    background: linear-gradient(var(--line-bubble-bg), var(--line-bubble-bg)) padding-box,
+                var(--highlight-gradient, linear-gradient(135deg, #06c755, #ffc53d, #ff6b57, #a66cff)) border-box;
+    background-size: 100% 100%, 300% 300%;
+    box-shadow: 0 0 10px var(--highlight-glow, rgba(6, 199, 85, .35));
+}
+
+html.highlight-flowing .bubble.highlighted:not(.sticker) {
+    animation: highlight-flow-anim 4s ease infinite;
+}
+
+/* 貼圖泡泡維持透明底色，高亮改以 drop-shadow 光暈呈現，不產生白底方塊 */
+.bubble.sticker.highlighted {
+    background: transparent;
+    border: none;
+    box-shadow: none;
+    filter: drop-shadow(0 0 8px var(--highlight-glow, rgba(6, 199, 85, .45)));
+}
+
 /* 貼圖跟 LINE 一樣浮貼在背景上，不裝進白色泡泡；固定尺寸不跟字級縮放
    （貼圖是圖形內容，比照頭貼/圖示的既有原則） */
 .msg-sticker {
@@ -1042,7 +1063,10 @@ body.chat-page .chat-app {
 @media (prefers-reduced-motion: reduce) {
     .message-row.message-enter,
     .message-row.message-highlight-flash .bubble,
-    .highlight-preview-bubble.flowing {
+    .highlight-preview-bubble.flowing,
+    /* 選擇器要跟上面那條高亮流動規則一樣具體（含 :not(.sticker)），
+       否則特異性比它低、animation: none 會被蓋掉，減少動態效果等於沒生效 */
+    html.highlight-flowing .bubble.highlighted:not(.sticker) {
         animation: none;
     }
 

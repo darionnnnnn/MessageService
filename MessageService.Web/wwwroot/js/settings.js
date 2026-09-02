@@ -137,9 +137,14 @@
 
     // === 訊息高亮（高亮關鍵字、高亮人員、顯示效果） ===
 
-    const HIGHLIGHT_FLOW_STORAGE_KEY = 'chat-highlight-flow';
-    const HIGHLIGHT_COLORS_STORAGE_KEY = 'chat-highlight-colors';
-    const DEFAULT_HIGHLIGHT_COLORS = ['#06c755', '#ffc53d', '#ff6b57', '#a66cff'];
+    const {
+        buildHighlightGradient,
+        hexToGlow,
+        normalizeHexColor,
+        HIGHLIGHT_FLOW_STORAGE_KEY,
+        HIGHLIGHT_COLORS_STORAGE_KEY,
+        DEFAULT_HIGHLIGHT_COLORS
+    } = window.messageServiceHighlight;
     const MAX_HIGHLIGHT_COLORS = 8;
     const MIN_HIGHLIGHT_COLORS = 1;
     const PRESET_HIGHLIGHT_COLORS = [
@@ -154,29 +159,6 @@
     ];
 
     let highlightColors = [...DEFAULT_HIGHLIGHT_COLORS];
-
-    // 把 #rrggbb 轉成帶透明度的 rgba()，給發光陰影用——邊框是漸層，
-    // 光暈取第一個顏色就好，不然多色光暈疊在一起會糊成一團灰
-    function hexToGlow(hex, alpha) {
-        const value = normalizeHexColor(hex);
-        if (!value) {
-            return `rgba(6, 199, 85, ${alpha})`;
-        }
-        const r = parseInt(value.slice(1, 3), 16);
-        const g = parseInt(value.slice(3, 5), 16);
-        const b = parseInt(value.slice(5, 7), 16);
-        return `rgba(${r}, ${g}, ${b}, ${alpha})`;
-    }
-
-    function buildHighlightGradient(colors) {
-        if (!colors || colors.length === 0) {
-            return 'linear-gradient(135deg, #06c755, #ffc53d, #ff6b57, #a66cff)';
-        }
-        if (colors.length === 1) {
-            return `linear-gradient(135deg, ${colors[0]}, ${colors[0]})`;
-        }
-        return `linear-gradient(135deg, ${colors.join(', ')})`;
-    }
 
     // --- 高亮關鍵字 ---
 
@@ -323,14 +305,6 @@
     }
 
     // --- 顯示效果（流動開關與顏色） ---
-
-    function normalizeHexColor(color) {
-        if (!color || typeof color !== 'string') {
-            return null;
-        }
-        const trimmed = color.trim().toLowerCase();
-        return /^#[0-9a-f]{6}$/.test(trimmed) ? trimmed : null;
-    }
 
     function loadHighlightFlow() {
         try {

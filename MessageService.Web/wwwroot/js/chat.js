@@ -23,6 +23,9 @@
     const FONT_SIZE_STORAGE_KEY = 'chat-font-size';
     const FONT_SIZES = ['small', 'medium', 'large'];
     const DEFAULT_FONT_SIZE = 'medium';
+    const HIGHLIGHT_FLOW_STORAGE_KEY = 'chat-highlight-flow';
+    const HIGHLIGHT_COLORS_STORAGE_KEY = 'chat-highlight-colors';
+    const DEFAULT_HIGHLIGHT_COLORS = ['#06c755', '#ffc53d', '#ff6b57', '#a66cff'];
     const URL_REGEX = /(https?:\/\/[^\s]+)/g;
 
     // 對應後端 AvatarIconCatalog 的 IconKey；同一份代號清單，兩邊各自維護一份對照表
@@ -73,7 +76,9 @@
         searchScope: 'group',
         // 跟 requestToken 分開算——切群組不該讓正在飛的搜尋請求作廢，反之亦然
         searchRequestToken: 0,
-        initialEmpty: false
+        initialEmpty: false,
+        highlightRules: { keywords: [], users: [] },
+        messagesCache: new Map()
     };
 
     const els = {};
@@ -106,6 +111,85 @@
     }
 
     window.messageServiceToast = showToast;
+
+    // === 訊息高亮色彩處理與共享出口 ===
+
+    function normalizeHexColor(color) {
+        if (!color || typeof color !== 'string') {
+            return null;
+        }
+        const trimmed = color.trim().toLowerCase();
+        return /^#[0-9a-f]{6}$/.test(trimmed) ? trimmed : null;
+    }
+
+    // 把 #rrggbb 轉成帶透明度的 rgba()，給發光陰影用——邊框是漸層，
+    // 光暈取第一個顏色就好，不然多色光暈疊在一起會糊成一團灰
+    function hexToGlow(hex, alpha) {
+        const value = normalizeHexColor(hex);
+        if (!value) {
+            return `rgba(6, 199, 85, ${alpha})`;
+        }
+        const r = parseInt(value.slice(1, 3), 16);
+        const g = parseInt(value.slice(3, 5), 16);
+        const b = parseInt(value.slice(5, 7), 16);
+        return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+    }
+
+    function buildHighlightGradient(colors) {
+        if (!colors || colors.length === 0) {
+            return 'linear-gradient(135deg, #06c755, #ffc53d, #ff6b57, #a66cff)';
+        }
+        if (colors.length === 1) {
+            return `linear-gradient(135deg, ${colors[0]}, ${colors[0]})`;
+        }
+        return `linear-gradient(135deg, ${colors.join(', ')})`;
+    }
+
+    function loadHighlightFlow() {
+        try {
+            const saved = localStorage.getItem(HIGHLIGHT_FLOW_STORAGE_KEY);
+            return saved === null ? true : saved === '1';
+        } catch {
+            return true;
+        }
+    }
+
+    function loadHighlightColors() {
+        try {
+            const saved = localStorage.getItem(HIGHLIGHT_COLORS_STORAGE_KEY);
+            if (saved) {
+                const parsed = JSON.parse(saved);
+                if (Array.isArray(parsed)) {
+                    const normalized = parsed.map(normalizeHexColor).filter(Boolean);
+                    if (normalized.length > 0) {
+                        return normalized.slice(0, 8);
+                    }
+                }
+            }
+        } catch {
+        }
+        return [...DEFAULT_HIGHLIGHT_COLORS];
+    }
+
+    function applyHighlightVisualSettings() {
+        const colors = loadHighlightColors();
+        const flowEnabled = loadHighlightFlow();
+        const gradient = buildHighlightGradient(colors);
+        const glow = hexToGlow(colors[0], 0.35);
+
+        document.documentElement.style.setProperty('--highlight-gradient', gradient);
+        document.documentElement.style.setProperty('--highlight-glow', glow);
+        document.documentElement.classList.toggle('highlight-flowing', flowEnabled);
+    }
+
+    window.messageServiceHighlight = {
+        buildHighlightGradient,
+        hexToGlow,
+        normalizeHexColor,
+        HIGHLIGHT_FLOW_STORAGE_KEY,
+        HIGHLIGHT_COLORS_STORAGE_KEY,
+        DEFAULT_HIGHLIGHT_COLORS
+    };
 
     // === 通用快捷選單（Context Menu）===
 
@@ -245,6 +329,245 @@
             }
         ];
         showContextMenu(anchorEvent, items);
+    }
+
+    // === 訊息高亮規則與選單 ===
+
+    async function loadHighlightRules() {
+        try {
+            const rules = await fetchJson('api/settings/highlight-rules');
+            state.highlightRules = {
+                keywords: Array.isArray(rules?.keywords) ? rules.keywords : [],
+                users: Array.isArray(rules?.users) ? rules.users : []
+            };
+        } catch (err) {
+            state.highlightRules = { keywords: [], users: [] };
+            console.warn('載入訊息高亮規則失敗：', err);
+        }
+    }
+
+    function isHighlighted(message) {
+        if (!message) {
+            return false;
+        }
+        const rules = state.highlightRules;
+        if (!rules) {
+            return false;
+        }
+        const keywords = rules.keywords;
+        const users = rules.users;
+        const hasKeywords = Array.isArray(keywords) && keywords.length > 0;
+        const hasUsers = Array.isArray(users) && users.length > 0;
+        if (!hasKeywords && !hasUsers) {
+            return false;
+        }
+
+        // 關鍵字命中判定：message.text 為非空字串時，不分大小寫比對
+        if (hasKeywords && typeof message.text === 'string' && message.text.length > 0) {
+            const textLower = message.text.toLowerCase();
+            const currentGroupId = state.groupId;
+            for (const kwRule of keywords) {
+                if (!kwRule || !kwRule.keyword) {
+                    continue;
+                }
+                const matchScope = kwRule.applyToAllGroups === true ||
+                    (Array.isArray(kwRule.groupIds) && currentGroupId && kwRule.groupIds.includes(currentGroupId));
+                if (matchScope && textLower.includes(kwRule.keyword.toLowerCase())) {
+                    return true;
+                }
+            }
+        }
+
+        // 人員命中判定：message.userId 非空時比對
+        if (hasUsers && message.userId) {
+            const currentGroupId = state.groupId;
+            for (const userRule of users) {
+                if (userRule && userRule.userId === message.userId) {
+                    if (userRule.groupId === null || userRule.groupId === currentGroupId) {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        return false;
+    }
+
+    function refreshHighlightClasses() {
+        if (!els.messageList) {
+            return;
+        }
+        const rows = els.messageList.querySelectorAll('.message-row');
+        for (const row of rows) {
+            const id = Number(row.dataset.messageId);
+            const message = state.messagesCache.get(id);
+            if (!message) {
+                continue;
+            }
+            const bubble = row.querySelector('.bubble');
+            if (bubble) {
+                bubble.classList.toggle('highlighted', isHighlighted(message));
+            }
+        }
+    }
+
+    function showAvatarContextMenu(anchorEvent, message) {
+        if (!message || !message.userId) {
+            return;
+        }
+
+        const userRules = state.highlightRules?.users || [];
+        const allGroupRule = userRules.find(r => r.userId === message.userId && r.groupId === null);
+        const currentGroupRule = state.groupId
+            ? userRules.find(r => r.userId === message.userId && r.groupId === state.groupId)
+            : null;
+
+        const items = [];
+
+        // 全部群組項目
+        if (allGroupRule) {
+            items.push({
+                label: '取消高亮（全部群組）',
+                danger: false,
+                onSelect: () => removeHighlightUser(allGroupRule.id, 'all')
+            });
+        } else {
+            items.push({
+                label: '高亮此人（全部群組）',
+                danger: false,
+                onSelect: () => addHighlightUser(message.userId, null)
+            });
+        }
+
+        // 目前群組項目（有目前群組時才顯示）
+        if (state.groupId) {
+            if (currentGroupRule) {
+                items.push({
+                    label: '取消高亮（目前群組）',
+                    danger: false,
+                    onSelect: () => removeHighlightUser(currentGroupRule.id, 'current')
+                });
+            } else {
+                items.push({
+                    label: '高亮此人（目前群組）',
+                    danger: false,
+                    onSelect: () => addHighlightUser(message.userId, state.groupId)
+                });
+            }
+        }
+
+        showContextMenu(anchorEvent, items);
+    }
+
+    async function addHighlightUser(userId, groupId) {
+        try {
+            const response = await fetch('api/settings/highlight-users', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ userId, groupId })
+            });
+            if (!response.ok) {
+                showToast('操作失敗，請稍後再試', true);
+                return;
+            }
+            const created = await response.json();
+            if (!state.highlightRules) {
+                state.highlightRules = { keywords: [], users: [] };
+            }
+            if (!Array.isArray(state.highlightRules.users)) {
+                state.highlightRules.users = [];
+            }
+            const existsIndex = state.highlightRules.users.findIndex(u => u.id === created.id);
+            if (existsIndex >= 0) {
+                state.highlightRules.users[existsIndex] = created;
+            } else {
+                state.highlightRules.users.push(created);
+            }
+
+            refreshHighlightClasses();
+            showToast(groupId === null ? '已將此人加入高亮（全部群組）' : '已將此人加入高亮（目前群組）');
+        } catch {
+            showToast('操作失敗，請稍後再試', true);
+        }
+    }
+
+    async function removeHighlightUser(id, scope) {
+        try {
+            const response = await fetch(`api/settings/highlight-users/${encodeURIComponent(id)}`, {
+                method: 'DELETE'
+            });
+            if (!response.ok && response.status !== 404) {
+                showToast('操作失敗，請稍後再試', true);
+                return;
+            }
+            if (state.highlightRules?.users) {
+                state.highlightRules.users = state.highlightRules.users.filter(u => u.id !== id);
+            }
+
+            refreshHighlightClasses();
+            showToast(scope === 'all' ? '已取消此人的高亮（全部群組）' : '已取消此人的高亮（目前群組）');
+        } catch {
+            showToast('操作失敗，請稍後再試', true);
+        }
+    }
+
+    // 右鍵與長按的共用觸發器：側欄群組項目與訊息頭貼共用同一套手勢
+    // （桌面右鍵、手機長按 500ms、位移超過 10px 取消、長按後抑制那一次 click）。
+    // openMenu 收到的參數只需要有 clientX／clientY，長按時會自己補上按下的座標。
+    function attachContextMenuTriggers(el, openMenu) {
+        let longPressTimer = null;
+        let suppressNextClick = false;
+        let startX = 0;
+        let startY = 0;
+
+        const cancelLongPress = () => {
+            if (longPressTimer) {
+                clearTimeout(longPressTimer);
+                longPressTimer = null;
+            }
+        };
+
+        el.addEventListener('contextmenu', (e) => {
+            e.preventDefault();
+            cancelLongPress();
+            openMenu(e);
+        });
+
+        el.addEventListener('pointerdown', (e) => {
+            if (e.button !== undefined && e.button !== 0) {
+                return;
+            }
+            cancelLongPress();
+            suppressNextClick = false;
+            startX = e.clientX;
+            startY = e.clientY;
+            longPressTimer = setTimeout(() => {
+                longPressTimer = null;
+                suppressNextClick = true;
+                openMenu({ clientX: startX, clientY: startY });
+            }, 500);
+        });
+
+        el.addEventListener('pointermove', (e) => {
+            if (!longPressTimer) {
+                return;
+            }
+            if (Math.hypot(e.clientX - startX, e.clientY - startY) > 10) {
+                cancelLongPress();
+            }
+        });
+
+        el.addEventListener('pointerup', cancelLongPress);
+        el.addEventListener('pointercancel', cancelLongPress);
+
+        // 回傳「這一次 click 是不是長按帶出來的」，讓呼叫端決定要不要吞掉自己的 click 行為
+        return function consumeSuppressedClick() {
+            if (!suppressNextClick) {
+                return false;
+            }
+            suppressNextClick = false;
+            return true;
+        };
     }
 
     // === 群組刪除／訊息清除對話框與收斂 ===
@@ -711,6 +1034,18 @@
             colorSeed: message.userId || message.displayName || '?'
         });
         avatar.title = message.userId ? `${message.displayName}（${message.userId}）` : message.displayName;
+
+        if (message.userId) {
+            const consumeAvatarClick = attachContextMenuTriggers(
+                avatar, (e) => showAvatarContextMenu(e, message));
+            avatar.addEventListener('click', (e) => {
+                if (consumeAvatarClick()) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                }
+            });
+        }
+
         row.appendChild(avatar);
 
         const group = document.createElement('div');
@@ -726,10 +1061,12 @@
             group.appendChild(name);
         }
 
+        const isHigh = isHighlighted(message);
         const bubble = document.createElement('div');
         bubble.className = 'bubble'
             + (message.messageType === 'sticker' ? ' sticker' : '')
-            + (showAvatarAndName ? ' has-tail' : '');
+            + (showAvatarAndName ? ' has-tail' : '')
+            + (isHigh ? ' highlighted' : '');
         bubble.appendChild(buildContentNode(message));
 
         // LINE 的時間戳貼在泡泡外側，不是泡泡裡面
@@ -755,6 +1092,7 @@
     function appendMessages(messages, animate) {
         const list = els.messageList;
         for (const message of messages) {
+            state.messagesCache.set(message.id, message);
             const key = dateKey(message.eventTimestamp);
             if (key !== state.lastAppendedDateKey) {
                 list.appendChild(createDateSeparator(message.eventTimestamp));
@@ -794,6 +1132,7 @@
         let lastDateKey = null;
         let lastSenderId = null;
         for (const message of messages) {
+            state.messagesCache.set(message.id, message);
             const key = dateKey(message.eventTimestamp);
             if (key !== lastDateKey) {
                 fragment.appendChild(createDateSeparator(message.eventTimestamp));
@@ -984,64 +1323,13 @@
 
         btn.appendChild(meta);
 
-        let longPressTimer = null;
-        let suppressNextClick = false;
-        let startX = 0;
-        let startY = 0;
-
-        btn.addEventListener('contextmenu', (e) => {
-            e.preventDefault();
-            if (longPressTimer) {
-                clearTimeout(longPressTimer);
-                longPressTimer = null;
-            }
-            showGroupContextMenu(e, group);
-        });
-
-        btn.addEventListener('pointerdown', (e) => {
-            if (e.button !== undefined && e.button !== 0) {
-                return;
-            }
-            if (longPressTimer) {
-                clearTimeout(longPressTimer);
-                longPressTimer = null;
-            }
-            suppressNextClick = false;
-            startX = e.clientX;
-            startY = e.clientY;
-            longPressTimer = setTimeout(() => {
-                longPressTimer = null;
-                suppressNextClick = true;
-                showGroupContextMenu({ clientX: startX, clientY: startY }, group);
-            }, 500);
-        });
-
-        btn.addEventListener('pointermove', (e) => {
-            if (!longPressTimer) {
-                return;
-            }
-            const dx = e.clientX - startX;
-            const dy = e.clientY - startY;
-            if (Math.hypot(dx, dy) > 10) {
-                clearTimeout(longPressTimer);
-                longPressTimer = null;
-            }
-        });
-
-        const cancelLongPress = () => {
-            if (longPressTimer) {
-                clearTimeout(longPressTimer);
-                longPressTimer = null;
-            }
-        };
-        btn.addEventListener('pointerup', cancelLongPress);
-        btn.addEventListener('pointercancel', cancelLongPress);
+        const consumeGroupClick = attachContextMenuTriggers(
+            btn, (e) => showGroupContextMenu(e, group));
 
         btn.addEventListener('click', (e) => {
-            if (suppressNextClick) {
+            if (consumeGroupClick()) {
                 e.preventDefault();
                 e.stopPropagation();
-                suppressNextClick = false;
                 return;
             }
             selectGroup(group.groupId);
@@ -1377,6 +1665,7 @@
 
     function clearMessageList() {
         els.messageList.innerHTML = '';
+        state.messagesCache.clear();
         state.pendingContentIds.clear();
         state.lastAppendedDateKey = null;
         state.lastAppendedSenderId = null;
@@ -1910,7 +2199,7 @@
 
     // === 初始化 ===
 
-    function init() {
+    async function init() {
         els.chatApp = $('chat-app');
         els.sidebar = $('sidebar');
         els.groupSearch = $('group-search');
@@ -2011,13 +2300,17 @@
 
         // 設定 modal 關掉時，如果這次開啟期間真的改了東西（名稱顯示模式、關鍵字規則等），
         // settings.js 會發這個事件——重新載入目前群組的訊息視窗＋側欄，不用使用者自己重新整理
-        document.addEventListener('messageservice:settings-changed', () => {
+        document.addEventListener('messageservice:settings-changed', async () => {
+            await loadHighlightRules();
+            applyHighlightVisualSettings();
             if (state.groupId) {
                 selectGroup(state.groupId);
             }
             pollGroups();
         });
 
+        applyHighlightVisualSettings();
+        await loadHighlightRules();
         loadGroups().catch(() => setConnectionOk(false));
         setInterval(pollNewer, POLL_INTERVAL_MS);
         setInterval(pollGroups, GROUP_POLL_INTERVAL_MS);
