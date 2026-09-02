@@ -411,10 +411,49 @@ public class OutboxForwarderServiceTests : IDisposable
     // ==== 積壓年齡告警：P0 那類暫時性失敗永遠不會死信、死信計數看不出排空卡住，
     // 只能靠最舊未死信項目的年齡判斷，見 LogDeadLetterCountAsync 的說明 ====
 
+    /// <summary>單向防火牆拓撲（只開通 core→edge）：Edge 這邊寫退避的同時，Core 可能正透過
+    /// outbox/ack 把同一筆刪掉。那是正常現象（被 ack＝Core 已收到），不該讓整批 SaveChanges
+    /// 失敗——同批其他項目的退避一起回滾的話，下一輪會立刻重跑，變成無退避的熱迴圈。</summary>
+    [Fact]
+    public async Task ProcessBatchAsync_EntryAckedByPullMidFlight_KeepsOtherEntriesBackoffAndLogsInformation()
+    {
+        var taken = await SeedEntryAsync(SampleEnvelope("evt-taken"));
+        await SeedEntryAsync(SampleEnvelope("evt-kept"));
+
+        // 送出當下 Core 的輪詢把 evt-taken 給 ack 掉了（另一個 DbContext 直接刪）
+        _sink.BeforeSubmitBatch = () =>
+        {
+            using var scope = _provider.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<OutboxDbContext>();
+            db.Entries.Where(e => e.Id == taken.Id).ExecuteDelete();
+        };
+        _sink.ThrowOnNextSubmit = new HttpRequestException("core unreachable");
+
+        var logger = new CapturingLogger();
+        var before = DateTimeOffset.UtcNow;
+        var forwarder = CreateForwarder(logger: logger);
+
+        // 不得往外拋——舊行為會在這裡炸 DbUpdateConcurrencyException
+        var processedAny = await forwarder.ProcessBatchAsync(CancellationToken.None);
+
+        Assert.True(processedAny);
+        Assert.Empty(logger.Errors);
+
+        // 被取走的那筆真的不見了；沒被取走的那筆退避照常寫入
+        var remaining = Assert.Single(await GetRemainingEntriesAsync());
+        Assert.Equal("evt-kept", remaining.WebhookEventId);
+        Assert.Equal(1, remaining.Attempts);
+        Assert.NotNull(remaining.NextAttemptAt);
+        Assert.True(remaining.NextAttemptAt > before, "退避沒推進的話下一輪會立刻重跑");
+
+        Assert.Contains(logger.Infos, m => m.Contains("已被 Core 的輪詢取走"));
+    }
+
     private sealed class CapturingLogger : ILogger<OutboxForwarderService>
     {
         public List<string> Errors { get; } = [];
         public List<string> Warnings { get; } = [];
+        public List<string> Infos { get; } = [];
         public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
         public bool IsEnabled(LogLevel logLevel) => true;
         public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
@@ -426,6 +465,10 @@ public class OutboxForwarderServiceTests : IDisposable
             if (logLevel == LogLevel.Warning)
             {
                 Warnings.Add(formatter(state, exception));
+            }
+            if (logLevel == LogLevel.Information)
+            {
+                Infos.Add(formatter(state, exception));
             }
         }
     }
