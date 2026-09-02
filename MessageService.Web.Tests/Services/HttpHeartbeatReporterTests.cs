@@ -103,6 +103,60 @@ public class HttpHeartbeatReporterTests
         Assert.True(state.PushPaused);
     }
 
+    /// <summary>HttpClient 逾時是 TaskCanceledException：Core 端 DROP 封包而 TCP 連線逾時比 client 的
+    /// 30 秒長時（Linux、半開連線）看到的就是這一種。用例外型別過濾會讓心跳「送不到」不計入，
+    /// 通道永遠不切換——批次 A 的修正在那個情境下等於沒做。</summary>
+    [Fact]
+    public async Task ReportAsync_HttpClientTimeout_CountsAsFailure()
+    {
+        var time = new FakeTimeProvider();
+        var state = new EdgeChannelState(
+            OptionsFactory.Create(new DeploymentOptions { Mode = DeploymentMode.Edge }),
+            OptionsFactory.Create(new IngestOptions { Channel = IngestChannel.Auto, PullActivationSeconds = 180 }),
+            time);
+        var reporter = new HttpHeartbeatReporter(
+            new StubHttpClientFactory(new FakeHttpMessageHandler(_ =>
+                throw new TaskCanceledException("timeout", new TimeoutException()))),
+            OptionsFactory.Create(new DeploymentOptions { Mode = DeploymentMode.Edge }),
+            state);
+
+        await Assert.ThrowsAsync<TaskCanceledException>(
+            () => reporter.ReportAsync(new HeartbeatReport(0, null), CancellationToken.None));
+        time.Now = time.Now.AddSeconds(181);
+        await Assert.ThrowsAsync<TaskCanceledException>(
+            () => reporter.ReportAsync(new HeartbeatReport(0, null), CancellationToken.None));
+
+        Assert.True(state.PushPaused);
+    }
+
+    [Fact]
+    public async Task ReportAsync_CallerCancelled_DoesNotCountAsFailure()
+    {
+        var time = new FakeTimeProvider();
+        var state = new EdgeChannelState(
+            OptionsFactory.Create(new DeploymentOptions { Mode = DeploymentMode.Edge }),
+            OptionsFactory.Create(new IngestOptions { Channel = IngestChannel.Auto, PullActivationSeconds = 180 }),
+            time);
+        using var cts = new CancellationTokenSource();
+        var reporter = new HttpHeartbeatReporter(
+            new StubHttpClientFactory(new FakeHttpMessageHandler(_ =>
+            {
+                cts.Cancel();
+                throw new OperationCanceledException(cts.Token);
+            })),
+            OptionsFactory.Create(new DeploymentOptions { Mode = DeploymentMode.Edge }),
+            state);
+
+        // 停機中的取消：兩次跨過寬限期也不能進入暫停
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => reporter.ReportAsync(new HeartbeatReport(0, null), cts.Token));
+        time.Now = time.Now.AddSeconds(181);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => reporter.ReportAsync(new HeartbeatReport(0, null), cts.Token));
+
+        Assert.False(state.PushPaused);
+    }
+
     [Fact]
     public async Task ReportAsync_SucceedsAfterFailures_ClearsFailureStreak()
     {

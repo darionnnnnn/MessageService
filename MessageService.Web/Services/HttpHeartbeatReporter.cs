@@ -23,7 +23,14 @@ public class HttpHeartbeatReporter(
                 .PostAsJsonAsync("api/ingest/heartbeat", request, cancellationToken);
             response.EnsureSuccessStatusCode();
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // 真的在停機才放行；HttpClient 逾時丟的 TaskCanceledException 也是 OperationCanceledException，
+            // 用例外型別過濾會把「Core 沒回應」誤當成「呼叫端取消」而不計入（見 ContentDownloadService
+            // 的同一教訓）。判斷依據看 token 本身
+            throw;
+        }
+        catch
         {
             // 心跳是這個方向唯一「不受通道閘門節流、固定每個週期都會送」的流量，因此也是
             // 判斷 edge→core 通不通最靈敏的訊號。**沒有訊息流量時 outbox 根本不會嘗試推送**，

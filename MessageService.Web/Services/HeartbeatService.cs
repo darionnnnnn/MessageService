@@ -54,8 +54,14 @@ public class HeartbeatService(
         {
             await ReportOnceAsync(cancellationToken);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // 含 HttpClient 逾時的 TaskCanceledException：它不是停機，穿出去會讓 ExecuteAsync 結束、
+            // BackgroundService 預設 StopHost 把整個站台停掉（判斷依據看 token，不看例外型別）
             LogFailure(ex);
             return false;
         }

@@ -533,6 +533,37 @@ public class ProfileRefreshServiceTests : IDisposable
         Assert.Equal(2, store.GetStalenessCallCount);
     }
 
+    /// <summary>Edge 打 Core 的 staleness 查詢遇到 HttpClient 逾時時是 TaskCanceledException，
+    /// 不是停機——要走內部失敗的短冷卻，不能穿出去（穿出 ExecuteAsync 會讓服務靜默結束）。</summary>
+    [Fact]
+    public async Task ProcessAsync_StalenessHttpClientTimeout_IsInternalFailure_NotPropagated()
+    {
+        var store = new ThrowingProfileStore((_, _, _) =>
+            throw new TaskCanceledException("timeout", new TimeoutException()));
+        var logger = new CapturingLogger();
+
+        var services = new ServiceCollection();
+        services.AddSingleton<IProfileStore>(store);
+        services.AddSingleton<ILineProfileClient>(_profileClient);
+        var provider = services.BuildServiceProvider();
+
+        var service = new ProfileRefreshService(
+            new FakeProfileRefreshQueue(),
+            provider.GetRequiredService<IServiceScopeFactory>(),
+            OptionsFactory.Create(new ProfileCacheOptions { RefreshAfter = TimeSpan.FromDays(7) }),
+            IngestOpts("http://core.example/"),
+            _time,
+            logger);
+
+        await service.ProcessAsync(new ProfileRefreshTask("G1", "U1"), CancellationToken.None);
+
+        Assert.Contains("core.example", Assert.Single(logger.Warnings));
+
+        _time.Advance(TimeSpan.FromSeconds(31));
+        await service.ProcessAsync(new ProfileRefreshTask("G1", "U1"), CancellationToken.None);
+        Assert.Equal(2, store.GetStalenessCallCount);
+    }
+
     private class ThrowingProfileStore(Func<string, string?, DateTimeOffset, Task<ProfileStaleness>> onGetStaleness) : IProfileStore
     {
         public int GetStalenessCallCount { get; private set; }

@@ -350,6 +350,44 @@ public class EdgePullServiceTests
         Assert.Contains("G1", harness.RequestBodies[^1]);
     }
 
+    /// <summary>bot 被踢出群組（LINE 404）這類永久失敗不會有結果落地、staleness 永遠過期——
+    /// 沒有上限會每個重派間隔查一次資料庫直到 Core 重啟。放棄後該群組的下一則訊息會重新排入。</summary>
+    [Fact]
+    public async Task PollOnceAsync_ProfileNeverSettles_GivesUpAfterMaxDispatches_AndReentersOnNewMessage()
+    {
+        var profileStore = new FakeProfileStore { StalenessToReturn = new ProfileStaleness(true, true) };
+        var item = new EdgeOutboxItem("evt-1", JsonSerializer.Serialize(SampleEnvelope));
+        var landed = false;
+        var harness = CreateHarness(
+            request => request.RequestUri!.AbsolutePath.EndsWith("/poll")
+                ? PollResponse(messages: landed ? [] : [item])
+                : new HttpResponseMessage(HttpStatusCode.NoContent),
+            profileStore: profileStore);
+
+        await harness.Service.PollOnceAsync(CancellationToken.None);
+        landed = true;
+
+        for (var i = 0; i < 40; i++)
+        {
+            await harness.Service.PollOnceAsync(CancellationToken.None);
+            harness.Time.Now = harness.Time.Now.AddSeconds(31);
+        }
+        Assert.Equal(40, profileStore.GetStalenessCalls.Count);
+
+        // 第 41 輪起不再查、不再派
+        await harness.Service.PollOnceAsync(CancellationToken.None);
+        harness.Time.Now = harness.Time.Now.AddSeconds(31);
+        await harness.Service.PollOnceAsync(CancellationToken.None);
+        Assert.Equal(40, profileStore.GetStalenessCalls.Count);
+
+        // 同群組再來一則訊息 → 重新進待辦、立刻可派
+        landed = false;
+        await harness.Service.PollOnceAsync(CancellationToken.None);
+        landed = true;
+        await harness.Service.PollOnceAsync(CancellationToken.None);
+        Assert.Equal(41, profileStore.GetStalenessCalls.Count);
+    }
+
     [Fact]
     public async Task PollOnceAsync_SameGroupSendsMoreMessages_DoesNotPushBackRedispatchClock()
     {

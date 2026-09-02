@@ -41,7 +41,11 @@ public class ContentDownloadService(
             }
             await RequeuePendingAsync(reclaimDownloading: true, startupAge: startupAge, stoppingToken);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
         {
             logger.LogWarning(ex, "Failed to requeue pending downloads at startup（{Minutes} 分鐘後的週期重掃會自動再試）", _options.RequeueIntervalMinutes);
         }

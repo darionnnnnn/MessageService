@@ -59,7 +59,17 @@ public class EdgePullService(
     /// staleness 查詢失敗），派出即清空的話那筆就永遠丟了，要等該群組下一則新訊息才會重來——
     /// 實測到的「名稱／頭貼一直出不來」就是這個。改成留著、每 ProfileRedispatchInterval
     /// 重派一次，直到 Core 這邊查到它已經不過期（＝Edge 的結果已經落地）才移除。</summary>
-    private readonly Dictionary<(string GroupId, string? UserId), DateTimeOffset> _pendingProfileWork = [];
+    private readonly Dictionary<(string GroupId, string? UserId), ProfileDispatchState> _pendingProfileWork = [];
+
+    /// <summary>某個對象重派幾次後放棄。永久刷不起來的對象（bot 已被踢出群組、成員已退群，
+    /// LINE 回 404）不會有結果落地、staleness 永遠過期——沒有上限的話會每個重派間隔
+    /// 查一次 staleness、派一次工，直到 Core 重啟為止。40 次 × 30 秒 ≈ 20 分鐘，
+    /// 涵蓋 Edge 端一整個 FailureRetryAfter（預設 10 分）冷卻加一次冷卻後的重試；
+    /// 放棄後該群組下一則訊息落地時會重新進待辦，不會永久失聯。</summary>
+    private const int MaxProfileDispatches = 40;
+
+    /// <summary>待辦裡每個對象的派工狀態：上次派出時刻（MinValue＝還沒派過）與已派次數。</summary>
+    private readonly record struct ProfileDispatchState(DateTimeOffset LastDispatchedAt, int Dispatches);
 
     /// <summary>同一個刷新對象最短的重派間隔。要夠短才能在 Edge 結束短冷卻後立刻補上
     /// （見 ProfileRefreshService.InternalFailureRetryAfter，同為 30 秒），又不能每秒重派——
@@ -464,7 +474,7 @@ public class EdgePullService(
             // 只挑「從沒派過」或「距上次派出已滿一個重派間隔」的——其餘連 staleness 都不查，
             // 待辦保留後存活期變長，每秒每筆查一次資料庫會壓垮每秒一次的輪詢節奏
             targets = [.. _pendingProfileWork
-                .Where(pair => now - pair.Value >= ProfileRedispatchInterval)
+                .Where(pair => now - pair.Value.LastDispatchedAt >= ProfileRedispatchInterval)
                 .Select(pair => pair.Key)];
         }
 
@@ -504,7 +514,18 @@ public class EdgePullService(
             // 這筆 30 秒後自然重派，多等一輪無關緊要
             foreach (var item in dispatch)
             {
-                _pendingProfileWork[(item.GroupId, item.UserId)] = now;
+                var key = (item.GroupId, item.UserId);
+                var dispatches = _pendingProfileWork.TryGetValue(key, out var state) ? state.Dispatches + 1 : 1;
+                if (dispatches >= MaxProfileDispatches)
+                {
+                    _pendingProfileWork.Remove(key);
+                    logger.LogInformation(
+                        "名稱／頭貼刷新對象（群組 {GroupId}、成員 {UserId}）已重派 {Count} 次仍未落地，先放棄；該群組下一則訊息會重新排入。",
+                        item.GroupId, item.UserId, dispatches);
+                    continue;
+                }
+
+                _pendingProfileWork[key] = new ProfileDispatchState(now, dispatches);
             }
         }
 
@@ -633,7 +654,8 @@ public class EdgePullService(
             {
                 // MinValue＝還沒派過，下一輪 poll 立刻派。已經在待辦裡的不重設時戳，
                 // 否則同一個群組連發訊息會把重派間隔一直往後推
-                _pendingProfileWork.TryAdd((envelope.GroupId, envelope.UserId), DateTimeOffset.MinValue);
+                _pendingProfileWork.TryAdd(
+                    (envelope.GroupId, envelope.UserId), new ProfileDispatchState(DateTimeOffset.MinValue, 0));
             }
         }
 

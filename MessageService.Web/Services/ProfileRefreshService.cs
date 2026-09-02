@@ -63,8 +63,14 @@ public class ProfileRefreshService(
             {
                 await ProcessAsync(task, stoppingToken);
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                // 含 HttpClient 逾時的 TaskCanceledException——穿出這個迴圈會讓服務靜默結束
+                // （BackgroundService 預設 StopHost），判斷依據看 stoppingToken 不看例外型別
                 logger.LogError(ex, "Unexpected error refreshing profile cache for group {GroupId} user {UserId}",
                     task.GroupId, task.UserId);
             }
@@ -96,7 +102,11 @@ public class ProfileRefreshService(
         {
             staleness = await profileStore.GetStalenessAsync(task.GroupId, task.UserId, cutoff, cancellationToken);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
         {
             RecordInternalFailure(task.GroupId);
             if (task.UserId is not null)
@@ -183,7 +193,11 @@ public class ProfileRefreshService(
         {
             summary = await profileClient.GetGroupSummaryAsync(groupId, knownPictureUrl, hasPicture, cancellationToken);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
         {
             RecordFailure(groupId);
             logger.LogWarning(ex, "Group summary lookup failed for group {GroupId}; backing off: {FailureReason}",
@@ -218,7 +232,11 @@ public class ProfileRefreshService(
         {
             profile = await profileClient.GetGroupMemberProfileAsync(groupId, userId, knownPictureUrl, hasPicture, cancellationToken);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
         {
             RecordFailure(MemberKey(groupId, userId));
             logger.LogWarning(ex, "Member profile lookup failed for group {GroupId} user {UserId}; backing off: {FailureReason}",

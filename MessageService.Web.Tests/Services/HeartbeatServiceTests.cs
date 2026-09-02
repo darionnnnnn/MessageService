@@ -204,6 +204,33 @@ public class HeartbeatServiceTests : IDisposable
         Assert.Contains("https://core-host.example/api/ingest/heartbeat", msg);
     }
 
+    /// <summary>HttpClient 逾時丟的是 TaskCanceledException（OperationCanceledException 的子類），
+    /// 但 stoppingToken 沒被取消。若用例外型別過濾，它會穿出 TryReportOnceAsync、結束 ExecuteAsync，
+    /// BackgroundService 預設 StopHost 把整個站台停掉。</summary>
+    [Fact]
+    public async Task TryReportOnceAsync_HttpClientTimeout_IsTreatedAsFailureNotShutdown()
+    {
+        var logger = new CountingLogger();
+        var service = CreateService(receivesWebhook: false, logger: logger);
+        _reporter.FailureToThrow = new TaskCanceledException("timeout", new TimeoutException());
+
+        var result = await service.TryReportOnceAsync(CancellationToken.None);
+
+        Assert.False(result);
+        Assert.Equal(1, logger.Warnings);
+    }
+
+    [Fact]
+    public async Task TryReportOnceAsync_CallerCancelled_Propagates()
+    {
+        var service = CreateService(receivesWebhook: false);
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+        _reporter.FailureToThrow = new OperationCanceledException(cts.Token);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => service.TryReportOnceAsync(cts.Token));
+    }
+
     [Fact]
     public async Task TryReportOnceAsync_Failure_WithoutBaseUrl_LogsWarningWithLocalDatabase()
     {
