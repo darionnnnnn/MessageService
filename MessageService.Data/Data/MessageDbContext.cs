@@ -46,6 +46,9 @@ public class MessageDbContext(DbContextOptions options, FieldCipher? cipher = nu
     public DbSet<ViewerSettings> ViewerSettings => Set<ViewerSettings>();
     public DbSet<MaskKeyword> MaskKeywords => Set<MaskKeyword>();
     public DbSet<MaskKeywordGroup> MaskKeywordGroups => Set<MaskKeywordGroup>();
+    public DbSet<HighlightKeyword> HighlightKeywords => Set<HighlightKeyword>();
+    public DbSet<HighlightKeywordGroup> HighlightKeywordGroups => Set<HighlightKeywordGroup>();
+    public DbSet<HighlightUser> HighlightUsers => Set<HighlightUser>();
     public DbSet<UserAlias> UserAliases => Set<UserAlias>();
     public DbSet<AnonymousIdentity> AnonymousIdentities => Set<AnonymousIdentity>();
     public DbSet<HostHeartbeat> HostHeartbeats => Set<HostHeartbeat>();
@@ -151,6 +154,20 @@ public class MessageDbContext(DbContextOptions options, FieldCipher? cipher = nu
 
         modelBuilder.Entity<MaskKeywordGroup>()
             .HasKey(g => new { g.MaskKeywordId, g.GroupId });
+
+        modelBuilder.Entity<HighlightKeyword>()
+            .HasMany(k => k.Groups)
+            .WithOne(g => g.HighlightKeyword)
+            .HasForeignKey(g => g.HighlightKeywordId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<HighlightKeywordGroup>()
+            .HasKey(g => new { g.HighlightKeywordId, g.GroupId });
+
+        modelBuilder.Entity<HighlightUser>(entity =>
+        {
+            entity.Property(u => u.UserId).IsRequired();
+        });
 
         modelBuilder.Entity<UserAlias>().HasKey(a => a.UserId);
 
