@@ -1041,7 +1041,8 @@ body.chat-page .chat-app {
 
 @media (prefers-reduced-motion: reduce) {
     .message-row.message-enter,
-    .message-row.message-highlight-flash .bubble {
+    .message-row.message-highlight-flash .bubble,
+    .highlight-preview-bubble.flowing {
         animation: none;
     }
 
@@ -1052,7 +1053,8 @@ body.chat-page .chat-app {
     .sidebar-resizer,
     .sidebar-collapse-btn,
     .sidebar-expand-btn,
-    .context-menu-item {
+    .context-menu-item,
+    .highlight-color-swatch-btn {
         transition: none;
     }
 }
@@ -1251,3 +1253,105 @@ body.chat-page .chat-app {
         display: none;
     }
 }
+
+/* === 訊息高亮設定（預覽與顏色選取器） === */
+
+.highlight-preview-box {
+    background: var(--line-chat-bg);
+    padding: 1.25rem;
+    border-radius: var(--radius-md);
+    display: flex;
+    justify-content: flex-start;
+    align-items: center;
+}
+
+.highlight-preview-bubble {
+    position: relative;
+    background: #fff;
+    color: var(--line-text);
+    border-radius: .9rem;
+    padding: .5rem .75rem;
+    font-size: calc(var(--chat-base-current, 20px) * 1.15rem / 1.15rem);
+    max-width: 100%;
+    border: 2px solid transparent;
+    background: linear-gradient(#fff, #fff) padding-box,
+                var(--highlight-preview-gradient, linear-gradient(135deg, #06c755, #ffc53d, #ff6b57, #a66cff)) border-box;
+    background-size: 100% 100%, 300% 300%;
+    box-shadow: 0 0 10px var(--highlight-preview-glow, rgba(6, 199, 85, .35));
+}
+
+.highlight-preview-bubble.flowing {
+    animation: highlight-flow-anim 4s ease infinite;
+}
+
+@keyframes highlight-flow-anim {
+    0% { background-position: 0% 0%, 0% 50%; }
+    50% { background-position: 0% 0%, 100% 50%; }
+    100% { background-position: 0% 0%, 0% 50%; }
+}
+
+.highlight-color-swatch-btn {
+    width: 2.2rem;
+    height: 2.2rem;
+    border-radius: var(--radius-sm);
+    border: 2px solid transparent;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: #fff;
+    font-weight: 700;
+    font-size: 1rem;
+    text-shadow: 0 1px 2px rgba(0, 0, 0, .6);
+    transition: transform var(--transition-fast), box-shadow var(--transition-fast);
+    padding: 0;
+}
+
+.highlight-color-swatch-btn:hover {
+    transform: scale(1.08);
+}
+
+.highlight-color-swatch-btn.active {
+    border-color: #111;
+    box-shadow: 0 0 0 2px #fff, 0 0 0 4px var(--focus-ring);
+}
+
+.highlight-selected-color-item {
+    display: inline-flex;
+    align-items: center;
+    gap: .4rem;
+    background: #f8f9fa;
+    border: 1px solid #dee2e6;
+    border-radius: 999px;
+    padding: .2rem .6rem .2rem .35rem;
+    font-size: .9rem;
+}
+
+.highlight-selected-color-dot {
+    width: 1.1rem;
+    height: 1.1rem;
+    border-radius: 50%;
+    border: 1px solid rgba(0, 0, 0, .15);
+    flex: none;
+}
+
+.highlight-selected-color-item code {
+    font-size: .85rem;
+    color: #333;
+}
+
+.highlight-remove-color-btn {
+    border: none;
+    background: transparent;
+    color: #888;
+    font-size: 1.1rem;
+    line-height: 1;
+    padding: 0 .15rem;
+    cursor: pointer;
+    border-radius: 50%;
+}
+
+.highlight-remove-color-btn:hover {
+    color: #dc3545;
+}
+
