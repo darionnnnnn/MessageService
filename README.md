@@ -154,6 +154,7 @@ dotnet user-secrets set "Line:ChannelAccessToken" "<你的 access token>"
 
 - **左側欄**：群組列表（48px 圓角方形頭貼、名稱、最後訊息預覽、時間、未讀數 badge，依最後活動倒序），前端即時搜尋過濾，底部為設定入口（開啟設定 modal）。側欄與聊天面板的所有區塊共用同一份 `--gutter`/`--radius-*` token（chat.css），群組項目與設定入口是內縮圓角卡而非通版直角色塊
 - **側欄寬度與收合（桌面版）**：分隔線可拖曳調整寬度（200–480px，Pointer Events + `setPointerCapture`；拖到 <140px 吸附成窄欄、窄欄拖出 >180px 回展開，兩門檻錯開防臨界抖動；雙擊重設 320px；分隔線可 Tab 聚焦，←→/Home/End 鍵盤調整）；標題列「‹」鈕兩段式收合：全寬 → 72px 窄欄（只剩頭貼，原生 title 提示群組名、未讀 badge 疊頭貼右上、點頭貼即切換群組）→ 完全隱藏（聊天標頭出現「☰」展開鈕）。寬度與收合狀態各自記在 localStorage（`chat-sidebar-width`/`chat-sidebar-state`）；手機版（≤768px）一律停用（單欄全螢幕切換，桌面存的狀態不生效）
+- **每台裝置各自的偏好（localStorage，刻意不進 DB）**：`chat-highlight-flow`（高亮邊框要不要流動，預設開）與 `chat-highlight-colors`（邊框顏色，`#rrggbb` 陣列，1–8 色，順序即漸層順序，預設四色為 LINE 綠／琥珀黃／珊瑚紅／紫——聊天背景是中藍色，藍系會沉進背景所以預設不含藍）。與字級、全版面同類：影響的是呈現而非資料是否外流
 - **側欄未讀數**：每群組的「最後已讀訊息 Id」記在 localStorage（`chat-read-state`，每台裝置各自算，不進 DB），輪詢 `POST /api/groups/list` 用 body 帶上基準由後端計數（上限 99+）。開著的群組視為已讀（切入群組、新訊息接進畫面時都會推進基準）；本裝置第一次看到的群組直接以最後一則為基準（不會初次開啟整排 99+）；已消失的群組基準自動清掉
 - **聊天面板**：標頭白底＋細分隔線（`--line-header-bg`/`--line-header-border`，仿 LINE 桌面版，與藍色訊息區明確分界；群組頭貼＋名稱＋成員數＋🔍搜尋＋「Aa」字級下拉）；訊息泡泡首顆帶指向頭貼的小尾巴（左上角、跟著字級用 em 縮放，避免大字級時圓角比尾巴大造成脫節）、時間戳貼泡泡外側；同一人連續訊息間距收緊、換人／換日的首則才拉開（LINE 的節奏）；對話寬度桌面版預設佔版面 2/3、手機版 75%，設定可勾選「全版面」改成滿版（影片／語音另有 30rem 絕對上限，加寬只給文字）；底部仿 LINE 輸入列但唯讀化（圖示灰化不可點、中央膠囊顯示同步狀態）
 - **頭貼**：`Original` 模式顯示後端快取的頭貼，走自家 API（`api/groups/.../avatar`），前端不直連 LINE CDN（載入失敗仍 fallback 代號圖示）；其他模式一律顯示伺服器指派的動植物代號圖示（emoji 渲染，前端 `ICON_EMOJI` 對照表需與後端 `AvatarIconCatalog` 的 IconKey 同步維護）
@@ -162,6 +163,8 @@ dotnet user-secrets set "Line:ChannelAccessToken" "<你的 access token>"
 - 「回到最新」浮動按鈕：使用者往上捲動時自動退出跟隨模式並顯示未讀數，點擊或捲回底部即恢復跟隨並自動捲到新訊息
 - **訊息搜尋**：標頭 🔍 展開搜尋列（本群組／全部群組切換），比對訊息內容與發言者名稱，結果以 `<mark>` 高亮；點結果用 `aroundId` 跳轉到該訊息的上下文並閃爍定位，同時把視窗內符合的文字也標出來。跳轉後進入「歷史檢視」，此時 3 秒訊息輪詢**只更新 Pending 內容狀態、不把新訊息接到視窗尾端**（避免時間軸斷層），畫面改顯示「回到最新」常駐按鈕，點擊會呼叫既有的群組選取流程整個重置回即時畫面
 - **歷史檢視的「載入更新的訊息」**：底部膠囊（捲到底也會自動觸發）以 `afterId` 往後接續，讓使用者能從搜尋跳轉的位置一路往下讀完整脈絡，不必靠「回到最新」跳離。`afterId` 的回應不帶 `latestId`，所以「是否追上最新」是拿側欄的 `lastMessageId` 比對；追上時自動退出歷史檢視，並把即時輪詢的基準交棒給目前視窗最新一則（不交棒會讓輪詢從舊基準重抓、畫面出現重複訊息）
+- **群組右鍵（手機長按 500ms）**：側欄群組項目彈出「刪除歷史訊息」「刪除群組」兩個選項，各自跳確認對話框說明影響範圍與不可復原；執行期間對話框鎖住，完成後以 toast 回報刪除筆數。刪掉目前開啟的群組時聊天面板收斂成未選取狀態。別台裝置開著同一個群組時，靠 10 秒側欄輪詢發現群組已不在清單而收斂
+- **訊息高亮**：命中的訊息泡泡套漸層發光邊框。規則有兩種——關鍵字（範圍同遮蔽關鍵字）與指定人員（全部群組或單一群組，入口在訊息頭貼右鍵／長按）。**判定在前端做**：後端在加密開啟時只能比對最近數天、數百則，做在後端會讓高亮時有時無；前端拿到的訊息文字已是解密後的明文，不受影響。比對只針對訊息文字、不分大小寫。**遮蔽先於高亮**——被遮成 `*` 的詞前端已經比對不到，兩邊關鍵字重疊時高亮不會出現，設定頁有標註此事。邊框顏色與流動效果是每台裝置各自的偏好（見下），系統設定為減少動態效果時邊框靜止但仍發光
 - **視窗截斷提示**：單次回應超過 `MessageWindowLimit`（500）時 API 會回 `truncated`，清單頂端插入「此區間訊息過多，僅顯示最近 500 則」。這跟 `hasMore`（還有更早的訊息）語意不同，兩者可同時出現
 - 每 3 秒輪詢新訊息與 Pending 內容的下載狀態，每 10 秒輪詢側欄群組列表（新群組/預覽/排序，歷史檢視期間依然照跑）；分頁隱藏（`document.hidden`）時皆暫停輪詢
 - 新訊息進場有淡入＋位移動效（`prefers-reduced-motion` 使用者會停用）
@@ -179,11 +182,16 @@ dotnet user-secrets set "Line:ChannelAccessToken" "<你的 access token>"
 | `POST /api/groups/list` | 群組清單（僅列出有訊息的群組，名稱取自快取，無快取則顯示 GroupId；含最後訊息預覽〔已套遮蔽〕、最後訊息時間、成員數、最後訊息 Id，依最後活動倒序）。body `{"read":{"群組Id":最後已讀Id}}`（可省略）帶各群組的已讀基準，回應附每群組未讀數（SQL 端計數並截斷在 100，前端顯示 99+；沒帶基準的群組未讀數為 0）。**基準走 POST body 而不是查詢字串**：長度隨群組數線性成長且沒有上界，`maxQueryString` 只是把門檻推遠、擋不住（換 nginx 等前置代理更是另一套限制）。缺 body 或 `read` 省略＝沒帶基準回 200；`read` 的值型別不對由模型繫結回 400 |
 | `GET /api/groups` | 同上但不帶已讀基準（未讀數一律 0） |
 | `GET /api/groups/{groupId}/messages?days=` / `?beforeId=&days=` / `?afterId=` / `?aroundId=&days=` | 初載 / 往前加載 / 輪詢新訊息 / 以指定訊息為錨點開前後視窗（搜尋結果跳轉用），回應已套用遮蔽；單次視窗最多回 500 筆並附 `Truncated` 旗標，避免單一沉寂期特長的群組一次撈出過量資料 |
+| `DELETE /api/groups/{groupId}/messages` | 刪除該群組的全部歷史訊息（附檔靠 CASCADE 一併刪除）。群組列、名稱／頭貼快取、成員、匿名代號、遮蔽與高亮規則都保留；訊息指標歸零後群組不再出現在清單，直到有新訊息。回 200 帶各表刪除筆數，群組不存在回 404 |
+| `DELETE /api/groups/{groupId}` | 刪除整個群組：訊息、成員快取、匿名代號，以及 `MaskKeywordGroups`／`HighlightKeywordGroups`／`HighlightUsers` 中屬於該群組的列，最後刪 `Groups`（頭貼靠 CASCADE）。**`UserAliases` 與關鍵字本體不動**。bot 仍在該 LINE 群組時，下一則訊息會重建群組列，等同重置而非永久移除 |
 | `GET /api/messages/{id}/content` | 內容串流，支援 HTTP Range（見下方實作說明） |
 | `GET /api/messages/statuses?ids=` | 查詢多筆內容目前的 `DownloadStatus` |
 | `GET /api/messages/search?q=&groupId=` | 訊息搜尋，比對文字訊息內容與解析後的發言者名稱，`groupId` 省略＝搜尋全部群組，文字/名稱各自上限 50 筆獨立配額、新→舊排序（見下方「訊息搜尋」） |
 | `GET/PUT /api/settings/display` | 名稱顯示模式 |
 | `GET/POST/PUT/DELETE /api/settings/keywords[/{id}]` | 關鍵字遮蔽規則 CRUD |
+| `GET/POST/PUT/DELETE /api/settings/highlight-keywords[/{id}]` | 訊息高亮的關鍵字規則 CRUD，範圍同遮蔽關鍵字（全部群組或逐群組勾選） |
+| `GET/POST /api/settings/highlight-users`、`DELETE /api/settings/highlight-users/{id}` | 人員高亮規則。`groupId` 為 null 代表全部群組；重複新增同一組合回既有那一列（冪等）。名稱依名稱顯示模式解析，匿名模式回代號 |
+| `GET /api/settings/highlight-rules` | 關鍵字與人員兩份清單合併回傳，供對話頁一次載入 |
 | `GET/PUT/DELETE /api/settings/aliases[/{userId}]` | 使用者別名對照 |
 | `GET/PUT /api/settings/retention` | 訊息保留天數（1–3650，供 `RetentionCleanupService` 讀取） |
 | `GET/PUT /api/settings/pii-masking` | 台灣個資自動遮蔽四開關（身分證/手機/市話/健保卡） |
@@ -326,6 +334,8 @@ dotnet user-secrets set "Line:ChannelAccessToken" "<你的 access token>"
 
 **ViewerSettings**（單列，Id 固定為 1）：除既有的名稱顯示模式外，新增 `RetentionDays`（保留天數，預設 1095＝3 年，`RetentionCleanupService` 每次執行讀取）與 `MaskNationalId`/`MaskMobilePhone`/`MaskLandline`（預設全開）/`MaskNhiCard`（台灣個資自動遮蔽四開關；`MaskNhiCard` 預設關閉——12 碼純數字的偵測規則跟宅配貨運單號格式相同，開啟前請先確認群組內容性質）。
 
+**HighlightKeywords** + **HighlightKeywordGroups**／**HighlightUsers**：訊息高亮規則，形狀比照遮蔽關鍵字。`HighlightKeywordGroups` 是逐群組適用範圍（CASCADE 於 `HighlightKeywords`）；`HighlightUsers` 的 `GroupId` 可為 null，代表該人在全部群組都高亮。這三張表與 `MaskKeywordGroups` 一樣**只有裸 GroupId、沒有指向 `Groups` 的外鍵**，所以刪除群組時由 `GroupDeletionService` 逐表清理，漏掉會留下指向不存在群組的殭屍規則。
+
 **MaskKeywords** + **MaskKeywordGroups**／**UserAliases**／**AnonymousIdentities**：檢視端寫入的顯示設定（含上面的 ViewerSettings）。`AnonymousIdentities`（GroupId+UserId 複合主鍵）是 `NameDisplayMode.Anonymous` 的代號永久指派表，跟其他幾張不同的地方是使用者不直接編輯——由 `GET /api/groups/{groupId}/messages` 第一次遇到某成員時自動指派並寫入。Web 專案實際會寫入的表不只這幾張，下面兩段的 `HostHeartbeats`（所有模式都跑）與上面的 `Groups`（保留期清除後的自癒路徑）也是。
 
 **HostHeartbeats**（`Role`+`MachineName` 複合主鍵，每台主機一列，`upsert` 不成長）：`HeartbeatService` 每 `Heartbeat:IntervalSeconds` 秒更新自己那列，記錄 `LastSeenAt`、`OutboxPending`／`OutboxOldestAgeSeconds`（只有收 webhook 的主機才有值，其餘固定 `null`）、`EncryptionKeyFingerprint`（`FieldCipher.KeyId`，未啟用加密固定 `null`）。Edge 沒有本機資料庫，靠 `POST /api/ingest/heartbeat` 端點請 Core 代寫（見 `IHeartbeatReporter` 的兩種實作）。設定頁「主機狀態」區塊純讀這張表。
@@ -378,7 +388,7 @@ mutex，避免兩邊同時建 `__EFMigrationsHistory` 互相打架。**這把鎖
 - **群組/成員名稱背景快取**：同樣不在 webhook 請求內同步呼叫 LINE profile API，避免拖慢 webhook 回應
 - **SQLite 的 DateTimeOffset 限制**：SQLite 只支援相等比較，`<`/`>` 無法轉譯。`MessageDbContext` 在 SQLite 環境對需要範圍比較的 `DateTimeOffset` 欄位（`EventTimestamp`、`Groups`/`GroupMembers` 的 `UpdatedAt`）套 `DateTimeOffsetToBinaryConverter`；SQL Server 維持原生 `datetimeoffset`（保持型別對其他工具可讀）
 - **BackgroundService 例外一律就地捕捉**：.NET 6+ 預設未捕捉例外會停掉整個 host，清除或下載失敗只能記 log 等下輪，不能讓服務跟著死
-- **檢視端沒有登入機制**：IP 白名單是最低防護，空白名單視為全拒
+- **檢視端沒有登入機制**：IP 白名單是最低防護，空白名單視為全拒。檢視端含**不可逆的刪除端點**（刪群組／刪歷史訊息），白名單失守的後果不只是資料被讀走，還可能被刪除；刪除操作會記一則含來源 IP 的 Warning log，那是唯一的稽核線索
 - **檢視端 DbContext 不設全域 NoTracking**：設定需要寫入，只在真正唯讀的查詢路徑個別加 `.AsNoTracking()`（見上方「資料庫存取」）
 - **`ViewerSettings.Id` 是固定值而非資料庫產生**（`ValueGeneratedNever`）：這是單列設定，Id 恆為 1。留成 SQL Server identity 的話，程式碼補建這列時帶著 Id=1 會撞上 `IDENTITY_INSERT` 關閉而失敗
 - **往前翻頁一定要能前進**：純粹「以游標時間往前 N 天」開窗，遇到比視窗還長的沉寂期會永遠回空、游標不動，按鈕看起來可按卻沒反應。API 因此會在視窗落空時把視窗錨定到下一則更早訊息

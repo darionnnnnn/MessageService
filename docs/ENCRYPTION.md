@@ -66,7 +66,7 @@ $bytes = New-Object byte[] 32
 | `PictureContentType` / `PictureFetchedUrl` / `PictureUpdatedAt` | ✗（中繼資料不加密） |
 | `MaskKeywords.Keyword` / `Replacement` | ✗（**注意**：遮蔽關鍵字往往就是人名、案號這類敏感字串，等於一份敏感字典以明文留在 DB 裡。功能上要加密沒有障礙——`MaskingRuleSet` 是整批載進記憶體比對、沒有下推到 SQL——只是目前尚未納入範圍） |
 | `AnonymousIdentities.Label`（如「小熊」） | ✗（代號本身不含個資） |
-| `HighlightKeywords.Keyword` / `HighlightUsers.UserId` | ✗（高亮規則只在前端比對呈現、不影響資料外流範圍，與 `MaskKeywords` 同樣以明文存放） |
+| `HighlightKeywords.Keyword` / `HighlightUsers.UserId` / `HighlightKeywordGroups.GroupId` | ✗（高亮規則只在前端比對呈現、不影響資料外流範圍，與 `MaskKeywords`／`MaskKeywordGroups` 同樣以明文存放） |
 | `ViewerSettings` 的各項設定 | ✗ |
 
 `GroupId`／`UserId` 保持明文：它們是 LINE 配發的隨機識別碼、本身不含個資，而檢視端幾乎

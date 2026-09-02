@@ -62,7 +62,7 @@ SQL 端的 `x => x + 1`，讀出來加一再寫回在併發下會遺失計數。
 
 ## 開發紀律（重複踩過才寫進來的）
 
-- 測試基線：**1284+ 綠**（`dotnet test`）。改完必須全綠且測試數不減。
+- 測試基線：**1308+ 綠**（`dotnet test`）。改完必須全綠且測試數不減。
 - **不要用 `when (ex is not OperationCanceledException)` 過濾例外**——HttpClient 逾時丟的 `TaskCanceledException` 也是它的子類，會被當成「呼叫端取消」放行：在背景服務迴圈裡會穿出 `ExecuteAsync`（預設 `StopHost` 把整站停掉），在失敗計數處會漏算。判斷依據看 token：`catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }` 再接一般 catch（`ContentDownloadService` 的 worker 迴圈是範本）。
 - server 端拼 HTML 的頁面（如 `/edge-admin`）**不要寫死根路徑的 action／href／redirect**——IIS 子 application 部署下會 404；一律前置 `Request.PathBase`（HttpClient 方向的同一坑見 `HttpBaseAddress.cs` 註解）。
 - **不要為新相依加「可選參數 `= null` ＋ fallback」**——需要就宣告為必要相依，讓 DI 與測試替身誠實跟上（同一形狀在委派實作中出現過三次，全部被驗收退回）。
