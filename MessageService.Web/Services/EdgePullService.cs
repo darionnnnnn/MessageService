@@ -52,9 +52,29 @@ public class EdgePullService(
     /// 每輪都記 Error 會以每秒一則的速度刷爆 log。</summary>
     private DateTimeOffset? _lastBadPayloadWarningAt;
 
-    /// <summary>下一輪要派給 Edge 刷新的名稱／頭貼對象，由落地的訊息累積而來。
-    /// 用 (群組, 成員) 值組當鍵，避免同一輪重複派同一個對象。</summary>
-    private readonly HashSet<(string GroupId, string? UserId)> _pendingProfileWork = [];
+    /// <summary>要派給 Edge 刷新的名稱／頭貼對象，由落地的訊息累積而來。
+    /// 用 (群組, 成員) 值組當鍵，值是**上次派出的時刻**（DateTimeOffset.MinValue＝還沒派過）。
+    ///
+    /// **派出後不移除**：Edge 可能在冷卻窗口內把派工靜默丟棄（例如通道還沒切到拉取模式時
+    /// staleness 查詢失敗），派出即清空的話那筆就永遠丟了，要等該群組下一則新訊息才會重來——
+    /// 實測到的「名稱／頭貼一直出不來」就是這個。改成留著、每 ProfileRedispatchInterval
+    /// 重派一次，直到 Core 這邊查到它已經不過期（＝Edge 的結果已經落地）才移除。</summary>
+    private readonly Dictionary<(string GroupId, string? UserId), ProfileDispatchState> _pendingProfileWork = [];
+
+    /// <summary>某個對象重派幾次後放棄。永久刷不起來的對象（bot 已被踢出群組、成員已退群，
+    /// LINE 回 404）不會有結果落地、staleness 永遠過期——沒有上限的話會每個重派間隔
+    /// 查一次 staleness、派一次工，直到 Core 重啟為止。40 次 × 30 秒 ≈ 20 分鐘，
+    /// 涵蓋 Edge 端一整個 FailureRetryAfter（預設 10 分）冷卻加一次冷卻後的重試；
+    /// 放棄後該群組下一則訊息落地時會重新進待辦，不會永久失聯。</summary>
+    private const int MaxProfileDispatches = 40;
+
+    /// <summary>待辦裡每個對象的派工狀態：上次派出時刻（MinValue＝還沒派過）與已派次數。</summary>
+    private readonly record struct ProfileDispatchState(DateTimeOffset LastDispatchedAt, int Dispatches);
+
+    /// <summary>同一個刷新對象最短的重派間隔。要夠短才能在 Edge 結束短冷卻後立刻補上
+    /// （見 ProfileRefreshService.InternalFailureRetryAfter，同為 30 秒），又不能每秒重派——
+    /// 每次派工前都要查一次 staleness，那是 Core 端的資料庫查詢。</summary>
+    private static readonly TimeSpan ProfileRedispatchInterval = TimeSpan.FromSeconds(30);
 
     private readonly IngestOptions _options = ingestOptions.Value;
 
@@ -240,14 +260,14 @@ public class EdgePullService(
             // 這兩批派工在組請求時就從累積集合裡取走了，沒送出去就得放回去——
             // profile 不放回要等下一則新訊息才會再被觸發；媒體不放回要等下一次全表掃描
             // （最長 RequeueIntervalMinutes）才被撿回，「落地即派」的意圖就斷了
-            RestoreDispatch(dispatch, profileDispatch);
+            RestoreDispatch(dispatch);
             RecordFailure(ex);
             return true;
         }
 
         if (response is null)
         {
-            RestoreDispatch(dispatch, profileDispatch);
+            RestoreDispatch(dispatch);
             RecordFailure(new InvalidOperationException("Edge 的 poll 回應無法反序列化。"));
             return true;
         }
@@ -415,30 +435,23 @@ public class EdgePullService(
         ackResponse.EnsureSuccessStatusCode();
     }
 
-    private void RestoreDispatch(
-        IReadOnlyList<ContentWorkItem> dispatch, IReadOnlyList<EdgeProfileWorkItem> profileDispatch)
+    /// <summary>媒體派工在組請求時就從 _freshContentIds 取走了，沒送出去要放回去，否則得等
+    /// 下一次全表掃描（最長 RequeueIntervalMinutes）才被撿回，「落地即派」的意圖就斷了。
+    ///
+    /// 名稱／頭貼派工不需要對應處理：那份待辦派出後本來就留著（見 _pendingProfileWork），
+    /// 這次沒送到的話下一個重派間隔會自然再送一次。</summary>
+    private void RestoreDispatch(IReadOnlyList<ContentWorkItem> dispatch)
     {
-        if (dispatch.Count > 0)
-        {
-            lock (_freshContentIds)
-            {
-                foreach (var item in dispatch)
-                {
-                    _freshContentIds.Add(item.ContentId);
-                }
-            }
-        }
-
-        if (profileDispatch.Count == 0)
+        if (dispatch.Count == 0)
         {
             return;
         }
 
-        lock (_pendingProfileWork)
+        lock (_freshContentIds)
         {
-            foreach (var item in profileDispatch)
+            foreach (var item in dispatch)
             {
-                _pendingProfileWork.Add((item.GroupId, item.UserId));
+                _freshContentIds.Add(item.ContentId);
             }
         }
     }
@@ -448,6 +461,8 @@ public class EdgePullService(
     private async Task<IReadOnlyList<EdgeProfileWorkItem>> BuildProfileDispatchAsync(
         IServiceProvider scopedProvider, CancellationToken cancellationToken)
     {
+        var now = timeProvider.GetUtcNow();
+
         (string GroupId, string? UserId)[] targets;
         lock (_pendingProfileWork)
         {
@@ -455,21 +470,62 @@ public class EdgePullService(
             {
                 return [];
             }
-            targets = [.. _pendingProfileWork];
-            _pendingProfileWork.Clear();
+
+            // 只挑「從沒派過」或「距上次派出已滿一個重派間隔」的——其餘連 staleness 都不查，
+            // 待辦保留後存活期變長，每秒每筆查一次資料庫會壓垮每秒一次的輪詢節奏
+            targets = [.. _pendingProfileWork
+                .Where(pair => now - pair.Value.LastDispatchedAt >= ProfileRedispatchInterval)
+                .Select(pair => pair.Key)];
+        }
+
+        if (targets.Length == 0)
+        {
+            return [];
         }
 
         var profileStore = scopedProvider.GetRequiredService<IProfileStore>();
         var cacheOptions = scopedProvider.GetRequiredService<IOptions<ProfileCacheOptions>>().Value;
-        var cutoff = timeProvider.GetUtcNow() - cacheOptions.RefreshAfter;
+        var cutoff = now - cacheOptions.RefreshAfter;
 
         var dispatch = new List<EdgeProfileWorkItem>();
+        var settled = new List<(string GroupId, string? UserId)>();
         foreach (var (groupId, userId) in targets)
         {
             var staleness = await profileStore.GetStalenessAsync(groupId, userId, cutoff, cancellationToken);
             if (staleness.GroupStale || staleness.MemberStale)
             {
                 dispatch.Add(new EdgeProfileWorkItem(groupId, userId, staleness));
+            }
+            else
+            {
+                // 不過期＝Edge 回報的結果已經落地（或本來就新鮮），這筆到此為止
+                settled.Add((groupId, userId));
+            }
+        }
+
+        lock (_pendingProfileWork)
+        {
+            foreach (var key in settled)
+            {
+                _pendingProfileWork.Remove(key);
+            }
+
+            // 派出當下就記時戳。poll 請求本身失敗不回滾——那代表 Core→Edge 也不通，
+            // 這筆 30 秒後自然重派，多等一輪無關緊要
+            foreach (var item in dispatch)
+            {
+                var key = (item.GroupId, item.UserId);
+                var dispatches = _pendingProfileWork.TryGetValue(key, out var state) ? state.Dispatches + 1 : 1;
+                if (dispatches >= MaxProfileDispatches)
+                {
+                    _pendingProfileWork.Remove(key);
+                    logger.LogInformation(
+                        "名稱／頭貼刷新對象（群組 {GroupId}、成員 {UserId}）已重派 {Count} 次仍未落地，先放棄；該群組下一則訊息會重新排入。",
+                        item.GroupId, item.UserId, dispatches);
+                    continue;
+                }
+
+                _pendingProfileWork[key] = new ProfileDispatchState(now, dispatches);
             }
         }
 
@@ -596,7 +652,10 @@ public class EdgePullService(
         {
             foreach (var envelope in envelopes)
             {
-                _pendingProfileWork.Add((envelope.GroupId, envelope.UserId));
+                // MinValue＝還沒派過，下一輪 poll 立刻派。已經在待辦裡的不重設時戳，
+                // 否則同一個群組連發訊息會把重派間隔一直往後推
+                _pendingProfileWork.TryAdd(
+                    (envelope.GroupId, envelope.UserId), new ProfileDispatchState(DateTimeOffset.MinValue, 0));
             }
         }
 

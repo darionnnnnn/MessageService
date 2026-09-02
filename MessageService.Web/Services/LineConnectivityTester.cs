@@ -259,6 +259,13 @@ public class LineConnectivityTester(
 
             return Build(success, description);
         }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            // 外部 token 沒被取消卻收到取消例外＝是我們自己的逾時（10 秒 CancelAfter 或具名
+            // client 自身的 Timeout），不是呼叫端中斷。分類器看不出兩者差別，會報成
+            // 「不是連線問題」，剛好與事實相反
+            return Build(false, $"連線逾時：{target} 在時限內沒有回應（防火牆很可能未開通）");
+        }
         catch (Exception ex)
         {
             return Build(false, OutboundFailureClassifier.Classify(ex, target));

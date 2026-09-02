@@ -19,6 +19,7 @@ public class EdgeController(
     EdgeContentStaging staging,
     EdgeProfileStaging profileStaging,
     IProfileRefreshQueue profileRefreshQueue,
+    IContentDownloadQueue contentDownloadQueue,
     IOptions<DeploymentOptions> deploymentOptions,
     IOptions<OutboxOptions> outboxOptions) : ControllerBase
 {
@@ -49,7 +50,14 @@ public class EdgeController(
 
         // 收下 Core 這一輪派的媒體工作。暫存滿時只收下一部分，沒收下的留在 Core 端維持
         // Pending 下一輪再派（背壓）——回傳實際收下的清單讓 Core 知道哪些才真的認領出去了
-        var acceptedWork = staging.AcceptDispatch(request?.ContentWork ?? []);
+        var dispatchResult = staging.AcceptDispatch(request?.ContentWork ?? []);
+
+        // 不等 ContentDownloadService 的週期重掃（最長 RequeueIntervalMinutes），
+        // 收到新派工立即入列下載，照片才不會延遲十幾分鐘才出現
+        foreach (var contentId in dispatchResult.NewlyAccepted)
+        {
+            contentDownloadQueue.Enqueue(contentId);
+        }
 
         // 名稱／頭貼刷新：Core 連同它算好的 staleness 一起派下來，入列給既有的
         // ProfileRefreshService 處理（流程不變，只是資料來源換成暫存區）
@@ -69,7 +77,7 @@ public class EdgeController(
             OutboxPending: pending,
             OutboxOldestAgeSeconds: oldestAgeSeconds,
             Messages: messages,
-            AcceptedContentWork: acceptedWork,
+            AcceptedContentWork: dispatchResult.Accepted,
             ReadyContentIds: staging.GetReadyIds(),
             FailedContentIds: staging.DrainFailedIds(),
             ProfileResults: profileStaging.DrainResults());

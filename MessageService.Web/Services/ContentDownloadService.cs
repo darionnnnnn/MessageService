@@ -41,9 +41,13 @@ public class ContentDownloadService(
             }
             await RequeuePendingAsync(reclaimDownloading: true, startupAge: startupAge, stoppingToken);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
         {
-            logger.LogError(ex, "Failed to requeue pending downloads at startup");
+            throw;
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Failed to requeue pending downloads at startup（{Minutes} 分鐘後的週期重掃會自動再試）", _options.RequeueIntervalMinutes);
         }
 
         // 多個 worker 共讀同一個 Channel（ChannelReader 天生支援多讀者，每筆項目只會被

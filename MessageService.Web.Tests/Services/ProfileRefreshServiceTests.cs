@@ -14,6 +14,20 @@ namespace MessageService.Tests.Services;
 
 public class ProfileRefreshServiceTests : IDisposable
 {
+    private sealed class FakeTimeProvider : TimeProvider
+    {
+        public DateTimeOffset Now { get; set; } = DateTimeOffset.UtcNow;
+        public override DateTimeOffset GetUtcNow() => Now;
+        public void Advance(TimeSpan delta) => Now = Now.Add(delta);
+    }
+
+    private readonly FakeTimeProvider _time = new();
+
+    /// <summary>staleness 查詢的內部通道設定。空 BaseUrl＝本機資料庫（AllInOne／Core），
+    /// 有值＝Edge 打 Core 的 ingest API。</summary>
+    private static Microsoft.Extensions.Options.IOptions<IngestOptions> IngestOpts(string? baseUrl = null) =>
+        OptionsFactory.Create(new IngestOptions { BaseUrl = baseUrl });
+
     private readonly SqliteConnection _connection;
     private readonly ServiceProvider _provider;
     private readonly FakeLineProfileClient _profileClient = new();
@@ -45,6 +59,8 @@ public class ProfileRefreshServiceTests : IDisposable
             new FakeProfileRefreshQueue(),
             _provider.GetRequiredService<IServiceScopeFactory>(),
             OptionsFactory.Create(options ?? new ProfileCacheOptions { RefreshAfter = TimeSpan.FromDays(7) }),
+            IngestOpts(),
+            _time,
             NullLogger<ProfileRefreshService>.Instance);
 
     private async Task<Group?> GetGroupAsync(string groupId)
@@ -166,7 +182,14 @@ public class ProfileRefreshServiceTests : IDisposable
         });
 
         await service.ProcessAsync(new ProfileRefreshTask("G1", null), CancellationToken.None);
-        await Task.Delay(100);
+
+        // 冷卻未到期不重打
+        _time.Advance(TimeSpan.FromMilliseconds(19));
+        await service.ProcessAsync(new ProfileRefreshTask("G1", null), CancellationToken.None);
+        Assert.Single(_profileClient.GroupSummaryCalls);
+
+        // 過了 FailureRetryAfter 才重打
+        _time.Advance(TimeSpan.FromMilliseconds(2));
         await service.ProcessAsync(new ProfileRefreshTask("G1", null), CancellationToken.None);
 
         Assert.Equal(2, _profileClient.GroupSummaryCalls.Count);
@@ -183,7 +206,7 @@ public class ProfileRefreshServiceTests : IDisposable
         });
 
         await service.ProcessAsync(new ProfileRefreshTask("G1", null), CancellationToken.None);
-        await Task.Delay(100);
+        _time.Advance(TimeSpan.FromMilliseconds(21));
         succeed = true;
         await service.ProcessAsync(new ProfileRefreshTask("G1", null), CancellationToken.None);
 
@@ -256,6 +279,8 @@ public class ProfileRefreshServiceTests : IDisposable
             new FakeProfileRefreshQueue(),
             provider.GetRequiredService<IServiceScopeFactory>(),
             OptionsFactory.Create(options ?? new ProfileCacheOptions { RefreshAfter = TimeSpan.FromDays(7) }),
+            IngestOpts(),
+            _time,
             NullLogger<ProfileRefreshService>.Instance);
 
         return (service, store);
@@ -329,7 +354,7 @@ public class ProfileRefreshServiceTests : IDisposable
             await service.ProcessAsync(new ProfileRefreshTask($"G_{i}", null), CancellationToken.None);
         }
 
-        await Task.Delay(10);
+        _time.Advance(TimeSpan.FromMilliseconds(10));
         await service.ProcessAsync(new ProfileRefreshTask("G_Trigger", null), CancellationToken.None);
     }
 
@@ -357,7 +382,7 @@ public class ProfileRefreshServiceTests : IDisposable
         Assert.Single(_profileClient.GroupSummaryCalls);
 
         // 3. 失敗冷卻過期後重試（如果是成功抑制 5 分鐘則此時仍會被跳過）
-        await Task.Delay(100);
+        _time.Advance(TimeSpan.FromMilliseconds(51));
         await service.ProcessAsync(new ProfileRefreshTask("G1", null), CancellationToken.None);
         Assert.Equal(2, _profileClient.GroupSummaryCalls.Count);
     }
@@ -393,7 +418,7 @@ public class ProfileRefreshServiceTests : IDisposable
         Assert.Single(_profileClient.MemberProfileCalls);
 
         // 3. 失敗冷卻過期後重試（如果是成功抑制 5 分鐘則此時仍會被跳過）
-        await Task.Delay(100);
+        _time.Advance(TimeSpan.FromMilliseconds(51));
         await service.ProcessAsync(new ProfileRefreshTask("G1", "U1"), CancellationToken.None);
         Assert.Equal(2, _profileClient.MemberProfileCalls.Count);
     }
@@ -410,6 +435,133 @@ public class ProfileRefreshServiceTests : IDisposable
                 Warnings.Add(formatter(state, exception));
             }
         }
+    }
+
+    /// <summary>staleness 查詢打的是內部通道（Edge→Core 的 ingest API），不是 LINE。
+    /// 標成 api.line.me 會讓維運去開錯誤的防火牆洞——實測踩過這個坑。</summary>
+    [Fact]
+    public async Task ProcessAsync_StalenessFails_LogsInternalChannelTarget_NotLineDomain()
+    {
+        var store = new ThrowingProfileStore((_, _, _) =>
+            throw new HttpRequestException("timeout", new System.Net.Sockets.SocketException(
+                (int)System.Net.Sockets.SocketError.TimedOut)));
+        var logger = new CapturingLogger();
+
+        var services = new ServiceCollection();
+        services.AddSingleton<IProfileStore>(store);
+        services.AddSingleton<ILineProfileClient>(_profileClient);
+        var provider = services.BuildServiceProvider();
+
+        var service = new ProfileRefreshService(
+            new FakeProfileRefreshQueue(),
+            provider.GetRequiredService<IServiceScopeFactory>(),
+            OptionsFactory.Create(new ProfileCacheOptions { RefreshAfter = TimeSpan.FromDays(7) }),
+            IngestOpts("http://core.example/MSWeb/"),
+            _time,
+            logger);
+
+        await service.ProcessAsync(new ProfileRefreshTask("G1", "U1"), CancellationToken.None);
+
+        var warning = Assert.Single(logger.Warnings);
+        Assert.Contains("core.example", warning);
+        Assert.Contains("api/ingest/profiles/staleness", warning);
+        Assert.DoesNotContain("line.me", warning);
+    }
+
+    [Fact]
+    public async Task ProcessAsync_StalenessFails_WithoutIngestBaseUrl_LogsLocalDatabaseTarget()
+    {
+        var store = new ThrowingProfileStore((_, _, _) => throw new InvalidOperationException("db down"));
+        var logger = new CapturingLogger();
+
+        var services = new ServiceCollection();
+        services.AddSingleton<IProfileStore>(store);
+        services.AddSingleton<ILineProfileClient>(_profileClient);
+        var provider = services.BuildServiceProvider();
+
+        var service = new ProfileRefreshService(
+            new FakeProfileRefreshQueue(),
+            provider.GetRequiredService<IServiceScopeFactory>(),
+            OptionsFactory.Create(new ProfileCacheOptions { RefreshAfter = TimeSpan.FromDays(7) }),
+            IngestOpts(),
+            _time,
+            logger);
+
+        await service.ProcessAsync(new ProfileRefreshTask("G1", "U1"), CancellationToken.None);
+
+        Assert.Contains("本機資料庫", Assert.Single(logger.Warnings));
+    }
+
+    /// <summary>內部通道失敗只冷卻 30 秒，不吃 FailureRetryAfter（預設 10 分鐘）。
+    /// 通道切換的過渡期只有 180 秒，用 10 分鐘冷卻會把切換後的第一批派工整批抑制掉，
+    /// 名稱／頭貼要等十幾分鐘才出得來——這正是實測回報的症狀。</summary>
+    [Fact]
+    public async Task ProcessAsync_StalenessFails_UsesShortInternalCooldown_NotFailureRetryAfter()
+    {
+        var store = new ThrowingProfileStore((_, _, _) =>
+            throw new HttpRequestException("timeout", new System.Net.Sockets.SocketException(
+                (int)System.Net.Sockets.SocketError.TimedOut)));
+
+        var services = new ServiceCollection();
+        services.AddSingleton<IProfileStore>(store);
+        services.AddSingleton<ILineProfileClient>(_profileClient);
+        var provider = services.BuildServiceProvider();
+
+        var service = new ProfileRefreshService(
+            new FakeProfileRefreshQueue(),
+            provider.GetRequiredService<IServiceScopeFactory>(),
+            OptionsFactory.Create(new ProfileCacheOptions
+            {
+                RefreshAfter = TimeSpan.FromDays(7),
+                FailureRetryAfter = TimeSpan.FromMinutes(10)
+            }),
+            IngestOpts("http://core.example/"),
+            _time,
+            NullLogger<ProfileRefreshService>.Instance);
+
+        await service.ProcessAsync(new ProfileRefreshTask("G1", "U1"), CancellationToken.None);
+        Assert.Equal(1, store.GetStalenessCallCount);
+
+        // 29 秒：仍在冷卻內
+        _time.Advance(TimeSpan.FromSeconds(29));
+        await service.ProcessAsync(new ProfileRefreshTask("G1", "U1"), CancellationToken.None);
+        Assert.Equal(1, store.GetStalenessCallCount);
+
+        // 31 秒：冷卻結束，重新查詢（若沿用 FailureRetryAfter 這裡還要再等 9 分半）
+        _time.Advance(TimeSpan.FromSeconds(2));
+        await service.ProcessAsync(new ProfileRefreshTask("G1", "U1"), CancellationToken.None);
+        Assert.Equal(2, store.GetStalenessCallCount);
+    }
+
+    /// <summary>Edge 打 Core 的 staleness 查詢遇到 HttpClient 逾時時是 TaskCanceledException，
+    /// 不是停機——要走內部失敗的短冷卻，不能穿出去（穿出 ExecuteAsync 會讓服務靜默結束）。</summary>
+    [Fact]
+    public async Task ProcessAsync_StalenessHttpClientTimeout_IsInternalFailure_NotPropagated()
+    {
+        var store = new ThrowingProfileStore((_, _, _) =>
+            throw new TaskCanceledException("timeout", new TimeoutException()));
+        var logger = new CapturingLogger();
+
+        var services = new ServiceCollection();
+        services.AddSingleton<IProfileStore>(store);
+        services.AddSingleton<ILineProfileClient>(_profileClient);
+        var provider = services.BuildServiceProvider();
+
+        var service = new ProfileRefreshService(
+            new FakeProfileRefreshQueue(),
+            provider.GetRequiredService<IServiceScopeFactory>(),
+            OptionsFactory.Create(new ProfileCacheOptions { RefreshAfter = TimeSpan.FromDays(7) }),
+            IngestOpts("http://core.example/"),
+            _time,
+            logger);
+
+        await service.ProcessAsync(new ProfileRefreshTask("G1", "U1"), CancellationToken.None);
+
+        Assert.Contains("core.example", Assert.Single(logger.Warnings));
+
+        _time.Advance(TimeSpan.FromSeconds(31));
+        await service.ProcessAsync(new ProfileRefreshTask("G1", "U1"), CancellationToken.None);
+        Assert.Equal(2, store.GetStalenessCallCount);
     }
 
     private class ThrowingProfileStore(Func<string, string?, DateTimeOffset, Task<ProfileStaleness>> onGetStaleness) : IProfileStore
@@ -442,6 +594,8 @@ public class ProfileRefreshServiceTests : IDisposable
             new FakeProfileRefreshQueue(),
             provider.GetRequiredService<IServiceScopeFactory>(),
             OptionsFactory.Create(new ProfileCacheOptions { RefreshAfter = TimeSpan.FromDays(7), FailureRetryAfter = TimeSpan.FromMinutes(10) }),
+            IngestOpts(),
+            _time,
             logger);
 
         // 呼叫不會往外拋例外
@@ -473,6 +627,8 @@ public class ProfileRefreshServiceTests : IDisposable
             new FakeProfileRefreshQueue(),
             provider.GetRequiredService<IServiceScopeFactory>(),
             OptionsFactory.Create(new ProfileCacheOptions { RefreshAfter = TimeSpan.FromDays(7), FailureRetryAfter = TimeSpan.FromMinutes(10) }),
+            IngestOpts(),
+            _time,
             logger);
 
         // 呼叫不會往外拋例外

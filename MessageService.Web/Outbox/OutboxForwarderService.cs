@@ -176,7 +176,8 @@ public class OutboxForwarderService(
 
         if (envelopes.Count == 0)
         {
-            await dbContext.SaveChangesAsync(cancellationToken);
+            // 這裡存的是壞掉 payload 的死信標記，同樣可能與 Core 的 ack 撞在一起
+            await SaveIgnoringEntriesTakenByPullAsync(dbContext, cancellationToken);
             return true;
         }
 
@@ -271,9 +272,41 @@ public class OutboxForwarderService(
                 entriesByWebhookEventId.Count, _targetDescription);
         }
 
-        await dbContext.SaveChangesAsync(cancellationToken);
+        await SaveIgnoringEntriesTakenByPullAsync(dbContext, cancellationToken);
 
         return true;
+    }
+
+    /// <summary>單向防火牆拓撲（只開通 core→edge）下，這裡寫退避的同時 Core 可能正透過
+    /// <c>POST /api/edge/outbox/ack</c> 把同一筆刪掉（見 EdgeController，另一個 DbContext 直接
+    /// ExecuteDelete）。那不是錯誤——項目被 ack 就代表 Core 已經收到了，這邊的 Attempts++
+    /// 本來就沒有意義。
+    ///
+    /// 但 EF 的樂觀併發檢查會讓整批 SaveChanges 失敗，連帶把**同批其他項目**的
+    /// NextAttemptAt 一起回滾。那些項目下一輪會立刻重跑（退避沒推進），變成這個檔案
+    /// 自己在別處警告過的「無退避熱迴圈」；加上 ERROR 級完整堆疊灌爆 200 筆環形緩衝，
+    /// 真正的問題會被擠掉。所以把被搶走的那幾筆放生，其餘照常存。</summary>
+    private async Task SaveIgnoringEntriesTakenByPullAsync(
+        OutboxDbContext dbContext, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await dbContext.SaveChangesAsync(cancellationToken);
+        }
+        catch (DbUpdateConcurrencyException ex)
+        {
+            foreach (var entry in ex.Entries)
+            {
+                entry.State = EntityState.Detached;
+            }
+
+            logger.LogInformation(
+                "{Count} 筆 outbox 項目在寫入退避前已被 Core 的輪詢取走（正常現象），略過這幾筆的本地更新。",
+                ex.Entries.Count);
+
+            // 只重試一次：再衝突就讓它往外拋，由 ExecuteAsync 既有的 ERROR 接住
+            await dbContext.SaveChangesAsync(cancellationToken);
+        }
     }
 
     private TimeSpan ComputeBackoff(int attempts)

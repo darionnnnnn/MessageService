@@ -24,9 +24,15 @@ public class FakeIngestSink : IIngestSink
     /// 驗證 forwarder 對異常回應的防禦處置。</summary>
     public IReadOnlyList<IngestBatchItemResult>? BatchResultsOverride { get; set; }
 
+    /// <summary>在批次真正送出之前執行，讓測試能模擬「送出當下有別人動了資料庫」——
+    /// 例如單向拓撲下 Core 的輪詢把同一筆 outbox 項目 ack 掉（見 EdgeController.AckOutbox）。</summary>
+    public Action? BeforeSubmitBatch { get; set; }
+
     public async Task<IReadOnlyList<IngestBatchItemResult>> SubmitBatchAsync(
         IReadOnlyList<IngestEnvelope> envelopes, CancellationToken cancellationToken)
     {
+        BeforeSubmitBatch?.Invoke();
+
         if (BatchResultsOverride is { } overrideResults)
         {
             return overrideResults;

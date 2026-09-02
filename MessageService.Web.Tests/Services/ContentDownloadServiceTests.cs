@@ -7,6 +7,7 @@ using MessageService.Tests.TestSupport;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using OptionsFactory = Microsoft.Extensions.Options.Options;
 
@@ -421,6 +422,63 @@ public class ContentDownloadServiceTests : IDisposable
         var (service, workSource, _) = CreateServiceWithFakeWorkSource();
         await service.RunPeriodicRequeueAsync(TimeSpan.Zero, CancellationToken.None);
         Assert.Equal(0, workSource.GetPendingIdsCallCount);
+    }
+
+    private sealed class CapturingLogger<T> : ILogger<T>
+    {
+        public List<(LogLevel Level, string Message, Exception? Exception)> Logs { get; } = [];
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+            Func<TState, Exception?, string> formatter)
+            => Logs.Add((logLevel, formatter(state, exception), exception));
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_StartupRequeueFails_LogsWarningWithPeriodicRequeueHint()
+    {
+        var workSource = new FakeContentWorkSource();
+        workSource.OnGetPendingIds = _ => throw new InvalidOperationException("DB not ready at startup");
+
+        var services = new ServiceCollection();
+        services.AddSingleton<IContentWorkSource>(workSource);
+        services.AddSingleton<ILineContentClient>(_contentClient);
+        var provider = services.BuildServiceProvider();
+
+        var logger = new CapturingLogger<ContentDownloadService>();
+        var queue = new FakeContentDownloadQueue();
+        var service = new ContentDownloadService(
+            queue,
+            provider.GetRequiredService<IServiceScopeFactory>(),
+            OptionsFactory.Create(new ContentDownloadOptions
+            {
+                RequeueIntervalMinutes = 15,
+                MaxConcurrency = 1,
+            }),
+            logger);
+
+        using var cts = new CancellationTokenSource();
+        await service.StartAsync(cts.Token);
+        try
+        {
+            var deadline = DateTime.UtcNow.AddSeconds(5);
+            while (!logger.Logs.Any(l => l.Level == LogLevel.Warning) && DateTime.UtcNow < deadline)
+            {
+                await Task.Delay(10);
+            }
+
+            var warnings = logger.Logs.Where(l => l.Level == LogLevel.Warning).ToList();
+            var warning = Assert.Single(warnings, w => w.Message.Contains("Failed to requeue pending downloads at startup"));
+            Assert.Contains("15 分鐘後的週期重掃會自動再試", warning.Message);
+            Assert.DoesNotContain(logger.Logs, l => l.Level == LogLevel.Error);
+        }
+        finally
+        {
+            await service.StopAsync(CancellationToken.None);
+        }
     }
 }
 

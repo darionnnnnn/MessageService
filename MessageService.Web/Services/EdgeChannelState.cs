@@ -30,7 +30,11 @@ public class EdgeChannelState(
 
     /// <summary>推送失敗多久之後才真的暫停。短暫失敗（Core 重啟、IIS 回收、網路抖動）沿用
     /// outbox 既有的秒級退避快速恢復，不該讓 Edge 停推一小時——尤其純推送部署沒有輪詢器接手。
-    /// 用與 Core 端接手門檻相同的 PullActivationSeconds：對方開始輪詢的同一時點，這邊才停推。</summary>
+    /// 用與 Core 端接手門檻相同的 PullActivationSeconds：對方開始輪詢的同一時點，這邊才停推。
+    ///
+    /// 失敗訊號有兩個來源：outbox 批次推送（只在有訊息時才會嘗試）與心跳（每個週期固定送，
+    /// 見 HttpHeartbeatReporter）。**兩者都要**——只靠 outbox 的話，安靜的站台沒有訊息流量就
+    /// 永遠不會進入暫停，媒體與名稱／頭貼會一直打向不通的 Core。</summary>
     private readonly TimeSpan _pauseAfter = TimeSpan.FromSeconds(
         Math.Max(1, options.Value.PullActivationSeconds));
 

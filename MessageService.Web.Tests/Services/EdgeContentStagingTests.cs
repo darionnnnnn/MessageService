@@ -22,9 +22,10 @@ public class EdgeContentStagingTests
     {
         var staging = Create();
 
-        var accepted = staging.AcceptDispatch([Work(1), Work(2)]);
+        var result = staging.AcceptDispatch([Work(1), Work(2)]);
 
-        Assert.Equal([1L, 2L], accepted);
+        Assert.Equal([1L, 2L], result.Accepted);
+        Assert.Equal([1L, 2L], result.NewlyAccepted);
         Assert.Equal([1L, 2L], staging.GetPendingIds().Order());
     }
 
@@ -35,9 +36,10 @@ public class EdgeContentStagingTests
         staging.AcceptDispatch([Work(1)]);
 
         // poll 回應遺失時 Core 會重派同一批，不能因此下載兩次
-        var accepted = staging.AcceptDispatch([Work(1)]);
+        var result = staging.AcceptDispatch([Work(1)]);
 
-        Assert.Equal([1L], accepted);
+        Assert.Equal([1L], result.Accepted);
+        Assert.Empty(result.NewlyAccepted);
         Assert.Single(staging.GetPendingIds());
     }
 
@@ -49,10 +51,24 @@ public class EdgeContentStagingTests
         Assert.True(staging.TryStage(1, new byte[100], "image/png"));
 
         // 暫存觸頂：新派工不收，留在 Core 端維持 Pending 下一輪再派
-        var accepted = staging.AcceptDispatch([Work(2)]);
+        var result = staging.AcceptDispatch([Work(2)]);
 
-        Assert.Empty(accepted);
+        Assert.Empty(result.Accepted);
+        Assert.Empty(result.NewlyAccepted);
         Assert.Empty(staging.GetPendingIds());
+    }
+
+    [Fact]
+    public void AcceptDispatch_ReturnsNewlyAccepted_SeparatelyFromAccepted()
+    {
+        var staging = Create();
+        staging.AcceptDispatch([Work(1)]);
+
+        // 同時派既有的 (1) 與新的 (2)
+        var result = staging.AcceptDispatch([Work(1), Work(2)]);
+
+        Assert.Equal([1L, 2L], result.Accepted);
+        Assert.Equal([2L], result.NewlyAccepted);
     }
 
     [Fact]

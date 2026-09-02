@@ -83,7 +83,7 @@ public class OutboundFailureClassifierTests
         var ex = new HttpRequestException("No such host is known.", innerSocketEx);
 
         Assert.Equal("DNS 解析失敗：api.line.me 無法解析（防火牆或 DNS 設定）", OutboundFailureClassifier.Classify(ex, "api.line.me"));
-        Assert.Equal("DNS 解析失敗：無法解析（防火牆或 DNS 設定）", OutboundFailureClassifier.Classify(ex, (string?)null));
+        Assert.Equal("DNS 解析失敗：對方 無法解析（防火牆或 DNS 設定）", OutboundFailureClassifier.Classify(ex, (string?)null));
     }
 
     [Fact]
@@ -93,7 +93,7 @@ public class OutboundFailureClassifierTests
         var ex = new HttpRequestException("No connection could be made because the target machine actively refused it.", innerSocketEx);
 
         Assert.Equal("連線被拒：192.0.2.10 拒絕連線（目標服務未啟動或防火牆 REJECT）", OutboundFailureClassifier.Classify(ex, "http://192.0.2.10:8080/MSLine"));
-        Assert.Equal("連線被拒：拒絕連線（目標服務未啟動或防火牆 REJECT）", OutboundFailureClassifier.Classify(ex, (string?)null));
+        Assert.Equal("連線被拒：對方 拒絕連線（目標服務未啟動或防火牆 REJECT）", OutboundFailureClassifier.Classify(ex, (string?)null));
     }
 
     [Fact]
@@ -104,10 +104,10 @@ public class OutboundFailureClassifierTests
         var socketTimedOutEx = new HttpRequestException("A connection attempt failed because the connected party did not properly respond after a period of time.", new SocketException((int)SocketError.TimedOut));
 
         Assert.Equal("連線逾時：api.line.me 沒有回應（防火牆很可能未開通）", OutboundFailureClassifier.Classify(timeoutEx, "api.line.me"));
-        Assert.Equal("連線逾時：沒有回應（防火牆很可能未開通）", OutboundFailureClassifier.Classify(timeoutEx, (string?)null));
+        Assert.Equal("連線逾時：對方 沒有回應（防火牆很可能未開通）", OutboundFailureClassifier.Classify(timeoutEx, (string?)null));
 
         Assert.Equal("連線逾時：api-data.line.me 沒有回應（防火牆很可能未開通）", OutboundFailureClassifier.Classify(canceledEx, "https://api-data.line.me/v2/bot/message/123/content"));
-        Assert.Equal("連線逾時：沒有回應（防火牆很可能未開通）", OutboundFailureClassifier.Classify(canceledEx, (string?)null));
+        Assert.Equal("連線逾時：對方 沒有回應（防火牆很可能未開通）", OutboundFailureClassifier.Classify(canceledEx, (string?)null));
 
         Assert.Equal("連線逾時：api.line.me 沒有回應（防火牆很可能未開通）", OutboundFailureClassifier.Classify(socketTimedOutEx, "api.line.me"));
     }
@@ -171,6 +171,29 @@ public class OutboundFailureClassifierTests
 
         Assert.Equal("HTTP 500：api.line.me 對端伺服器錯誤", OutboundFailureClassifier.Classify(ex, "api.line.me"));
         Assert.Equal("HTTP 500：對端伺服器錯誤", OutboundFailureClassifier.Classify(ex, null));
+    }
+
+    /// <summary>4xx／5xx 以外的狀態碼走 <c>var other</c> 分支，那條傳給 WithHost 的是
+    /// 預先格式化好的「：host」字串而不是 host——若把「主詞補字」做在 WithHost 裡，
+    /// 這條會變成「HTTP 302對方 」這種壞字串。</summary>
+    [Fact]
+    public void Classify_UnusualStatusCode_WithoutHost_HasNoStraySubject()
+    {
+        var ex = new HttpRequestException("Redirect", null, HttpStatusCode.Redirect);
+
+        Assert.Equal("HTTP 302", OutboundFailureClassifier.Classify(ex, (string?)null));
+        // 結尾空格是 WithHost 統一補的（既有行為），重點是不能出現多餘的主詞
+        Assert.Equal("HTTP 302：api.line.me ", OutboundFailureClassifier.Classify(ex, "api.line.me"));
+    }
+
+    [Fact]
+    public void Classify_WhenHostIsNull_IncludesCounterpartSubjectInTemplate()
+    {
+        var timeoutEx = new HttpRequestException("Timeout", new TimeoutException());
+        var result = OutboundFailureClassifier.Classify(timeoutEx, (string?)null);
+
+        Assert.Contains("對方", result);
+        Assert.Equal("連線逾時：對方 沒有回應（防火牆很可能未開通）", result);
     }
 
     [Fact]
