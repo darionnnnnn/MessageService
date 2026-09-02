@@ -23,6 +23,7 @@
 | `2026-09-01_EDGEOPS-1-PLAN.md` | 部署模式改由 appsettings 檔名後綴判別（與 `Deployment:Mode` 共存、衝突擋啟動）、`/edge-admin` 三分頁化（設定／連線測試／錯誤排查）、記憶體環形緩衝與 EdgeProxy 的 `/proxy-admin/errors`。含終檢抓到的擋路級 bug（後綴模式沒寫回設定鏈，deploy 樣板剛好都寫了模式鍵而雙重掩蓋）與緩衝防灌、log 路徑分岔等修正 |
 | `2026-09-01_LINEOUT-1-PLAN.md` | LINE outbound 取數診斷性修正：空 token 守門、Null 佇列出聲、失敗分類 log（401／403／DNS／路由不可達／逾時逐類）、頭貼缺圖自癒（staleness 缺圖條件＋永久／暫時失敗以 `PictureFetchedUrl` 分流）、proxy 設定熱讀、連線測試四網域化。含兩輪終檢與換模型收尾體檢的完整記錄 |
 | `2026-09-01_EDGEOPS-2-PLAN.md` | edge-admin 表單與轉址改帶 `Request.PathBase` 前綴（修 IIS 子 application 下測試按鈕 404）、`OutboundTargetResolver`（DNS 取 IP、TTL 快取）、連線測試表格加「請求網址／IP」欄與失敗寫 log、outbound 失敗 log 補目標（LINE 轉發另帶 IP、內部通道只帶網址）。含 agy 委派驗收與 5 次突變測試記錄 |
+| `2026-09-02_EDGEOPS-3-PLAN.md` | 單向拓撲（僅 Core→Edge）快速收斂：心跳失敗計入通道切換（安靜站台也會切換）、staleness 失敗標對內部通道並縮短冷卻、Core 保留名稱／頭貼待辦每 30 秒節流重派（上限 40 次）、媒體派工立即入列、outbox ack 競態放生降噪、連線測試逾時誤報與缺主詞修正。含體檢抓到的「`when (ex is not OperationCanceledException)` 讓 HttpClient 逾時穿出背景服務、預設 StopHost」潛在站台中止 bug 及規格寫錯的 WithHost 回歸 |
 | `DEPLOYMENT-MODES-DECISIONS.md` | `docs/DEPLOYMENT-MODES.md` 移出的設計決策理由、雙行程端到端驗證紀錄、原始建置分期 |
 | `WEB-UI-DESIGN-NOTES.md` | 檢視端 UI 歷次改版的設計決策理由、放棄的替代方案、已知限制 |
 
