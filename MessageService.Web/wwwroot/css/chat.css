@@ -992,8 +992,56 @@ body.chat-page .chat-app {
     outline-offset: 2px;
 }
 
+/* === 右鍵／長按快捷選單 === */
+
+.context-menu {
+    position: fixed;
+    z-index: 1055;
+    min-width: 140px;
+    background: #fff;
+    border-radius: var(--radius-md);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, .18), 0 1px 3px rgba(0, 0, 0, .08);
+    padding: .35rem;
+    display: flex;
+    flex-direction: column;
+    gap: .15rem;
+    border: 1px solid #e5e5e5;
+}
+
+.context-menu-item {
+    display: block;
+    width: 100%;
+    text-align: left;
+    border: none;
+    background: transparent;
+    padding: .45rem .75rem;
+    font-size: calc(var(--chat-base-current) * .95rem / 1.15rem);
+    color: #1b1b1b;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    transition: background-color var(--transition-fast), color var(--transition-fast);
+    white-space: nowrap;
+}
+
+.context-menu-item:hover,
+.context-menu-item:focus-visible {
+    background: var(--sidebar-hover);
+    outline: none;
+}
+
+.context-menu-item-danger {
+    color: #dc3545;
+}
+
+.context-menu-item-danger:hover,
+.context-menu-item-danger:focus-visible {
+    background: #ffebee;
+    color: #b02a37;
+}
+
 @media (prefers-reduced-motion: reduce) {
-    .message-row.message-enter {
+    .message-row.message-enter,
+    .message-row.message-highlight-flash .bubble {
         animation: none;
     }
 
@@ -1003,7 +1051,8 @@ body.chat-page .chat-app {
     .mobile-back-btn,
     .sidebar-resizer,
     .sidebar-collapse-btn,
-    .sidebar-expand-btn {
+    .sidebar-expand-btn,
+    .context-menu-item {
         transition: none;
     }
 }

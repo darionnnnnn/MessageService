@@ -21,23 +21,10 @@
         return text ? JSON.parse(text) : null;
     }
 
+    // toast 的建構邏輯只在 chat.js 寫一份（容器在聊天頁層級，設定 modal 內外都看得到）。
+    // 這裡刻意不加「找不到就靜默略過」的保護——真的沒載到 chat.js 是頁面壞了，要當場炸出來
     function showToast(message, isError) {
-        const toast = document.createElement('div');
-        toast.className = 'toast align-items-center text-bg-' + (isError ? 'danger' : 'success') + ' border-0';
-        toast.setAttribute('role', 'alert');
-
-        const flex = document.createElement('div');
-        flex.className = 'd-flex';
-        const body = document.createElement('div');
-        body.className = 'toast-body';
-        body.textContent = message;
-        flex.appendChild(body);
-        toast.appendChild(flex);
-
-        els.toastContainer.appendChild(toast);
-        const instance = bootstrap.Toast.getOrCreateInstance(toast, { delay: 2500 });
-        instance.show();
-        toast.addEventListener('hidden.bs.toast', () => toast.remove());
+        window.messageServiceToast(message, isError);
     }
 
     function groupDisplayName(groupId) {
@@ -607,7 +594,6 @@
     function wireElements() {
         els.fontBasePxInput = $('font-base-px-input');
         els.fullWidthToggle = $('full-width-toggle');
-        els.toastContainer = $('toast-container');
         els.keywordTbody = $('keyword-tbody');
         els.keywordForm = $('keyword-form');
         els.keywordInput = $('keyword-input');

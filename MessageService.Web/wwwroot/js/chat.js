@@ -72,13 +72,296 @@
         noMoreNewerAt: null,
         searchScope: 'group',
         // 跟 requestToken 分開算——切群組不該讓正在飛的搜尋請求作廢，反之亦然
-        searchRequestToken: 0
+        searchRequestToken: 0,
+        initialEmpty: false
     };
 
     const els = {};
 
     function $(id) {
         return document.getElementById(id);
+    }
+
+    function showToast(message, isError) {
+        const container = $('toast-container');
+        if (!container) {
+            return;
+        }
+        const toast = document.createElement('div');
+        toast.className = 'toast align-items-center text-bg-' + (isError ? 'danger' : 'success') + ' border-0';
+        toast.setAttribute('role', 'alert');
+
+        const flex = document.createElement('div');
+        flex.className = 'd-flex';
+        const body = document.createElement('div');
+        body.className = 'toast-body';
+        body.textContent = message;
+        flex.appendChild(body);
+        toast.appendChild(flex);
+
+        container.appendChild(toast);
+        const instance = bootstrap.Toast.getOrCreateInstance(toast, { delay: 2500 });
+        instance.show();
+        toast.addEventListener('hidden.bs.toast', () => toast.remove());
+    }
+
+    window.messageServiceToast = showToast;
+
+    // === 通用快捷選單（Context Menu）===
+
+    let activeContextMenu = null;
+
+    function closeContextMenu() {
+        if (!activeContextMenu) {
+            return;
+        }
+        activeContextMenu.cleanup();
+        activeContextMenu.element.remove();
+        activeContextMenu = null;
+    }
+
+    function showContextMenu(anchorEvent, items) {
+        closeContextMenu();
+        if (!items || items.length === 0) {
+            return;
+        }
+
+        const menu = document.createElement('div');
+        menu.className = 'context-menu';
+        menu.setAttribute('role', 'menu');
+        menu.tabIndex = -1;
+
+        for (const item of items) {
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'context-menu-item' + (item.danger ? ' context-menu-item-danger' : '');
+            btn.setAttribute('role', 'menuitem');
+            btn.textContent = item.label;
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                closeContextMenu();
+                if (typeof item.onSelect === 'function') {
+                    item.onSelect();
+                }
+            });
+            menu.appendChild(btn);
+        }
+
+        menu.style.visibility = 'hidden';
+        menu.style.left = '0px';
+        menu.style.top = '0px';
+        document.body.appendChild(menu);
+
+        const rect = menu.getBoundingClientRect();
+        const menuWidth = rect.width;
+        const menuHeight = rect.height;
+        const viewportWidth = window.innerWidth;
+        const viewportHeight = window.innerHeight;
+
+        const clickX = anchorEvent.clientX ?? 0;
+        const clickY = anchorEvent.clientY ?? 0;
+
+        let posX = clickX;
+        let posY = clickY;
+
+        if (posX + menuWidth > viewportWidth) {
+            posX = Math.max(0, clickX - menuWidth);
+        }
+        if (posY + menuHeight > viewportHeight) {
+            posY = Math.max(0, clickY - menuHeight);
+        }
+
+        menu.style.left = `${posX}px`;
+        menu.style.top = `${posY}px`;
+        menu.style.visibility = '';
+
+        // 鍵盤導航：↑↓ 在項目間移動，Enter 觸發，Esc 關閉
+        const handleKeyDown = (e) => {
+            const buttons = Array.from(menu.querySelectorAll('.context-menu-item:not(:disabled)'));
+            if (buttons.length === 0) {
+                return;
+            }
+            const currentIndex = buttons.indexOf(document.activeElement);
+            if (e.key === 'ArrowDown') {
+                e.preventDefault();
+                const nextIndex = (currentIndex + 1) % buttons.length;
+                buttons[nextIndex]?.focus();
+            } else if (e.key === 'ArrowUp') {
+                e.preventDefault();
+                const prevIndex = (currentIndex - 1 + buttons.length) % buttons.length;
+                buttons[prevIndex]?.focus();
+            } else if (e.key === 'Escape') {
+                e.preventDefault();
+                closeContextMenu();
+            }
+        };
+
+        const handlePointerDownOutside = (e) => {
+            if (!menu.contains(e.target)) {
+                closeContextMenu();
+            }
+        };
+
+        const handleScrollOrResize = () => {
+            closeContextMenu();
+        };
+
+        menu.addEventListener('keydown', handleKeyDown);
+        window.addEventListener('scroll', handleScrollOrResize, { capture: true, passive: true });
+        window.addEventListener('resize', handleScrollOrResize, { passive: true });
+
+        const timer = setTimeout(() => {
+            document.addEventListener('pointerdown', handlePointerDownOutside, true);
+        }, 0);
+
+        const cleanup = () => {
+            clearTimeout(timer);
+            menu.removeEventListener('keydown', handleKeyDown);
+            document.removeEventListener('pointerdown', handlePointerDownOutside, true);
+            window.removeEventListener('scroll', handleScrollOrResize, { capture: true });
+            window.removeEventListener('resize', handleScrollOrResize);
+        };
+
+        activeContextMenu = { element: menu, cleanup };
+
+        // 自動聚焦第一項
+        const firstBtn = menu.querySelector('.context-menu-item');
+        if (firstBtn) {
+            firstBtn.focus();
+        }
+    }
+
+    function showGroupContextMenu(anchorEvent, group) {
+        const items = [
+            {
+                label: '刪除歷史訊息',
+                danger: false,
+                onSelect: () => openDeleteModal('messages', group)
+            },
+            {
+                label: '刪除群組',
+                danger: true,
+                onSelect: () => openDeleteModal('group', group)
+            }
+        ];
+        showContextMenu(anchorEvent, items);
+    }
+
+    // === 群組刪除／訊息清除對話框與收斂 ===
+
+    function openDeleteModal(type, group) {
+        const isMessagesOnly = type === 'messages';
+
+        els.groupDeleteModalTitle.textContent = isMessagesOnly ? '刪除歷史訊息' : '刪除群組';
+        els.groupDeleteConfirmBtn.textContent = isMessagesOnly ? '刪除歷史訊息' : '刪除群組';
+        els.groupDeleteConfirmBtn.disabled = false;
+        els.groupDeleteCancelBtn.disabled = false;
+        els.groupDeleteModalCloseBtn.disabled = false;
+
+        if (isMessagesOnly) {
+            els.groupDeleteModalP1.textContent = `即將刪除「${group.displayName}」的全部歷史訊息，包含所有圖片、影片、語音與檔案。`;
+            els.groupDeleteModalP2.textContent = '刪除後無法復原。群組本身、成員與設定會保留。';
+            els.groupDeleteModalP3.classList.add('d-none');
+        } else {
+            els.groupDeleteModalP1.textContent = `即將刪除「${group.displayName}」，包含該群組的全部歷史訊息、圖片、影片、語音、檔案、成員快取與匿名代號。`;
+            els.groupDeleteModalP2.textContent = '刪除後無法復原。';
+            els.groupDeleteModalP3.textContent = 'bot 仍在這個 LINE 群組時，之後的新訊息會讓群組重新出現。要永久停止收錄，請將 bot 退出該群組。';
+            els.groupDeleteModalP3.classList.remove('d-none');
+        }
+
+        els.groupDeleteConfirmBtn.onclick = () => executeGroupDelete(type, group);
+
+        // 不可逆操作：點背景與 Esc 都不關閉，只能按「取消」或「確認」離開，
+        // 執行期間兩個按鈕都會被停用，避免中途關掉對話框卻不知道刪除有沒有完成
+        const modalInstance = bootstrap.Modal.getOrCreateInstance(els.groupDeleteModal, {
+            backdrop: 'static',
+            keyboard: false
+        });
+        modalInstance.show();
+    }
+
+    // Bootstrap 在 modal 的淡入轉場還沒結束時會直接忽略 hide()（內部的 _isTransitioning 旗標）。
+    // 刪除很快回來時（本機資料庫常常 50ms 內就完成）關閉指令就這樣被吞掉，
+    // 對話框會永遠停在「處理中…」，但刪除其實已經做完了。轉場結束後補關一次。
+    function hideDeleteModal() {
+        const instance = bootstrap.Modal.getInstance(els.groupDeleteModal);
+        if (!instance) {
+            return;
+        }
+        instance.hide();
+        if (els.groupDeleteModal.classList.contains('show')) {
+            els.groupDeleteModal.addEventListener('shown.bs.modal', () => instance.hide(), { once: true });
+        }
+    }
+
+    async function executeGroupDelete(type, group) {
+        els.groupDeleteConfirmBtn.disabled = true;
+        els.groupDeleteConfirmBtn.textContent = '處理中…';
+        els.groupDeleteCancelBtn.disabled = true;
+        els.groupDeleteModalCloseBtn.disabled = true;
+
+        const url = type === 'messages'
+            ? `api/groups/${encodeURIComponent(group.groupId)}/messages`
+            : `api/groups/${encodeURIComponent(group.groupId)}`;
+
+        try {
+            const response = await fetch(url, { method: 'DELETE' });
+
+            if (response.status === 404) {
+                hideDeleteModal();
+                showToast('群組已不存在，清單已更新', true);
+                if (state.groupId === group.groupId) {
+                    resetChatPanel();
+                }
+                await refreshGroupList();
+            } else if (!response.ok) {
+                hideDeleteModal();
+                showToast('刪除失敗，請稍後再試', true);
+            } else {
+                const result = await response.json();
+                hideDeleteModal();
+                const count = result?.messageCount ?? 0;
+                if (type === 'messages') {
+                    showToast(`已刪除「${group.displayName}」的 ${count} 則歷史訊息`);
+                } else {
+                    showToast(`已刪除群組「${group.displayName}」（${count} 則訊息）`);
+                }
+                if (state.groupId === group.groupId) {
+                    resetChatPanel();
+                }
+                await refreshGroupList();
+            }
+        } catch {
+            hideDeleteModal();
+            showToast('刪除失敗，請稍後再試', true);
+        } finally {
+            els.groupDeleteConfirmBtn.disabled = false;
+            els.groupDeleteConfirmBtn.textContent = type === 'messages' ? '刪除歷史訊息' : '刪除群組';
+            els.groupDeleteCancelBtn.disabled = false;
+            els.groupDeleteModalCloseBtn.disabled = false;
+        }
+    }
+
+    function resetChatPanel() {
+        state.groupId = null;
+        state.oldestId = null;
+        state.newestId = null;
+        state.windowNewestId = null;
+        state.daysWindow = INITIAL_DAYS;
+        state.hasMoreOlder = false;
+        state.historicalView = false;
+        state.noMoreNewer = false;
+        state.noMoreNewerAt = null;
+        state.requestToken++;
+
+        updateHistoricalBanner();
+        updateLoadNewerButton();
+        setFollowing(true);
+        clearMessageList();
+        updateActiveGroupItem();
+        updateChatHeader(null);
+        updateLoadMoreButton();
+        els.chatApp.classList.remove('mobile-chat-open');
     }
 
     async function fetchJson(url, options) {
@@ -701,7 +984,66 @@
 
         btn.appendChild(meta);
 
-        btn.addEventListener('click', () => {
+        let longPressTimer = null;
+        let suppressNextClick = false;
+        let startX = 0;
+        let startY = 0;
+
+        btn.addEventListener('contextmenu', (e) => {
+            e.preventDefault();
+            if (longPressTimer) {
+                clearTimeout(longPressTimer);
+                longPressTimer = null;
+            }
+            showGroupContextMenu(e, group);
+        });
+
+        btn.addEventListener('pointerdown', (e) => {
+            if (e.button !== undefined && e.button !== 0) {
+                return;
+            }
+            if (longPressTimer) {
+                clearTimeout(longPressTimer);
+                longPressTimer = null;
+            }
+            suppressNextClick = false;
+            startX = e.clientX;
+            startY = e.clientY;
+            longPressTimer = setTimeout(() => {
+                longPressTimer = null;
+                suppressNextClick = true;
+                showGroupContextMenu({ clientX: startX, clientY: startY }, group);
+            }, 500);
+        });
+
+        btn.addEventListener('pointermove', (e) => {
+            if (!longPressTimer) {
+                return;
+            }
+            const dx = e.clientX - startX;
+            const dy = e.clientY - startY;
+            if (Math.hypot(dx, dy) > 10) {
+                clearTimeout(longPressTimer);
+                longPressTimer = null;
+            }
+        });
+
+        const cancelLongPress = () => {
+            if (longPressTimer) {
+                clearTimeout(longPressTimer);
+                longPressTimer = null;
+            }
+        };
+        btn.addEventListener('pointerup', cancelLongPress);
+        btn.addEventListener('pointercancel', cancelLongPress);
+
+        btn.addEventListener('click', (e) => {
+            if (suppressNextClick) {
+                e.preventDefault();
+                e.stopPropagation();
+                suppressNextClick = false;
+                return;
+            }
             selectGroup(group.groupId);
             els.chatApp.classList.add('mobile-chat-open');
         });
@@ -913,6 +1255,7 @@
         renderGroupList(els.groupSearch.value);
 
         if (groups.length === 0) {
+            state.initialEmpty = true;
             return;
         }
 
@@ -920,9 +1263,19 @@
     }
 
     // loadGroups() 只在頁面載入時跑一次；之後靠這支輪詢讓側欄（新群組/預覽/排序）
-    // 定期跟資料庫同步，不然使用者在別的群組發言，側欄要重新整理才會出現
+    // 定期跟資料庫同步，不然使用者在別的群組發言，側欄要重新整理才會出現。
+    // 分頁隱藏時跳過，省掉背景分頁的無謂請求
     async function pollGroups() {
-        if (document.hidden || state.groupsPolling) {
+        if (document.hidden) {
+            return;
+        }
+        await refreshGroupList();
+    }
+
+    // 側欄清單的實際刷新。刪除群組／清空訊息這種「使用者剛按下去」的操作直接呼叫這支，
+    // 不能走 pollGroups——那支在分頁被判定為隱藏時會整個跳過，畫面會留著已經不存在的群組
+    async function refreshGroupList() {
+        if (state.groupsPolling) {
             return;
         }
         state.groupsPolling = true;
@@ -933,6 +1286,13 @@
                 body: JSON.stringify(readRequestBody())
             });
             state.groups = groups;
+
+            // 只有在請求成功回傳後才做判斷：若目前開著的群組不在清單中，代表在別台裝置被刪除或訊息被清空
+            if (state.groupId !== null && !groups.some(g => g.groupId === state.groupId)) {
+                resetChatPanel();
+                showToast('目前的群組已不存在或訊息已被清空');
+            }
+
             // 側欄每 10 秒更新一次；latch 生效後只要該群組的 lastMessageId 真的變了（有新訊息，
             // 或後端把漂移的值修正回來），就解除 latch 讓「載入更新」重新可用。比對的是「值有沒有變」
             // 而不是「有沒有大於 windowNewestId」——漂移情境下後者恆為真，latch 會每 10 秒被解除一次
@@ -950,7 +1310,8 @@
             renderGroupList(els.groupSearch.value);
             els.groupList.scrollTop = previousScrollTop;
 
-            if (state.groupId === null && groups.length > 0) {
+            if (state.initialEmpty && groups.length > 0) {
+                state.initialEmpty = false;
                 // 啟動時資料庫還沒有任何群組，之後第一筆訊息進來就自動帶使用者進去，
                 // 不必自己重新整理頁面才看得到
                 await selectGroup(groups[0].groupId);
@@ -1578,6 +1939,14 @@
         els.searchScopeButtons = Array.from(document.querySelectorAll('.search-scope-toggle [data-scope]'));
         els.historicalBanner = $('historical-banner');
         els.historicalBackBtn = $('historical-back-btn');
+        els.groupDeleteModal = $('group-delete-modal');
+        els.groupDeleteModalTitle = $('group-delete-modal-title');
+        els.groupDeleteModalCloseBtn = $('group-delete-modal-close-btn');
+        els.groupDeleteModalP1 = $('group-delete-modal-p1');
+        els.groupDeleteModalP2 = $('group-delete-modal-p2');
+        els.groupDeleteModalP3 = $('group-delete-modal-p3');
+        els.groupDeleteCancelBtn = $('group-delete-cancel-btn');
+        els.groupDeleteConfirmBtn = $('group-delete-confirm-btn');
 
         initFontSizeToggle();
         applyChatWidth();
