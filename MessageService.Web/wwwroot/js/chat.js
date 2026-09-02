@@ -27,6 +27,10 @@
     const HIGHLIGHT_COLORS_STORAGE_KEY = 'chat-highlight-colors';
     const HIGHLIGHT_OPACITY_STORAGE_KEY = 'chat-highlight-opacity';
     const DEFAULT_HIGHLIGHT_OPACITY = 0.5;
+    // 強度的合法區間只有這一份定義：settings.js 透過共享出口取用，
+    // 設定頁滑桿的 min/max 也在初始化時由 JS 依這兩個值填上
+    const HIGHLIGHT_OPACITY_MIN = 0.1;
+    const HIGHLIGHT_OPACITY_MAX = 1;
     // 顏色數量上限只有這一份定義，設定頁透過共享出口取用
     const MAX_HIGHLIGHT_COLORS = 8;
     const DEFAULT_HIGHLIGHT_COLORS = ['#06c755', '#ffc53d', '#ff6b57', '#a66cff'];
@@ -185,14 +189,19 @@
         return [...DEFAULT_HIGHLIGHT_COLORS];
     }
 
+    // 合法區間的判定只有這一份，三個呼叫端（讀 localStorage、設定頁預覽、滑桿事件）共用
+    function clampHighlightOpacity(value) {
+        if (!Number.isFinite(value)) {
+            return DEFAULT_HIGHLIGHT_OPACITY;
+        }
+        return Math.min(HIGHLIGHT_OPACITY_MAX, Math.max(HIGHLIGHT_OPACITY_MIN, value));
+    }
+
     function loadHighlightOpacity() {
         try {
             const saved = localStorage.getItem(HIGHLIGHT_OPACITY_STORAGE_KEY);
             if (saved !== null) {
-                const parsed = parseFloat(saved);
-                if (!Number.isNaN(parsed) && parsed >= 0.1 && parsed <= 1.0) {
-                    return parsed;
-                }
+                return clampHighlightOpacity(parseFloat(saved));
             }
         } catch {
         }
@@ -223,6 +232,9 @@
         HIGHLIGHT_FLOW_STORAGE_KEY,
         HIGHLIGHT_COLORS_STORAGE_KEY,
         HIGHLIGHT_OPACITY_STORAGE_KEY,
+        clampHighlightOpacity,
+        HIGHLIGHT_OPACITY_MIN,
+        HIGHLIGHT_OPACITY_MAX,
         DEFAULT_HIGHLIGHT_COLORS,
         DEFAULT_HIGHLIGHT_OPACITY,
         MAX_HIGHLIGHT_COLORS
@@ -627,7 +639,7 @@
         if (!target || typeof target.closest !== 'function') {
             return false;
         }
-        return Boolean(target.closest('.bubble, .avatar, .group-item, button, input, a, textarea, select'));
+        return Boolean(target.closest('.bubble, .avatar, .group-item, .search-panel, button, input, a, textarea, select, label'));
     }
 
     function showPanelContextMenu(anchorEvent) {
@@ -648,7 +660,9 @@
         if (state.fullscreen) {
             return;
         }
-        state.savedSidebarStateBeforeFullscreen = state.sidebarState;
+        // 手機版的單欄切換靠 mobile-chat-open；全螢幕一定是看訊息，所以進來時補上，
+        // 但離開時要還原成進來前的樣子，否則本來停在群組列表的人會被丟在空的對話面板
+        state.hadMobileChatOpenBeforeFullscreen = els.chatApp.classList.contains('mobile-chat-open');
         state.fullscreen = true;
         els.chatApp.classList.add('fullscreen');
         els.chatApp.classList.add('mobile-chat-open');
@@ -665,10 +679,12 @@
         }
         state.fullscreen = false;
         els.chatApp.classList.remove('fullscreen');
-        if (state.savedSidebarStateBeforeFullscreen) {
-            applySidebarState(state.savedSidebarStateBeforeFullscreen);
-            state.savedSidebarStateBeforeFullscreen = null;
+        // 側欄的三態不需要還原：全螢幕期間收合鈕與分隔線都不可見，state.sidebarState 不會被改動，
+        // 隱藏純粹是 CSS 的事，離開時 class 一拿掉就自動回到原本的樣子
+        if (!state.hadMobileChatOpenBeforeFullscreen) {
+            els.chatApp.classList.remove('mobile-chat-open');
         }
+        state.hadMobileChatOpenBeforeFullscreen = false;
     }
 
     function toggleFullscreen() {
@@ -942,7 +958,7 @@
     function buildKeywordHighlightedFragment(text, keywords) {
         const fragment = document.createDocumentFragment();
         if (!text || !keywords || keywords.length === 0) {
-            fragment.appendChild(document.createTextNode(text));
+            fragment.appendChild(document.createTextNode(text ?? ''));
             return fragment;
         }
 
@@ -1239,9 +1255,13 @@
     // 分頁被瀏覽器節流時（背景分頁、某些嵌入式檢視）不會觸發，媒體載入完成撐高列表就漏接了。
     // 媒體元素的 load／loadedmetadata 事件不受繪製節流影響，兩條路徑並用才涵蓋得完整。
     function repinToBottomIfFollowing() {
-        if (state.following && !state.historicalView) {
-            scrollToBottom(false);
+        if (!state.following || state.historicalView) {
+            return;
         }
+        // 平滑捲動途中內容又長高的話，原本的目標值已經過期——用平滑重新瞄準新的底部，
+        // 順便延長 autoScrolling 的保護期；不是平滑捲動期間就直接瞬跳，
+        // 免得每張圖片載入完都放一次動畫
+        scrollToBottom(state.autoScrolling);
     }
 
     // 對容器內的媒體元素掛一次性的載入事件；error 也要掛，載入失敗同樣會改變高度
@@ -1266,9 +1286,6 @@
         row.className = 'message-row' + (showAvatarAndName ? ' show-avatar' : '');
         row.dataset.messageId = String(message.id);
 
-        if (messageResizeObserver) {
-            messageResizeObserver.observe(row);
-        }
 
         const avatar = buildAvatarElement('', {
             pictureUrl: message.pictureUrl,
@@ -1333,6 +1350,15 @@
         return row;
     }
 
+    // 只觀察往下接進來的列。prepend 進來的是「載入更早」的舊訊息，使用者正停在上面讀，
+    // 那些列的圖片載入撐高時把畫面拉到底會直接毀掉閱讀位置（訊息少到撐不滿視窗時
+    // isNearBottom 恆為真、following 也恆為真，一按載入更早就會被拉走）
+    function observeRowForRepin(row) {
+        if (messageResizeObserver) {
+            messageResizeObserver.observe(row);
+        }
+    }
+
     function appendMessages(messages, animate) {
         const list = els.messageList;
         for (const message of messages) {
@@ -1348,6 +1374,7 @@
             state.lastAppendedSenderId = message.userId;
 
             const row = createMessageRow(message, showAvatarAndName);
+            observeRowForRepin(row);
             if (animate) {
                 row.classList.add('message-enter');
             }
@@ -1578,11 +1605,7 @@
             empty.className = 'group-list-empty';
             empty.textContent = '尚無群組資料';
             els.groupList.appendChild(empty);
-            if (state.fullscreen && els.fullscreenGroupBar) {
-                const prevScrollLeft = els.fullscreenGroupBar.scrollLeft;
-                renderFullscreenGroupBar();
-                els.fullscreenGroupBar.scrollLeft = prevScrollLeft;
-            }
+            syncFullscreenGroupBar();
             return;
         }
 
@@ -1591,11 +1614,7 @@
             empty.className = 'group-list-empty';
             empty.textContent = '找不到符合的群組';
             els.groupList.appendChild(empty);
-            if (state.fullscreen && els.fullscreenGroupBar) {
-                const prevScrollLeft = els.fullscreenGroupBar.scrollLeft;
-                renderFullscreenGroupBar();
-                els.fullscreenGroupBar.scrollLeft = prevScrollLeft;
-            }
+            syncFullscreenGroupBar();
             return;
         }
 
@@ -1603,11 +1622,19 @@
             els.groupList.appendChild(createGroupItem(group));
         }
 
-        if (state.fullscreen && els.fullscreenGroupBar) {
-            const prevScrollLeft = els.fullscreenGroupBar.scrollLeft;
-            renderFullscreenGroupBar();
-            els.fullscreenGroupBar.scrollLeft = prevScrollLeft;
+        syncFullscreenGroupBar();
+    }
+
+    // 全螢幕群組列跟著側欄一起重畫，並保留橫向捲動位置（10 秒輪詢會重建整條）。
+    // 這裡刻意不套側欄的搜尋過濾——全螢幕時側欄與它的搜尋框都看不到，
+    // 過濾結果會變成使用者無從得知也無從解除的隱形狀態
+    function syncFullscreenGroupBar() {
+        if (!state.fullscreen || !els.fullscreenGroupBar) {
+            return;
         }
+        const prevScrollLeft = els.fullscreenGroupBar.scrollLeft;
+        renderFullscreenGroupBar();
+        els.fullscreenGroupBar.scrollLeft = prevScrollLeft;
     }
 
     function createGroupItem(group) {
@@ -2666,6 +2693,9 @@
         els.searchInput.addEventListener('keydown', (e) => {
             if (e.key === 'Escape') {
                 closeSearchPanel();
+                // 不讓它冒泡到全螢幕的 Esc 處理：那邊看到面板已經關掉，會接著把全螢幕也退掉，
+                // 焦點在搜尋框時按一次 Esc 就跳了兩級
+                e.stopPropagation();
             }
         });
         for (const btn of els.searchScopeButtons) {

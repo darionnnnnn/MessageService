@@ -145,6 +145,9 @@
         loadHighlightFlow,
         loadHighlightColors,
         loadHighlightOpacity,
+        clampHighlightOpacity,
+        HIGHLIGHT_OPACITY_MIN,
+        HIGHLIGHT_OPACITY_MAX,
         applyHighlightVisualSettings,
         HIGHLIGHT_FLOW_STORAGE_KEY,
         HIGHLIGHT_COLORS_STORAGE_KEY,
@@ -342,7 +345,7 @@
             return;
         }
         const rawOpacity = els.highlightOpacityRange ? parseFloat(els.highlightOpacityRange.value) : loadHighlightOpacity();
-        const opacity = (!Number.isNaN(rawOpacity) && rawOpacity >= 0.1 && rawOpacity <= 1.0) ? rawOpacity : DEFAULT_HIGHLIGHT_OPACITY;
+        const opacity = clampHighlightOpacity(rawOpacity);
         const gradient = buildHighlightGradient(highlightColors, opacity);
         els.highlightPreviewBubble.style.setProperty('--highlight-preview-gradient', gradient);
         els.highlightPreviewBubble.style.setProperty('--highlight-preview-glow', computeHighlightGlow(highlightColors[0], opacity));
@@ -462,6 +465,9 @@
         els.highlightFlowToggle.checked = flowEnabled;
         const opacity = loadHighlightOpacity();
         if (els.highlightOpacityRange) {
+            // 區間由 chat.js 的共享出口提供，HTML 不再手寫一份（比照字體大小的作法）
+            els.highlightOpacityRange.setAttribute('min', String(HIGHLIGHT_OPACITY_MIN));
+            els.highlightOpacityRange.setAttribute('max', String(HIGHLIGHT_OPACITY_MAX));
             els.highlightOpacityRange.value = String(opacity);
         }
         if (els.highlightOpacityValue) {
@@ -481,7 +487,7 @@
         if (els.highlightOpacityRange) {
             els.highlightOpacityRange.addEventListener('input', () => {
                 const rawVal = parseFloat(els.highlightOpacityRange.value);
-                const val = (!Number.isNaN(rawVal) && rawVal >= 0.1 && rawVal <= 1.0) ? rawVal : DEFAULT_HIGHLIGHT_OPACITY;
+                const val = clampHighlightOpacity(rawVal);
                 if (els.highlightOpacityValue) {
                     els.highlightOpacityValue.textContent = `${Math.round(val * 100)}%`;
                 }
