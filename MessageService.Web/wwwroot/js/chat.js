@@ -74,6 +74,8 @@
         sidebarWidth: 320,
         fullscreen: false,
         pendingDeleteModalHide: false,
+        // 進入全螢幕前手機版是否已在對話面板，離開時據此還原 mobile-chat-open
+        hadMobileChatOpenBeforeFullscreen: false,
         pendingContentIds: new Set(),
         lastAppendedDateKey: null,
         lastAppendedSenderId: null,
@@ -1257,7 +1259,9 @@
         if (state.autoScrolling) {
             // 平滑捲動途中內容又長高：只重新瞄準新的底部，**不重設**保護期。
             // 走 scrollToBottom(true) 會重新計時 1 秒，多張圖片陸續載入時保護期被無限延長，
-            // 使用者這段期間往上捲會被忽略、再被下一次補捲拉回底部，形同捲不上去
+            // 使用者這段期間往上捲會被忽略、再被下一次補捲拉回底部，形同捲不上去。
+            // 代價：媒體載入拖過 1 秒時，逾時校正可能在動畫飛行中判成「不在底部」，
+            // 跟隨會短暫關掉、箭頭鈕閃一下，動畫抵達底部後由 scroll 事件自癒
             els.messageList.scrollTo({ top: els.messageList.scrollHeight, behavior: 'smooth' });
             return;
         }

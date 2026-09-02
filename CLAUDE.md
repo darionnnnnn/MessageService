@@ -67,6 +67,6 @@ SQL 端的 `x => x + 1`，讀出來加一再寫回在併發下會遺失計數。
 - server 端拼 HTML 的頁面（如 `/edge-admin`）**不要寫死根路徑的 action／href／redirect**——IIS 子 application 部署下會 404；一律前置 `Request.PathBase`（HttpClient 方向的同一坑見 `HttpBaseAddress.cs` 註解）。
 - **不要為新相依加「可選參數 `= null` ＋ fallback」**——需要就宣告為必要相依，讓 DI 與測試替身誠實跟上（同一形狀在委派實作中出現過三次，全部被驗收退回）。
 - **不要用顯示字串做行為判斷**（例如比對中文標籤決定邏輯分支）——加旗標或 enum。
-- **Bootstrap modal 在 `show()` 的淡入轉場結束前呼叫 `hide()` 會被直接忽略**——「開啟後依請求結果立刻關閉」的流程，請求快到 300ms 內回來時對話框就永久卡住。要掛 `shown.bs.modal` 再補關一次，並在 `hidden.bs.modal` 時把那個監聽器拆掉；不能靠「還有沒有 `show` class」判斷（`hide()` 有多條提早 return 的路徑，只有轉場那條是要補的）。`hideDeleteModal` 是範本。
+- **Bootstrap modal 在 `show()` 的淡入轉場結束前呼叫 `hide()` 會被直接忽略**——「開啟後依請求結果立刻關閉」的流程，請求快到 300ms 內回來時對話框就永久卡住。初始化時掛一個常駐的 `shown.bs.modal` 監聽，配一個「待補關」旗標：要關就設旗標再 `hide()`，`shown` 看到旗標就補關，開啟前一律清旗標。不要每次呼叫都掛 once 監聽器（`hide()` 有多條提早 return 的路徑，任何一條沒觸發事件就殘留、等下一次開啟才引爆），也不能靠「還有沒有 `show` class」判斷。`hideDeleteModal` 是範本。
 - **`ResizeObserver.observe()` 對每個新目標必定送一次初始回呼**——用它做「內容長高就捲到底」時，剛 append 的每一列都會在下一幀觸發一次；觀察範圍要限定在真的該跟隨的列（往下接進來的），`prepend` 的舊訊息列不要觀察，否則「載入更早」會被拉回底部。
 - **節流／冷卻／TTL 類邏輯注入 `TimeProvider`**（DI 已註冊單例），不要直接用 `DateTimeOffset.UtcNow`——否則時間長度永遠測不到，只能測「有沒有發生」。

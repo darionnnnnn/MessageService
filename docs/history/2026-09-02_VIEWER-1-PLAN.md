@@ -379,8 +379,18 @@
 
 ## 終檢輪
 
-併回 dev 後對合併結果再掃一次：規劃比對、體檢修正 commit 是否引入新問題、文件稽核。
-（結果見下方「終檢輪結果」，併回時填寫。）
+併回 dev（合併 commit `0f227f4`）後對 `origin/dev..dev` 再掃一次。
+
+- 體檢修正 commit `e713cec` 逐 hunk：`hideDeleteModal` 旗標版四種順序皆無殘留；指標回寫的
+  `NOT EXISTS` 條件在 `LastMessageId` 為 null 時仍為真，且既有測試確實走這條 UPDATE
+  （fixture 以正式 tracker 回寫指標，刪前非 null）；`TimeProvider` 已為 DI 單例；移除的死碼零殘留。
+- 補捲在平滑捲動中不重設保護期的**副作用**：媒體載入拖過 1 秒時，逾時校正可能在動畫飛行中把跟隨
+  短暫關掉，動畫抵達底部後自癒。屬「使用者能往上捲」換來的代價，已寫進註解。
+- `hadMobileChatOpenBeforeFullscreen` 未在 `state` 字面集中宣告，補上。
+- `CLAUDE.md` 的 Bootstrap 地雷文字描述的是被體檢修正推翻的舊做法（每次掛 once 監聽再拆），
+  與指名為範本的 `hideDeleteModal` 矛盾，改寫成常駐監聽＋旗標。
+- 「明確不做」兩節共十三項逐項 grep，皆未被做進去。README 新增段落的敘事字眼掃描無違規。
+- 終檢後全量測試 **1308 綠**。
 
 ## 追加作業的明確不做
 - 高亮規則改存本機。
