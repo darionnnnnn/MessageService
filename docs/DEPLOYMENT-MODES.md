@@ -152,7 +152,7 @@ Edge 與 Core 之間的四條資料流（訊息、心跳、媒體、名稱／頭
 
 | `Ingest:Channel`（Edge） | 行為 |
 |---|---|
-| `Auto`（預設） | 推送優先。推送持續失敗超過 `Ingest:PullActivationSeconds` 才暫停主動轉送（短暫失敗沿用 outbox 秒級退避），改由 Core 輪詢接手。恢復有兩條路：心跳每 `Heartbeat:IntervalSeconds`（預設 60 秒）照打、成功即恢復推送；轉送另每隔 `Ingest:ChannelProbeIntervalMinutes`（預設 60 分）放行一次當保底探測。同時開放 `/api/edge` 供 Core 輪詢。 |
+| `Auto`（預設） | 推送優先。推送持續失敗超過 `Ingest:PullActivationSeconds` 才暫停主動轉送（短暫失敗沿用 outbox 秒級退避），改由 Core 輪詢接手；失敗訊號同時來自 outbox 推送與每週期固定送的心跳，所以沒有訊息流量的安靜站台也會切換。暫停期間媒體下載與名稱／頭貼刷新一併改用 Core 派下來的資料。恢復有兩條路：心跳每 `Heartbeat:IntervalSeconds`（預設 60 秒）照打、成功即恢復推送；轉送另每隔 `Ingest:ChannelProbeIntervalMinutes`（預設 60 分）放行一次當保底探測。同時開放 `/api/edge` 供 Core 輪詢。 |
 | `Push` | 只主動推送，不開放 `/api/edge`。 |
 | `Pull` | 從不主動連 Core（`OutboxForwarderService` 不註冊），只開放 `/api/edge`。`Ingest:BaseUrl` 可留空。 |
 
@@ -190,7 +190,10 @@ Core ──▶ POST /api/edge/content/{id}/ack  完整落地後才送，Edge 收
 
 名稱／頭貼的 TTL 判斷在 Core（Edge 沒有資料庫），四類（群組名稱、成員名稱、群組圖片、
 成員頭貼）都會回傳。圖片位元組隨 poll 回應一起帶回，單輪有總量預算，超出的下一輪再回。
-這條流沒有 ack：回應在傳輸中遺失時該筆結果會消失，等 TTL 再次過期時重新刷新。
+這條流沒有 ack：Core 派出後把對象留在待辦，每 30 秒重新判斷一次 TTL、仍過期就再派，
+直到結果落地（TTL 轉新鮮）才移除；同一對象最多重派 40 次（約 20 分鐘）後放棄，
+該群組下一則訊息落地時會重新排入。Edge 收到派工立即處理（媒體派工同樣立即入列下載，
+不等週期重掃）。
 
 Edge 端下載完成的媒體放在記憶體（`Ingest:PullStagingMaxBytes`，預設 600MB，生效值不小於
 `Ingest:MaxContentBytes`），收到 ack 前不釋放，所以取回中斷可以原樣重取；暫存滿時拒收新派工，

@@ -1,6 +1,6 @@
 # EDGEOPS-3 第 1 輪規劃：單向拓撲（僅 Core→Edge）快速收斂＋診斷誤導修正
 
-> 狀態：實作完成，待體檢
+> 狀態：全案完成已併 dev
 > 基準：dev@2656b3c（1257 綠）→ feature/edgeops-3@c736b86（1278 綠）
 > 來源：EDGEOPS-2 實測 log 分析——Edge→Core 防火牆未開通的環境下，名稱／頭貼／照片長時間出不來；另含實測確認的三個 bug（目標誤標、測試逾時誤報、outbox ack 競態）。
 
@@ -256,3 +256,60 @@
 - 沒有新訊息的舊群組不會被主動刷新（既有的以訊息觸發設計，已列在 PLAN 的「已知限制」）。
 - `EdgeSettingsHotReloadTests` 的偶發失敗（既有問題，另有任務卡）——本輪全套第一次跑曾撞到一次，
   重跑即綠，與本輪改動無關。
+
+## 體檢輪（claude-fable-5-1）
+
+對 `dev..feature/edgeops-3` 全 diff 依「規劃比對／獵 bug／終檢後手改／架構契合／測試」掃過，
+六個批次的改動逐條對上規劃，「明確不做」未混入；實作方記錄的三項落差（`WithCounterpart`、
+測試時間紀律矯正、第二個 `SaveChangesAsync`）皆屬合理。抓到兩個問題，都已修正：
+
+1. **批次 A 在 HttpClient 逾時情境靜默失效，且會讓背景服務中止**（交接節未列，獵 bug 抓到）。
+   - 症狀：`HttpHeartbeatReporter` 與 `HeartbeatService.TryReportOnceAsync` 都用
+     `when (ex is not OperationCanceledException)` 過濾。HttpClient 逾時（「ingest」client 30 秒）
+     丟的 `TaskCanceledException` 是它的子類：Core 端 DROP 封包而 TCP 連線逾時比 30 秒長時
+     （Linux 預設、半開連線）看到的就是這種——心跳失敗**不計入**通道狀態，切換永遠不發生；
+     更嚴重的是它會穿出 `TryReportOnceAsync`、結束 `ExecuteAsync`，BackgroundService 預設
+     `StopHost` 把整個站台停掉。`ProfileRefreshService` 的迴圈守門與 staleness catch、
+     `ContentDownloadService` 的啟動 requeue 也是同一形狀。實測環境是 Windows（TCP 逾時約 21 秒
+     先觸發 → `HttpRequestException`）所以沒踩到，換平台或網路型態就會。
+   - 修法：改用專案在 `ContentDownloadService` worker 迴圈已建立的慣例——
+     `catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }` 再接一般 catch，
+     判斷依據看 token 不看例外型別。套用於 `HttpHeartbeatReporter`、`HeartbeatService`、
+     `ProfileRefreshService`（四處）、`ContentDownloadService` 啟動 requeue。
+   - 迴歸測試：`ReportAsync_HttpClientTimeout_CountsAsFailure`、`ReportAsync_CallerCancelled_DoesNotCountAsFailure`、
+     `TryReportOnceAsync_HttpClientTimeout_IsTreatedAsFailureNotShutdown`、`TryReportOnceAsync_CallerCancelled_Propagates`、
+     `ProcessAsync_StalenessHttpClientTimeout_IsInternalFailure_NotPropagated`。
+     突變（改回例外型別過濾）兩處各紅一筆。
+   - CLAUDE.md 新增「不要做」條目。
+2. **批次 C 對永久失敗的對象無限重派**（交接節疑慮 1，核實為真）。
+   - 症狀：bot 被踢出群組／成員退群時 LINE 回 404，`RefreshGroupAsync` 只記冷卻不 upsert，
+     Core 端 staleness 永遠過期 → 每 30 秒查一次資料庫、派一次工，直到 Core 重啟。
+   - 修法：待辦值改為 `(LastDispatchedAt, Dispatches)`，同一對象派滿 40 次（≈20 分鐘，
+     涵蓋 Edge 一整個 10 分鐘 LINE 冷卻加一次冷卻後重試）即移除並記一則 Information；
+     該群組下一則訊息落地時重新進待辦。
+   - 迴歸測試：`PollOnceAsync_ProfileNeverSettles_GivesUpAfterMaxDispatches_AndReentersOnNewMessage`；
+     突變（上限改 `int.MaxValue`）紅。
+
+交接節其餘疑慮核對：(2) 心跳失敗計入的舊定案脈絡——`EdgeChannelState` 的 180 秒寬限本就是為
+偶發失敗設計，推翻合理；(3) `SaveIgnoringEntriesTakenByPullAsync` 只重試一次——第一次已把
+衝突項移出追蹤，第二次衝突只可能來自同批其他項目在這幾毫秒內又被 ack，往外拋由 ERROR 接住可接受；
+(4)(5) 屬測試涵蓋範圍的說明，無需修正，實機驗證項已列。
+
+體檢後全套 **1284 綠**（基線 1257，+27）。文件同步：CLAUDE.md（基線＋新地雷）、
+`DEPLOYMENT-MODES.md`（Auto 列失敗訊號來源、名稱／頭貼重派與媒體立即入列）、
+README（`FailureRetryAfter` 只套用 LINE 失敗、內部通道 30 秒）。
+
+## 遞延（本輪不做，留痕）
+
+- 全專案仍有 14 處 `when (ex is not OperationCanceledException)`（`EdgePullService`×4、
+  `OutboxForwarderService`×3、`RetentionCleanupService`×2、`StickerContentBackfillService`、
+  `LineProfileClient`、兩個 controller）。本輪只修「批次 A 賴以成立」與「本輪動過」的五處。
+  其中背景服務迴圈守門（`EdgePullService:157`、`OutboxForwarderService:46`、`RetentionCleanupService:46`）
+  的風險與本輪修掉的相同——`OutboxForwarderService` 因 `HttpIngestSink` 會把例外包成
+  `InvalidOperationException` 而實際安全，其餘兩處是否會收到未包裝的 HttpClient 逾時待逐一核對。
+  建議下一輪以「全專案 OCE 過濾點清查」為題統一處理。
+
+## 終檢輪
+
+併 dev 後重掃：體檢修正 commit 本身無新問題（突變三處皆紅、全套綠）；文件與程式碼核對一致。
+終檢無新發現。

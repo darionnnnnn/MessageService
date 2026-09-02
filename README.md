@@ -120,7 +120,7 @@ StickerContentBackfillService（啟動時替既有貼圖訊息補出 Pending 內
 | `ContentDownload:MaxPendingIdsPerScan` | 單輪掃描最多撈多少待處理內容（預設 5000，Id 小的先處理），其餘留給下一輪。沒有上限時大量積壓會整包進記憶體，SQL Server 端還會撞上 2100 個查詢參數的硬限制。撞到上限時記一筆 log：有週期重掃時是 Information，`RequeueIntervalMinutes` 設 0 時沒有下一輪可等，改記 Warning |
 | `Database:SqliteBusyTimeoutMs` | SQLite 寫鎖被別的行程佔用時最多等這麼久（預設 30000 毫秒）。WAL 只讓讀寫不互相阻塞，寫／寫仍是全庫互斥 |
 | `ProfileCache:RefreshAfter` | 群組/成員名稱快取的過期時間（預設 7 天） |
-| `ProfileCache:FailureRetryAfter` | LINE profile API 失敗後的程序內冷卻時間（預設 10 分鐘），避免暫時性故障被每則訊息放大成持續性的無效呼叫 |
+| `ProfileCache:FailureRetryAfter` | LINE profile API 失敗後的程序內冷卻時間（預設 10 分鐘），避免暫時性故障被每則訊息放大成持續性的無效呼叫。只套用在打 LINE 的失敗；查快取狀態的**內部通道**（Edge 打 Core）失敗固定冷卻 30 秒，錯誤訊息標的是內部通道的目標 |
 | `Encryption:Enabled` / `Key` / `SearchWindowDays` | 應用層欄位加密開關與金鑰，見 [docs/ENCRYPTION.md](docs/ENCRYPTION.md)。所有直連資料庫的主機 `Key` 必須完全一致 |
 
 開發環境設定機密（在 `MessageService.Web/` 目錄下）：
