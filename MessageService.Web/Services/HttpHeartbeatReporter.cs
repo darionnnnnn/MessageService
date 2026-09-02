@@ -17,14 +17,30 @@ public class HttpHeartbeatReporter(
         var request = new HeartbeatRequest(
             deploymentOptions.Value.Mode.ToString(), Environment.MachineName, report.OutboxPending, report.OutboxOldestAgeSeconds);
 
-        using var response = await httpClientFactory.CreateClient("ingest")
-            .PostAsJsonAsync("api/ingest/heartbeat", request, cancellationToken);
-        response.EnsureSuccessStatusCode();
+        try
+        {
+            using var response = await httpClientFactory.CreateClient("ingest")
+                .PostAsJsonAsync("api/ingest/heartbeat", request, cancellationToken);
+            response.EnsureSuccessStatusCode();
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // 心跳是這個方向唯一「不受通道閘門節流、固定每個週期都會送」的流量，因此也是
+            // 判斷 edge→core 通不通最靈敏的訊號。**沒有訊息流量時 outbox 根本不會嘗試推送**，
+            // 只靠 OutboxForwarderService 通知的話，安靜的站台永遠不會切換到拉取資源，
+            // 名稱／頭貼與媒體會一直打向不通的 Core（實測到的症狀）。
+            //
+            // 偶發失敗不會誤觸暫停：EdgeChannelState 有 PullActivationSeconds（預設 180 秒）
+            // 的寬限期，心跳 60 秒一次代表要連續失敗三次以上才會真的暫停。
+            // 任何失敗都計入（含 4xx，例如 ingest 金鑰錯）——語意是「推送通道未確認可用」。
+            channelState.MarkPushFailed();
+            throw;
+        }
 
         // 心跳送到了＝edge→core 方向是通的。Auto 暫停期間心跳仍每個週期照打（它不經通道閘門），
         // 等於每分鐘一次的天然探測——不通知通道狀態的話會出現雙盲窗口：Core 收到推送心跳就停止
         // 輪詢，Edge 的轉發卻還在暫停期等下一次探測（最長 ChannelProbeIntervalMinutes），
-        // 訊息就這樣卡住最長一個探測週期。失敗側刻意不通知：心跳偶發失敗不該把轉發拖入暫停
+        // 訊息就這樣卡住最長一個探測週期。
         channelState.MarkPushSucceeded();
     }
 }

@@ -12,9 +12,22 @@ public class ProfileRefreshService(
     IProfileRefreshQueue queue,
     IServiceScopeFactory scopeFactory,
     IOptions<ProfileCacheOptions> options,
+    IOptions<IngestOptions> ingestOptions,
+    TimeProvider timeProvider,
     ILogger<ProfileRefreshService> logger) : BackgroundService
 {
     private readonly ProfileCacheOptions _options = options.Value;
+
+    /// <summary>staleness 查詢打的是**內部通道**（Edge 打 Core 的 ingest API、其餘模式讀本機
+    /// 資料庫），跟後面打 LINE API 是完全不同的方向。這兩個欄位讓失敗訊息標對目標——
+    /// 標成 LINE 的網域會讓人去開錯誤的防火牆洞（實測踩過）。</summary>
+    private readonly string _internalTarget = string.IsNullOrWhiteSpace(ingestOptions.Value.BaseUrl)
+        ? "本機資料庫"
+        : new Uri(HttpBaseAddress.Create(ingestOptions.Value.BaseUrl), "api/ingest/profiles/staleness").ToString();
+
+    private readonly string? _internalHost = string.IsNullOrWhiteSpace(ingestOptions.Value.BaseUrl)
+        ? null
+        : HttpBaseAddress.Create(ingestOptions.Value.BaseUrl).Host;
 
     /// <summary>清理過期抑制項目的門檻：當項目數超過此值時進行清理。</summary>
     private const int CleanupThreshold = 1000;
@@ -29,6 +42,13 @@ public class ProfileRefreshService(
     /// 每則都查一次」的秒級到分鐘級突發；用 5 分鐘就能吃掉絕大部分重複，
     /// 而對 7 天的刷新週期毫無影響（最多延後 5 分鐘）。</summary>
     private static readonly TimeSpan SuppressWindow = TimeSpan.FromMinutes(5);
+
+    /// <summary>**內部通道**（staleness 查詢）失敗的冷卻。刻意遠短於 FailureRetryAfter：
+    /// 這類失敗最常見的成因是「Edge→Core 尚未切換到拉取模式」的過渡期，而那個過渡期只有
+    /// PullActivationSeconds（預設 180 秒）。用 10 分鐘的冷卻會讓切換完成後的第一批派工
+    /// 全被抑制掉，名稱／頭貼要等十幾分鐘才出得來（實測到的症狀）。
+    /// 打 LINE API 的失敗不走這條，仍用 FailureRetryAfter——那是對方限流／故障，值得等久一點。</summary>
+    private static readonly TimeSpan InternalFailureRetryAfter = TimeSpan.FromSeconds(30);
 
     /// <summary>程序內抑制表：group 用 GroupId 當鍵、member 用 "GroupId:UserId"。
     /// 包含打 LINE API 失敗後的退避冷卻（FailureRetryAfter），以及查詢確認不 stale 或 upsert 成功後的抑制窗口（SuppressWindow）。
@@ -67,7 +87,7 @@ public class ProfileRefreshService(
         var profileClient = scope.ServiceProvider.GetRequiredService<ILineProfileClient>();
         var targetHost = HttpBaseAddress.ResolveOutboundHost(
             scope.ServiceProvider.GetService<IOptionsMonitor<LineOptions>>()?.CurrentValue, "api.line.me");
-        var cutoff = DateTimeOffset.UtcNow - _options.RefreshAfter;
+        var cutoff = timeProvider.GetUtcNow() - _options.RefreshAfter;
 
         // 一次查完群組與成員的 staleness——TTL 判斷一定要在打 LINE API 之前完成才省得到配額，
         // 這也是 IProfileStore 把 staleness 跟 upsert 拆成兩支方法的理由
@@ -78,14 +98,16 @@ public class ProfileRefreshService(
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            RecordFailure(task.GroupId);
+            RecordInternalFailure(task.GroupId);
             if (task.UserId is not null)
             {
-                RecordFailure(MemberKey(task.GroupId, task.UserId));
+                RecordInternalFailure(MemberKey(task.GroupId, task.UserId));
             }
 
-            logger.LogWarning(ex, "查詢名稱／頭貼快取狀態失敗 (group {GroupId}, user {UserId}); backing off: {FailureReason}",
-                task.GroupId, task.UserId, OutboundFailureClassifier.Classify(ex, targetHost));
+            logger.LogWarning(ex,
+                "查詢名稱／頭貼快取狀態失敗 (group {GroupId}, user {UserId})，目標 {Target}; backing off: {FailureReason}",
+                task.GroupId, task.UserId, _internalTarget,
+                OutboundFailureClassifier.Classify(ex, _internalHost));
             return;
         }
 
@@ -97,7 +119,7 @@ public class ProfileRefreshService(
             }
             else
             {
-                Suppress(task.GroupId, DateTimeOffset.UtcNow + SuppressWindow);
+                Suppress(task.GroupId, timeProvider.GetUtcNow() + SuppressWindow);
             }
         }
 
@@ -110,13 +132,13 @@ public class ProfileRefreshService(
             }
             else
             {
-                Suppress(memberKey, DateTimeOffset.UtcNow + SuppressWindow);
+                Suppress(memberKey, timeProvider.GetUtcNow() + SuppressWindow);
             }
         }
     }
 
     private bool IsSuppressed(string key) =>
-        _suppressUntil.TryGetValue(key, out var until) && until > DateTimeOffset.UtcNow;
+        _suppressUntil.TryGetValue(key, out var until) && until > timeProvider.GetUtcNow();
 
     private void Suppress(string key, DateTimeOffset until)
     {
@@ -128,11 +150,15 @@ public class ProfileRefreshService(
     }
 
     private void RecordFailure(string key) =>
-        Suppress(key, DateTimeOffset.UtcNow + _options.FailureRetryAfter);
+        Suppress(key, timeProvider.GetUtcNow() + _options.FailureRetryAfter);
+
+    /// <summary>內部通道失敗的短冷卻，見 InternalFailureRetryAfter。</summary>
+    private void RecordInternalFailure(string key) =>
+        Suppress(key, timeProvider.GetUtcNow() + InternalFailureRetryAfter);
 
     private void CleanupExpiredEntries()
     {
-        var now = DateTimeOffset.UtcNow;
+        var now = timeProvider.GetUtcNow();
         foreach (var pair in _suppressUntil)
         {
             if (pair.Value <= now)
@@ -180,7 +206,7 @@ public class ProfileRefreshService(
         }
         else
         {
-            Suppress(groupId, DateTimeOffset.UtcNow + SuppressWindow);
+            Suppress(groupId, timeProvider.GetUtcNow() + SuppressWindow);
         }
     }
 
@@ -214,7 +240,7 @@ public class ProfileRefreshService(
         }
         else
         {
-            Suppress(MemberKey(groupId, userId), DateTimeOffset.UtcNow + SuppressWindow);
+            Suppress(MemberKey(groupId, userId), timeProvider.GetUtcNow() + SuppressWindow);
         }
     }
 }
