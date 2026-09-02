@@ -253,6 +253,126 @@ public class EdgePullServiceTests
         Assert.EndsWith("/api/edge/outbox/ack", harness.Requests[^1].RequestUri!.AbsolutePath);
     }
 
+    /// <summary>Edge 可能在冷卻窗口內把派工靜默丟棄（通道還沒切到拉取模式時 staleness 查詢會失敗）。
+    /// 派出即清空的話那筆就永遠丟了，要等該群組下一則新訊息——實測「名稱／頭貼一直出不來」就是這個。</summary>
+    [Fact]
+    public async Task PollOnceAsync_ProfileStillStale_RedispatchesAfterInterval()
+    {
+        var profileStore = new FakeProfileStore { StalenessToReturn = new ProfileStaleness(true, true) };
+        var item = new EdgeOutboxItem("evt-1", JsonSerializer.Serialize(SampleEnvelope));
+        var landed = false;
+        var harness = CreateHarness(
+            request => request.RequestUri!.AbsolutePath.EndsWith("/poll")
+                ? PollResponse(messages: landed ? [] : [item])
+                : new HttpResponseMessage(HttpStatusCode.NoContent),
+            profileStore: profileStore);
+
+        // 第一輪：訊息落地，把 (G1, U1) 記進待辦
+        await harness.Service.PollOnceAsync(CancellationToken.None);
+        landed = true;
+
+        // 第二輪：派出，查一次 staleness
+        await harness.Service.PollOnceAsync(CancellationToken.None);
+        Assert.Equal(1, profileStore.GetStalenessCalls.Count);
+        Assert.Contains("G1", harness.RequestBodies[^1]);
+
+        // 間隔未到：不重派、也不重查（每秒查一次會壓垮每秒一次的輪詢節奏）
+        await harness.Service.PollOnceAsync(CancellationToken.None);
+        Assert.Equal(1, profileStore.GetStalenessCalls.Count);
+
+        // 間隔到了：仍然過期就再派一次
+        harness.Time.Now = harness.Time.Now.AddSeconds(31);
+        await harness.Service.PollOnceAsync(CancellationToken.None);
+        Assert.Equal(2, profileStore.GetStalenessCalls.Count);
+    }
+
+    [Fact]
+    public async Task PollOnceAsync_ProfileNoLongerStale_StopsRedispatching()
+    {
+        var profileStore = new FakeProfileStore { StalenessToReturn = new ProfileStaleness(true, true) };
+        var item = new EdgeOutboxItem("evt-1", JsonSerializer.Serialize(SampleEnvelope));
+        var landed = false;
+        var harness = CreateHarness(
+            request => request.RequestUri!.AbsolutePath.EndsWith("/poll")
+                ? PollResponse(messages: landed ? [] : [item])
+                : new HttpResponseMessage(HttpStatusCode.NoContent),
+            profileStore: profileStore);
+
+        await harness.Service.PollOnceAsync(CancellationToken.None);
+        landed = true;
+        await harness.Service.PollOnceAsync(CancellationToken.None);
+        Assert.Equal(1, profileStore.GetStalenessCalls.Count);
+
+        // Edge 回報的結果落地後就不再過期——這筆到此為止，待辦要清掉
+        profileStore.StalenessToReturn = new ProfileStaleness(false, false);
+        harness.Time.Now = harness.Time.Now.AddSeconds(31);
+        await harness.Service.PollOnceAsync(CancellationToken.None);
+        Assert.Equal(2, profileStore.GetStalenessCalls.Count);
+
+        // 已移除：之後不論過多久都不再查、不再派
+        harness.Time.Now = harness.Time.Now.AddSeconds(120);
+        await harness.Service.PollOnceAsync(CancellationToken.None);
+        Assert.Equal(2, profileStore.GetStalenessCalls.Count);
+    }
+
+    [Fact]
+    public async Task PollOnceAsync_PollRequestFails_KeepsProfileWorkPending()
+    {
+        var profileStore = new FakeProfileStore { StalenessToReturn = new ProfileStaleness(true, true) };
+        var item = new EdgeOutboxItem("evt-1", JsonSerializer.Serialize(SampleEnvelope));
+        var landed = false;
+        var failPoll = false;
+        var harness = CreateHarness(
+            request =>
+            {
+                if (!request.RequestUri!.AbsolutePath.EndsWith("/poll"))
+                {
+                    return new HttpResponseMessage(HttpStatusCode.NoContent);
+                }
+                return failPoll
+                    ? new HttpResponseMessage(HttpStatusCode.ServiceUnavailable)
+                    : PollResponse(messages: landed ? [] : [item]);
+            },
+            profileStore: profileStore);
+
+        await harness.Service.PollOnceAsync(CancellationToken.None);
+        landed = true;
+
+        // 這一輪派工組好了但請求失敗——待辦不能因此消失
+        failPoll = true;
+        await harness.Service.PollOnceAsync(CancellationToken.None);
+        Assert.Equal(1, profileStore.GetStalenessCalls.Count);
+
+        failPoll = false;
+        harness.Time.Now = harness.Time.Now.AddSeconds(31);
+        await harness.Service.PollOnceAsync(CancellationToken.None);
+        Assert.Equal(2, profileStore.GetStalenessCalls.Count);
+        Assert.Contains("G1", harness.RequestBodies[^1]);
+    }
+
+    [Fact]
+    public async Task PollOnceAsync_SameGroupSendsMoreMessages_DoesNotPushBackRedispatchClock()
+    {
+        // 同一個群組連發訊息時，若每次落地都重設時戳，重派會被一直往後推——熱門群組反而最慢補上
+        var profileStore = new FakeProfileStore { StalenessToReturn = new ProfileStaleness(true, true) };
+        var item = new EdgeOutboxItem("evt-1", JsonSerializer.Serialize(SampleEnvelope));
+        var harness = CreateHarness(
+            request => request.RequestUri!.AbsolutePath.EndsWith("/poll")
+                ? PollResponse(messages: [item])
+                : new HttpResponseMessage(HttpStatusCode.NoContent),
+            profileStore: profileStore);
+
+        await harness.Service.PollOnceAsync(CancellationToken.None);
+        await harness.Service.PollOnceAsync(CancellationToken.None);
+        Assert.Equal(1, profileStore.GetStalenessCalls.Count);
+
+        // 期間持續有新訊息落地
+        harness.Time.Now = harness.Time.Now.AddSeconds(31);
+        await harness.Service.PollOnceAsync(CancellationToken.None);
+
+        Assert.Equal(2, profileStore.GetStalenessCalls.Count);
+    }
+
     [Fact]
     public async Task PollOnceAsync_NoMessages_DoesNotSendAck()
     {
