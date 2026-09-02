@@ -1086,6 +1086,7 @@ html.highlight-flowing .bubble.highlighted:not(.sticker) {
     .sidebar-collapse-btn,
     .sidebar-expand-btn,
     .context-menu-item,
+    .fullscreen-group-item,
     .highlight-color-swatch-btn {
         transition: none;
     }
@@ -1284,6 +1285,105 @@ html.highlight-flowing .bubble.highlighted:not(.sticker) {
     .sidebar-expand-btn {
         display: none;
     }
+}
+
+/* === 頁面內全螢幕模式與群組橫列 === */
+
+.fullscreen-group-bar {
+    display: none;
+    flex: 1 1 auto;
+    min-width: 0;
+    align-items: center;
+    gap: .5rem;
+    overflow-x: auto;
+    /* 橫向捲動會把 overflow-y 也變成裁切，所以未讀 badge 不能溢出到項目框外
+       （見 .fullscreen-group-badge 貼齊角落而非 -3px），這裡才能把上下內距歸零、
+       讓整條標頭再矮一截——全螢幕的目的就是把高度讓給訊息 */
+    overflow-y: hidden;
+    padding: 0;
+    scrollbar-width: thin;
+}
+
+.fullscreen-group-item {
+    flex: none;
+    position: relative;
+    background: transparent;
+    border: none;
+    padding: 2px;
+    border-radius: 42%;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    transition: background-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.fullscreen-group-item:hover {
+    background: var(--sidebar-hover);
+}
+
+.fullscreen-group-item.active {
+    box-shadow: 0 0 0 2px var(--line-green);
+    background: rgba(6, 199, 85, .1);
+}
+
+.fullscreen-group-item:focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 2px;
+}
+
+.fullscreen-group-avatar {
+    width: 32px;
+    height: 32px;
+    font-size: 1.05rem;
+    border-radius: 38%;
+}
+
+.fullscreen-group-badge {
+    position: absolute;
+    top: 0;
+    right: 0;
+    background: var(--unread-badge-bg);
+    color: #fff;
+    font-weight: 700;
+    font-size: calc(var(--chat-base-current) * .72rem / 1.15rem);
+    line-height: 1;
+    padding: .2em .4em;
+    border-radius: 999px;
+    min-width: 1.4em;
+    text-align: center;
+    box-shadow: 0 0 0 1.5px #fff;
+    pointer-events: none;
+    z-index: 1;
+}
+
+.chat-app.fullscreen .sidebar,
+.chat-app.fullscreen .sidebar-resizer {
+    display: none !important;
+}
+
+.chat-app.fullscreen .chat-panel {
+    display: flex !important;
+}
+
+.chat-app.fullscreen .composer-bar {
+    display: none;
+}
+
+.chat-app.fullscreen .chat-header {
+    padding-top: .3rem;
+    padding-bottom: .3rem;
+}
+
+.chat-app.fullscreen .chat-header-avatar,
+.chat-app.fullscreen .chat-header-info,
+.chat-app.fullscreen .sidebar-expand-btn,
+.chat-app.fullscreen .mobile-back-btn {
+    display: none !important;
+}
+
+.chat-app.fullscreen .fullscreen-group-bar {
+    display: flex;
 }
 
 /* === 訊息高亮設定（預覽與顏色選取器） === */

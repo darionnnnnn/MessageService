@@ -67,6 +67,8 @@
         // 側欄收合狀態（expanded / rail / hidden）與展開時的寬度（px），皆存 localStorage
         sidebarState: 'expanded',
         sidebarWidth: 320,
+        fullscreen: false,
+        savedSidebarStateBeforeFullscreen: null,
         pendingContentIds: new Set(),
         lastAppendedDateKey: null,
         lastAppendedSenderId: null,
@@ -553,7 +555,7 @@
     // 右鍵與長按的共用觸發器：側欄群組項目與訊息頭貼共用同一套手勢
     // （桌面右鍵、手機長按 500ms、位移超過 10px 取消、長按後抑制那一次 click）。
     // openMenu 收到的參數只需要有 clientX／clientY，長按時會自己補上按下的座標。
-    function attachContextMenuTriggers(el, openMenu) {
+    function attachContextMenuTriggers(el, openMenu, shouldIgnore) {
         let longPressTimer = null;
         let suppressNextClick = false;
         let startX = 0;
@@ -567,7 +569,11 @@
         };
 
         el.addEventListener('contextmenu', (e) => {
+            if (typeof shouldIgnore === 'function' && shouldIgnore(e)) {
+                return;
+            }
             e.preventDefault();
+            e.stopPropagation();
             cancelLongPress();
             openMenu(e);
         });
@@ -576,6 +582,10 @@
             if (e.button !== undefined && e.button !== 0) {
                 return;
             }
+            if (typeof shouldIgnore === 'function' && shouldIgnore(e)) {
+                return;
+            }
+            e.stopPropagation();
             cancelLongPress();
             suppressNextClick = false;
             startX = e.clientX;
@@ -583,7 +593,7 @@
             longPressTimer = setTimeout(() => {
                 longPressTimer = null;
                 suppressNextClick = true;
-                openMenu({ clientX: startX, clientY: startY });
+                openMenu({ clientX: startX, clientY: startY, target: e.target });
             }, 500);
         });
 
@@ -607,6 +617,65 @@
             suppressNextClick = false;
             return true;
         };
+    }
+
+    // === 頁面內全螢幕模式 ===
+
+    function isExcludedContextTarget(e) {
+        const target = e?.target;
+        if (!target || typeof target.closest !== 'function') {
+            return false;
+        }
+        return Boolean(target.closest('.bubble, .avatar, .group-item, button, input, a, textarea, select'));
+    }
+
+    function showPanelContextMenu(anchorEvent) {
+        if (isExcludedContextTarget(anchorEvent)) {
+            return;
+        }
+        const items = [
+            {
+                label: state.fullscreen ? '關閉全螢幕' : '全螢幕',
+                danger: false,
+                onSelect: toggleFullscreen
+            }
+        ];
+        showContextMenu(anchorEvent, items);
+    }
+
+    function enterFullscreen() {
+        if (state.fullscreen) {
+            return;
+        }
+        state.savedSidebarStateBeforeFullscreen = state.sidebarState;
+        state.fullscreen = true;
+        els.chatApp.classList.add('fullscreen');
+        els.chatApp.classList.add('mobile-chat-open');
+        renderFullscreenGroupBar();
+        const activeItem = els.fullscreenGroupBar?.querySelector('.fullscreen-group-item.active');
+        if (activeItem) {
+            activeItem.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'auto' });
+        }
+    }
+
+    function exitFullscreen() {
+        if (!state.fullscreen) {
+            return;
+        }
+        state.fullscreen = false;
+        els.chatApp.classList.remove('fullscreen');
+        if (state.savedSidebarStateBeforeFullscreen) {
+            applySidebarState(state.savedSidebarStateBeforeFullscreen);
+            state.savedSidebarStateBeforeFullscreen = null;
+        }
+    }
+
+    function toggleFullscreen() {
+        if (state.fullscreen) {
+            exitFullscreen();
+        } else {
+            enterFullscreen();
+        }
     }
 
     // === 群組刪除／訊息清除對話框與收斂 ===
@@ -1378,7 +1447,51 @@
         updateFollowUi();
     }
 
-    // === 側欄：群組列表 ===
+    // === 側欄：群組列表與全螢幕群組橫列 ===
+
+    // 取得群組未讀 badge 文字。規則：unreadCount > 0 且不是目前群組才顯示，超過 99 顯示 99+
+    function getUnreadBadgeText(group, currentGroupId = state.groupId) {
+        if (!group || !(group.unreadCount > 0) || group.groupId === currentGroupId) {
+            return null;
+        }
+        return group.unreadCount > 99 ? '99+' : String(group.unreadCount);
+    }
+
+    function renderFullscreenGroupBar() {
+        if (!els.fullscreenGroupBar) {
+            return;
+        }
+        els.fullscreenGroupBar.innerHTML = '';
+        for (const group of state.groups) {
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'fullscreen-group-item' + (group.groupId === state.groupId ? ' active' : '');
+            btn.dataset.groupId = group.groupId;
+            btn.title = group.displayName;
+            btn.setAttribute('aria-label', group.displayName);
+
+            const avatar = buildAvatarElement('fullscreen-group-avatar', {
+                pictureUrl: group.pictureUrl,
+                iconKey: 'group',
+                isGroup: true
+            });
+            btn.appendChild(avatar);
+
+            const badgeText = getUnreadBadgeText(group, state.groupId);
+            if (badgeText) {
+                const badge = document.createElement('span');
+                badge.className = 'fullscreen-group-badge';
+                badge.textContent = badgeText;
+                btn.appendChild(badge);
+            }
+
+            btn.addEventListener('click', () => {
+                selectGroup(group.groupId);
+            });
+
+            els.fullscreenGroupBar.appendChild(btn);
+        }
+    }
 
     function renderGroupList(filterText) {
         const filter = (filterText || '').trim().toLowerCase();
@@ -1393,6 +1506,11 @@
             empty.className = 'group-list-empty';
             empty.textContent = '尚無群組資料';
             els.groupList.appendChild(empty);
+            if (state.fullscreen && els.fullscreenGroupBar) {
+                const prevScrollLeft = els.fullscreenGroupBar.scrollLeft;
+                renderFullscreenGroupBar();
+                els.fullscreenGroupBar.scrollLeft = prevScrollLeft;
+            }
             return;
         }
 
@@ -1401,11 +1519,22 @@
             empty.className = 'group-list-empty';
             empty.textContent = '找不到符合的群組';
             els.groupList.appendChild(empty);
+            if (state.fullscreen && els.fullscreenGroupBar) {
+                const prevScrollLeft = els.fullscreenGroupBar.scrollLeft;
+                renderFullscreenGroupBar();
+                els.fullscreenGroupBar.scrollLeft = prevScrollLeft;
+            }
             return;
         }
 
         for (const group of groups) {
             els.groupList.appendChild(createGroupItem(group));
+        }
+
+        if (state.fullscreen && els.fullscreenGroupBar) {
+            const prevScrollLeft = els.fullscreenGroupBar.scrollLeft;
+            renderFullscreenGroupBar();
+            els.fullscreenGroupBar.scrollLeft = prevScrollLeft;
         }
     }
 
@@ -1455,10 +1584,11 @@
         }
 
         // 正在看的群組視為已讀，不顯示 badge；其餘顯示未讀數，上限 99+
-        if (group.unreadCount > 0 && group.groupId !== state.groupId) {
+        const badgeText = getUnreadBadgeText(group, state.groupId);
+        if (badgeText) {
             const badge = document.createElement('span');
             badge.className = 'group-item-badge';
-            badge.textContent = group.unreadCount > 99 ? '99+' : String(group.unreadCount);
+            badge.textContent = badgeText;
             meta.appendChild(badge);
         }
 
@@ -1487,6 +1617,15 @@
             // 選取中的群組不顯示未讀 badge（開啟即已讀），立即把既有 badge 拿掉
             if (isActive) {
                 item.querySelector('.group-item-badge')?.remove();
+            }
+        }
+        if (els.fullscreenGroupBar) {
+            for (const item of els.fullscreenGroupBar.querySelectorAll('.fullscreen-group-item')) {
+                const isActive = item.dataset.groupId === state.groupId;
+                item.classList.toggle('active', isActive);
+                if (isActive) {
+                    item.querySelector('.fullscreen-group-badge')?.remove();
+                }
             }
         }
     }
@@ -2357,6 +2496,8 @@
 
     async function init() {
         els.chatApp = $('chat-app');
+        els.chatPanel = $('chat-panel');
+        els.fullscreenGroupBar = $('fullscreen-group-bar');
         els.sidebar = $('sidebar');
         els.groupSearch = $('group-search');
         els.groupList = $('group-list');
@@ -2453,6 +2594,27 @@
             });
         }
         els.historicalBackBtn.addEventListener('click', () => selectGroup(state.groupId));
+
+        attachContextMenuTriggers(els.chatPanel, (e) => showPanelContextMenu(e), isExcludedContextTarget);
+
+        document.addEventListener('keydown', (e) => {
+            if (e.key !== 'Escape' || !state.fullscreen) {
+                return;
+            }
+            if (activeContextMenu) {
+                return;
+            }
+            if (document.querySelector('.modal.show')) {
+                return;
+            }
+            if (els.searchPanel && !els.searchPanel.classList.contains('d-none')) {
+                closeSearchPanel();
+                e.preventDefault();
+                return;
+            }
+            e.preventDefault();
+            exitFullscreen();
+        });
 
         // 設定 modal 關掉時，如果這次開啟期間真的改了東西（名稱顯示模式、關鍵字規則等），
         // settings.js 會發這個事件——重新載入目前群組的訊息視窗＋側欄，不用使用者自己重新整理
