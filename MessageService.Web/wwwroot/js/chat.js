@@ -1896,8 +1896,15 @@
 
     const FONT_BASE_PX_STORAGE_KEY = 'chat-font-base-px';
     const DEFAULT_FONT_BASE_PX = 20;
-    const FONT_BASE_PX_MIN = 12;
+    const FONT_BASE_PX_MIN = 8;
     const FONT_BASE_PX_MAX = 28;
+
+    window.messageServiceFont = {
+        FONT_BASE_PX_STORAGE_KEY,
+        FONT_BASE_PX_MIN,
+        FONT_BASE_PX_MAX,
+        DEFAULT_FONT_BASE_PX
+    };
 
     // 「中」檔的實際 px 大小，跟設定 modal 的「字體大小」數值輸入共用同一個 localStorage key；
     // 這裡只讀不寫——調整數值的介面在設定 modal，聊天頁的 Aa 選單維持小/中/大三檔切換。

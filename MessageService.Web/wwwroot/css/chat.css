@@ -363,9 +363,9 @@ body.chat-page .chat-app {
 }
 
 .message-row .avatar {
-    width: 2.1rem;
-    height: 2.1rem;
-    font-size: 1.05rem;
+    width: calc(var(--chat-base-current) * 2.1rem / 1.15rem);
+    height: calc(var(--chat-base-current) * 2.1rem / 1.15rem);
+    font-size: calc(var(--chat-base-current) * 1.05rem / 1.15rem);
     visibility: hidden;
 }
 
@@ -714,8 +714,10 @@ body.chat-page .chat-app {
 .message-list {
     flex: 1 1 auto;
     overflow-y: auto;
-    /* 頂端留白要跟著載入更早膠囊的字級一起長高，字級最大檔時膠囊才不會蓋到第一則訊息 */
-    padding: calc(1.8rem + 1rem * var(--font-scale, 1)) var(--gutter) var(--gutter);
+    /* 頂端留白：1.2rem 涵蓋膠囊的 top (.6rem) 與上下 padding (.6rem)；
+       後項依 --chat-base-current 等比放大（係數 1.5rem / 1.15rem 高於膠囊字級的 .9rem / 1.15rem * 行高），
+       確保在 8px～28px 全區間膠囊皆不遮擋第一則訊息，且小字級時不會殘留過大空白 */
+    padding: calc(1.2rem + var(--chat-base-current) * 1.5rem / 1.15rem) var(--gutter) var(--gutter);
     display: flex;
     flex-direction: column;
 }

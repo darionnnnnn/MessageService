@@ -65,10 +65,11 @@ html {
    （設定 modal 跟聊天畫面共用同一顆變數，在 modal 裡調字級，背後的聊天畫面會即時跟著變）；
    這裡刻意不直接宣告預設值——同元素宣告的優先權贏過繼承值，寫死在這裡會讓 inline style 蓋不掉，
    沒自訂時交給 var(--font-base-px, 20px) 的第二參數 fallback。
+   設定 modal 是控制面板，字級以 max(12px, ...) 套下限以確保介面可讀性（聊天頁不受此下限限制）。
    Bootstrap 元件（.form-control-sm/.btn-sm 等）自己設定了 font-size，選擇器
    加上 .settings-app 前綴讓 specificity 比它們高，改成 1em 才會吃到這裡的字級 */
 .settings-app {
-  font-size: var(--font-base-px, 20px);
+  font-size: max(12px, var(--font-base-px, 20px));
   display: flex;
   flex-direction: column;
   gap: 1.25rem;
@@ -97,7 +98,7 @@ html {
 }
 
 .settings-card-title {
-  font-size: calc(var(--font-base-px, 20px) * 1.15);
+  font-size: calc(max(12px, var(--font-base-px, 20px)) * 1.15);
   font-weight: 600;
   margin-bottom: 1rem;
 }

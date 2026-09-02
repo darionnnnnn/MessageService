@@ -630,10 +630,12 @@
     // === 字體大小（跟對話頁共用同一份 localStorage key，這裡改了對話頁下次開啟也會吃到；
     //     對話頁的「中」檔＝這裡設定的數值，「小」「大」依既有比例跟著調整） ===
 
-    const FONT_BASE_PX_STORAGE_KEY = 'chat-font-base-px';
-    const DEFAULT_FONT_BASE_PX = 20;
-    const FONT_BASE_PX_MIN = 12;
-    const FONT_BASE_PX_MAX = 28;
+    const {
+        FONT_BASE_PX_STORAGE_KEY,
+        FONT_BASE_PX_MIN,
+        FONT_BASE_PX_MAX,
+        DEFAULT_FONT_BASE_PX
+    } = window.messageServiceFont;
 
     function loadFontBasePx() {
         let saved;
@@ -654,6 +656,8 @@
     }
 
     function initFontBasePx() {
+        els.fontBasePxInput.setAttribute('min', String(FONT_BASE_PX_MIN));
+        els.fontBasePxInput.setAttribute('max', String(FONT_BASE_PX_MAX));
         // 頁面載入時 chat.js 已經套用過一次同一份設定，這裡只需要把輸入框的顯示值補上
         els.fontBasePxInput.value = loadFontBasePx();
 
