@@ -73,7 +73,7 @@
         sidebarState: 'expanded',
         sidebarWidth: 320,
         fullscreen: false,
-        savedSidebarStateBeforeFullscreen: null,
+        pendingDeleteModalHide: false,
         pendingContentIds: new Set(),
         lastAppendedDateKey: null,
         lastAppendedSenderId: null,
@@ -722,6 +722,7 @@
 
         // 不可逆操作：點背景與 Esc 都不關閉，只能按「取消」或「確認」離開，
         // 執行期間兩個按鈕都會被停用，避免中途關掉對話框卻不知道刪除有沒有完成
+        state.pendingDeleteModalHide = false;
         const modalInstance = bootstrap.Modal.getOrCreateInstance(els.groupDeleteModal, {
             backdrop: 'static',
             keyboard: false
@@ -738,16 +739,11 @@
             return;
         }
 
-        // 先掛好「淡入結束就再關一次」的守衛再呼叫 hide()，並在真的關掉時把它拆掉。
-        // 不用「hide() 之後還有沒有 show class」來判斷——Bootstrap 的 hide() 有多條提早
-        // return 的路徑，只有轉場中那條是我們要補的；靠 class 猜會在其他路徑留下一個
-        // 永不觸發的監聽器，等下一次開啟對話框時才引爆（淡入完成的瞬間自己關掉）
-        const hideAfterShown = () => instance.hide();
-        els.groupDeleteModal.addEventListener('shown.bs.modal', hideAfterShown, { once: true });
-        els.groupDeleteModal.addEventListener('hidden.bs.modal', () => {
-            els.groupDeleteModal.removeEventListener('shown.bs.modal', hideAfterShown);
-        }, { once: true });
-
+        // Bootstrap 在淡入轉場結束前呼叫 hide() 會被直接忽略。這裡不每次掛 once 監聯器
+        // （hide() 有多條提早 return 的路徑，任何一條沒觸發 shown/hidden 就會留下殘留監聽器，
+        // 等下一次開啟才引爆），改用一個旗標：初始化時掛好常駐的 shown.bs.modal 監聽，
+        // 看到旗標就補關一次；openDeleteModal 開啟前一律清旗標，殘留不可能跨到下一次
+        state.pendingDeleteModalHide = true;
         instance.hide();
     }
 
@@ -1258,10 +1254,15 @@
         if (!state.following || state.historicalView) {
             return;
         }
-        // 平滑捲動途中內容又長高的話，原本的目標值已經過期——用平滑重新瞄準新的底部，
-        // 順便延長 autoScrolling 的保護期；不是平滑捲動期間就直接瞬跳，
-        // 免得每張圖片載入完都放一次動畫
-        scrollToBottom(state.autoScrolling);
+        if (state.autoScrolling) {
+            // 平滑捲動途中內容又長高：只重新瞄準新的底部，**不重設**保護期。
+            // 走 scrollToBottom(true) 會重新計時 1 秒，多張圖片陸續載入時保護期被無限延長，
+            // 使用者這段期間往上捲會被忽略、再被下一次補捲拉回底部，形同捲不上去
+            els.messageList.scrollTo({ top: els.messageList.scrollHeight, behavior: 'smooth' });
+            return;
+        }
+        // 不在平滑捲動期間就直接瞬跳，免得每張圖片載入完都放一次動畫
+        scrollToBottom(false);
     }
 
     // 對容器內的媒體元素掛一次性的載入事件；error 也要掛，載入失敗同樣會改變高度
@@ -1285,7 +1286,6 @@
         const row = document.createElement('div');
         row.className = 'message-row' + (showAvatarAndName ? ' show-avatar' : '');
         row.dataset.messageId = String(message.id);
-
 
         const avatar = buildAvatarElement('', {
             pictureUrl: message.pictureUrl,
@@ -2636,6 +2636,16 @@
         els.groupDeleteModalP3 = $('group-delete-modal-p3');
         els.groupDeleteCancelBtn = $('group-delete-cancel-btn');
         els.groupDeleteConfirmBtn = $('group-delete-confirm-btn');
+        // 見 hideDeleteModal：淡入中被忽略的 hide() 在轉場結束後補做
+        els.groupDeleteModal.addEventListener('shown.bs.modal', () => {
+            if (state.pendingDeleteModalHide) {
+                state.pendingDeleteModalHide = false;
+                bootstrap.Modal.getInstance(els.groupDeleteModal)?.hide();
+            }
+        });
+        els.groupDeleteModal.addEventListener('hidden.bs.modal', () => {
+            state.pendingDeleteModalHide = false;
+        });
 
         initFontSizeToggle();
         applyChatWidth();

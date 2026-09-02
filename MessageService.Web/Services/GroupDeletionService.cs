@@ -20,6 +20,7 @@ public class GroupDeletionService(
     MessageDbContext dbContext,
     IMaskingService maskingService,
     IHttpContextAccessor httpContextAccessor,
+    TimeProvider timeProvider,
     ILogger<GroupDeletionService> logger)
 {
     private const int BatchSize = 1000;
@@ -132,7 +133,7 @@ public class GroupDeletionService(
                 break;
             }
 
-            await Task.Delay(DelayBetweenBatches, ct);
+            await Task.Delay(DelayBetweenBatches, timeProvider, ct);
         }
 
         if (clearPointers)
@@ -150,8 +151,11 @@ public class GroupDeletionService(
             var latestId = latest?.Id;
             var latestAt = latest?.EventTimestamp;
 
+            // 只在指標已經失效（null 或指向被刪掉的列）時才回寫：上面 SELECT 與這裡 UPDATE
+            // 之間若有新訊息落地、tracker 已寫好有效指標，無條件覆寫會把它蓋成舊值
             await dbContext.Groups
-                .Where(g => g.GroupId == groupId)
+                .Where(g => g.GroupId == groupId
+                    && !dbContext.GroupMessages.Any(m => m.Id == g.LastMessageId))
                 .ExecuteUpdateAsync(s => s
                     .SetProperty(g => g.LastMessageId, latestId)
                     .SetProperty(g => g.LastMessageAt, latestAt),

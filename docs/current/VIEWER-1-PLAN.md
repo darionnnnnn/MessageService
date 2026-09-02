@@ -1,6 +1,6 @@
 # VIEWER-1 規劃：群組刪除＋訊息高亮
 
-> 狀態：兩段全案完成，待實測後併 dev
+> 狀態：全案完成已併 dev（兩段共 A～H 八個作業；實作 Claude Opus 5，體檢 Claude Fable 5.1）
 > 基準：dev@f94aa41（1284 綠，依 EDGEOPS-3 收尾紀錄）
 > 來源：新功能需求三項（群組右鍵刪群組／刪歷史訊息；關鍵字與人員高亮）
 > 實作方式：整輪委派 **agy**（`gemini-delegate`），Claude 負責規格、逐段驗收、終檢
@@ -340,6 +340,47 @@
 - 現行文件已同步：README 補了字級範圍與縮放規則、高亮強度、關鍵字文字標記、
   全螢幕模式、載入更早的顯示時機、跟隨模式的釘底機制、搜尋標記跳過連結。
   部署文件與 `CLAUDE.md` 經確認不受本段影響（無設定項、無 API、無 migration，測試基線仍為 1308）。
+
+## 體檢輪修正（換模型獨立體檢）
+
+體檢方 Claude Fable 5.1 對 `dev..feature/viewer-1` 全 diff 各角度掃一次，並單獨重掃實作方
+最後兩個手改 commit（`78f9ef0`、`a2791eb`，先前沒有任何獨立驗收看過）。
+
+**修掉的**
+
+| 哪裡 | 症狀 | 怎麼修 | 迴歸測試 |
+|---|---|---|---|
+| `chat.js` `repinToBottomIfFollowing` | 平滑捲動中補捲走 `scrollToBottom(true)` 會重設 1 秒保護期；多張圖片陸續載入時保護期被無限延長，使用者往上捲被忽略又被拉回底部，形同捲不上去 | 平滑捲動中只 `scrollTo` 重新瞄準新底部、不重設保護期；非平滑期間維持瞬跳 | 無 JS 測試框架；瀏覽器面板節流無法實測動畫，以程式碼路徑核對 |
+| `chat.js` `hideDeleteModal` | 每次呼叫掛兩個 once 監聽器，`hide()` 走任何一條提早 return 路徑就殘留、下次開對話框在淡入完成瞬間自關；註解宣稱已排除但不成立（目前呼叫端不可達，屬未來地雷） | 改為初始化時掛常駐 `shown.bs.modal` 監聽＋`pendingDeleteModalHide` 旗標；`openDeleteModal` 開啟前清旗標，殘留不可能跨次 | 同上 |
+| `GroupDeletionService` 指標回寫 | SELECT 最新一則與 UPDATE 之間若有新訊息落地、tracker 已寫好有效指標，無條件覆寫會蓋成舊值（比分批期間更窄但仍存在的窗口） | UPDATE 加條件：只在 `LastMessageId` 為 null 或指向已不存在的列時回寫 | 既有 `DeleteMessages_RemovesMessagesButKeepsGroup` 等 9 條照綠（EF 可翻譯該 NOT EXISTS 條件）；競態本身無法在測試中重現 |
+| `GroupDeletionService` `Task.Delay` | 批次間讓路沒注入 `TimeProvider`，違反 `CLAUDE.md` 節流類邏輯的紀律 | 注入 `TimeProvider`，改用 `Task.Delay(delay, timeProvider, ct)` | 既有測試照綠 |
+| `chat.js` / `settings.js` 死碼 | `savedSidebarStateBeforeFullscreen` 欄位（上一輪修正移除了讀寫點）、settings.js 未使用的 `hexToGlow`、`DEFAULT_HIGHLIGHT_OPACITY` 解構 | 刪除 | — |
+| 格式 | `HighlightKeyword.cs` 檔尾缺換行、`chat.js` 一處雙空行 | 補齊 | — |
+| 現行文件 | README 把「為什麼」寫進現行文件（配色理由、40px 門檻理由、ResizeObserver 節流細節、Fullscreen 不記憶的理由等）；設定頁籤數仍寫四個（實為五個）；刪訊息 API 寫成「回各表筆數」（實際其餘欄位固定 0）、「指標歸零」（實際是重算）；刪群組 API 與資料表段重複解釋裸 GroupId；既有的「不再是獨立頁面／已移除」敘事；DEPLOYMENT-MODES「已經不是純讀」對照式語氣 | 依 `CLAUDE.md` 寫作紀律刪理由、改直述、去重複、修數值 | — |
+| `CLAUDE.md` | 本輪踩到且會再發生的兩顆地雷未入紀律 | 補「Bootstrap modal 淡入中 hide() 被忽略」與「ResizeObserver 初始回呼」兩條 | — |
+
+**查證後判定不成立或屬既有設計，不修**
+
+- 「`loadOlder` 兩條路徑捲動行為不一致」：`growWindow` 分支只在視窗一則訊息都沒有時成立，
+  此時沒有可錨定的位置，重繪後捲到底是既有設計（README 已描述），不是本輪引入。
+- 「頭貼與群組項目的 `stopPropagation` 冗餘」：面板層的排除清單確實已擋住，兩道防線並存；
+  保留作為第二道，不擴散行為。
+- 「字級讀取邏輯在兩檔各一份、越界策略與強度不一致」：既有重複，本輪作業 E 只定案收斂常數；
+  屬順手重構範圍，記錄下一輪。
+- 「`HighlightUsers` 缺唯一索引」：B-1 刻意選應用層去重（SQLite 與 SQL Server 對 NULL 在唯一索引
+  的語意不同），已在定案寫明。
+
+**新增的遺留（下一輪）**
+
+- 全螢幕群組頭貼列沒有右鍵刪除選單，全螢幕時無法對群組執行刪除（側欄不可見）。功能缺口，非缺陷。
+- `ApplyHighlightGroupSelection` 在 `ApplyToAllGroups=true` 同時帶 `GroupIds` 時靜默丟棄後者，未回 400。
+
+體檢後全量測試：**1308 綠**，失敗 0。
+
+## 終檢輪
+
+併回 dev 後對合併結果再掃一次：規劃比對、體檢修正 commit 是否引入新問題、文件稽核。
+（結果見下方「終檢輪結果」，併回時填寫。）
 
 ## 追加作業的明確不做
 - 高亮規則改存本機。

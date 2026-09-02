@@ -139,7 +139,6 @@
 
     const {
         buildHighlightGradient,
-        hexToGlow,
         computeHighlightGlow,
         normalizeHexColor,
         loadHighlightFlow,
@@ -153,7 +152,6 @@
         HIGHLIGHT_COLORS_STORAGE_KEY,
         HIGHLIGHT_OPACITY_STORAGE_KEY,
         DEFAULT_HIGHLIGHT_COLORS,
-        DEFAULT_HIGHLIGHT_OPACITY,
         MAX_HIGHLIGHT_COLORS
     } = window.messageServiceHighlight;
     const MIN_HIGHLIGHT_COLORS = 1;
