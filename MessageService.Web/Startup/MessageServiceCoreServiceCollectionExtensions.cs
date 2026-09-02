@@ -207,6 +207,8 @@ public static class MessageServiceCoreServiceCollectionExtensions
             builder.Services.AddScoped<ContentStreamService>();
             builder.Services.AddScoped<IMaskingService, MaskingService>();
             builder.Services.AddScoped<IAnonymousIdentityService, AnonymousIdentityService>();
+            // 刪除是不可逆操作，稽核 log 要記來源 IP（本站沒有登入機制，那是唯一的識別）
+            builder.Services.AddHttpContextAccessor();
             builder.Services.AddScoped<GroupDeletionService>();
         }
 

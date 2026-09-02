@@ -141,11 +141,13 @@
         buildHighlightGradient,
         hexToGlow,
         normalizeHexColor,
+        loadHighlightFlow,
+        loadHighlightColors,
         HIGHLIGHT_FLOW_STORAGE_KEY,
         HIGHLIGHT_COLORS_STORAGE_KEY,
-        DEFAULT_HIGHLIGHT_COLORS
+        DEFAULT_HIGHLIGHT_COLORS,
+        MAX_HIGHLIGHT_COLORS
     } = window.messageServiceHighlight;
-    const MAX_HIGHLIGHT_COLORS = 8;
     const MIN_HIGHLIGHT_COLORS = 1;
     const PRESET_HIGHLIGHT_COLORS = [
         { hex: '#06c755', name: '綠' },
@@ -306,39 +308,12 @@
 
     // --- 顯示效果（流動開關與顏色） ---
 
-    function loadHighlightFlow() {
-        try {
-            const saved = localStorage.getItem(HIGHLIGHT_FLOW_STORAGE_KEY);
-            return saved === null ? true : saved === '1';
-        } catch {
-            return true;
-        }
-    }
-
     function saveHighlightFlow(enabled) {
         try {
             localStorage.setItem(HIGHLIGHT_FLOW_STORAGE_KEY, enabled ? '1' : '0');
         } catch {
             // localStorage 不可用就只套用當次工作階段
         }
-    }
-
-    function loadHighlightColors() {
-        try {
-            const saved = localStorage.getItem(HIGHLIGHT_COLORS_STORAGE_KEY);
-            if (saved) {
-                const parsed = JSON.parse(saved);
-                if (Array.isArray(parsed)) {
-                    const normalized = parsed.map(normalizeHexColor).filter(Boolean);
-                    if (normalized.length > 0) {
-                        return normalized.slice(0, MAX_HIGHLIGHT_COLORS);
-                    }
-                }
-            }
-        } catch {
-            // 解析失敗或存取失敗 fallback 回預設值
-        }
-        return [...DEFAULT_HIGHLIGHT_COLORS];
     }
 
     function saveHighlightColors(colors) {

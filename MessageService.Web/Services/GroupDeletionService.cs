@@ -1,5 +1,6 @@
 using MessageService.Data;
 using MessageService.Web.Services;
+using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 
@@ -8,7 +9,8 @@ namespace MessageService.Web.Services;
 public sealed record GroupMessageDeletionResult(int MessageCount);
 
 public sealed record GroupDeletionResult(
-    int MessageCount, int MemberCount, int AnonymousIdentityCount, int MaskKeywordScopeCount);
+    int MessageCount, int MemberCount, int AnonymousIdentityCount, int MaskKeywordScopeCount,
+    int HighlightScopeCount);
 
 /// <summary>
 /// 提供群組歷史訊息刪除與群組本體刪除服務。
@@ -17,10 +19,16 @@ public sealed record GroupDeletionResult(
 public class GroupDeletionService(
     MessageDbContext dbContext,
     IMaskingService maskingService,
+    IHttpContextAccessor httpContextAccessor,
     ILogger<GroupDeletionService> logger)
 {
     private const int BatchSize = 1000;
     private static readonly TimeSpan DelayBetweenBatches = TimeSpan.FromMilliseconds(200);
+
+    /// <summary>刪除是不可逆操作，而且這個站台沒有登入機制（守衛只有 IP 白名單），
+    /// 所以稽核記錄只剩來源 IP 這一項可用。取不到時記 unknown，不要讓記 log 失敗連累刪除。</summary>
+    private string DescribeClient()
+        => httpContextAccessor.HttpContext?.Connection.RemoteIpAddress?.ToString() ?? "unknown";
 
     /// <summary>刪除指定群組的全部歷史訊息，群組本體與成員快取保留。</summary>
     public async Task<GroupMessageDeletionResult?> DeleteMessagesAsync(string groupId, CancellationToken ct)
@@ -33,7 +41,9 @@ public class GroupDeletionService(
 
         var messageCount = await DeleteMessagesCoreAsync(groupId, clearPointers: true, ct);
 
-        logger.LogWarning("Deleted {Count} historical message(s) for group {GroupId}", messageCount, groupId);
+        logger.LogWarning(
+            "Deleted {Count} historical message(s) for group {GroupId} (requested by {ClientIp})",
+            messageCount, groupId, DescribeClient());
         LogSqliteSpaceWarningIfApplicable(messageCount, "刪除歷史訊息");
 
         return new GroupMessageDeletionResult(messageCount);
@@ -62,6 +72,17 @@ public class GroupDeletionService(
             .Where(g => g.GroupId == groupId)
             .ExecuteDeleteAsync(ct);
 
+        // 高亮規則的兩張表同樣只有裸 GroupId、沒有指向 Groups 的 FK，DB 不會級聯。
+        // 不刪的話會留下指向已不存在群組的殭屍規則：設定頁的「套用範圍」會退回顯示原始
+        // LINE groupId，而且 bot 重新加入同一個群組時舊規則會靜默復活
+        var highlightScopeCount = await dbContext.HighlightKeywordGroups
+            .Where(g => g.GroupId == groupId)
+            .ExecuteDeleteAsync(ct);
+
+        highlightScopeCount += await dbContext.HighlightUsers
+            .Where(u => u.GroupId == groupId)
+            .ExecuteDeleteAsync(ct);
+
         await dbContext.Groups
             .Where(g => g.GroupId == groupId)
             .ExecuteDeleteAsync(ct);
@@ -72,12 +93,15 @@ public class GroupDeletionService(
         }
 
         logger.LogWarning(
-            "Deleted group {GroupId}: {MessageCount} message(s), {MemberCount} member(s), {AnonymousCount} anonymous identity/identities, {MaskCount} mask keyword scope(s)",
-            groupId, messageCount, memberCount, anonymousIdentityCount, maskKeywordScopeCount);
+            "Deleted group {GroupId} (requested by {ClientIp}): {MessageCount} message(s), {MemberCount} member(s), "
+            + "{AnonymousCount} anonymous identity/identities, {MaskCount} mask keyword scope(s), {HighlightCount} highlight rule(s)",
+            groupId, DescribeClient(), messageCount, memberCount, anonymousIdentityCount,
+            maskKeywordScopeCount, highlightScopeCount);
 
         LogSqliteSpaceWarningIfApplicable(messageCount, "刪除群組");
 
-        return new GroupDeletionResult(messageCount, memberCount, anonymousIdentityCount, maskKeywordScopeCount);
+        return new GroupDeletionResult(
+            messageCount, memberCount, anonymousIdentityCount, maskKeywordScopeCount, highlightScopeCount);
     }
 
     /// <summary>分批刪除群組訊息、依需要清空指標，並在結尾清理孤兒 Blob。</summary>
@@ -113,11 +137,24 @@ public class GroupDeletionService(
 
         if (clearPointers)
         {
+            // 重算而不是無條件寫 null：大群組的分批刪除會跑好幾秒，期間新落地的訊息已經由
+            // GroupLastMessageTracker 寫好指標，寫死 null 會把它蓋掉——側欄從此看不到這個群組
+            // （清單只列 LastMessageId != null），而且 GroupsController 的漂移自癒只處理
+            // 「指標有值但查不到那列」，指標是 null 時不會觸發，要等下一則訊息才會恢復
+            var latest = await dbContext.GroupMessages
+                .Where(m => m.GroupId == groupId)
+                .OrderByDescending(m => m.Id)
+                .Select(m => new { m.Id, m.EventTimestamp })
+                .FirstOrDefaultAsync(ct);
+
+            var latestId = latest?.Id;
+            var latestAt = latest?.EventTimestamp;
+
             await dbContext.Groups
                 .Where(g => g.GroupId == groupId)
                 .ExecuteUpdateAsync(s => s
-                    .SetProperty(g => g.LastMessageId, (long?)null)
-                    .SetProperty(g => g.LastMessageAt, (DateTimeOffset?)null),
+                    .SetProperty(g => g.LastMessageId, latestId)
+                    .SetProperty(g => g.LastMessageAt, latestAt),
                     ct);
         }
 

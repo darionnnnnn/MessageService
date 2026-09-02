@@ -55,7 +55,7 @@ public class GroupsController(
             return NotFound();
         }
 
-        return Ok(new GroupDeletionResultDto(result.MessageCount, 0, 0, 0));
+        return Ok(new GroupDeletionResultDto(result.MessageCount, 0, 0, 0, 0));
     }
 
     /// <summary>刪除指定群組本體及其所有相關資料。</summary>
@@ -70,7 +70,8 @@ public class GroupsController(
         }
 
         return Ok(new GroupDeletionResultDto(
-            result.MessageCount, result.MemberCount, result.AnonymousIdentityCount, result.MaskKeywordScopeCount));
+            result.MessageCount, result.MemberCount, result.AnonymousIdentityCount,
+            result.MaskKeywordScopeCount, result.HighlightScopeCount));
     }
 
     private async Task<ActionResult<IReadOnlyList<GroupDto>>> BuildGroupListAsync(

@@ -25,6 +25,8 @@
     const DEFAULT_FONT_SIZE = 'medium';
     const HIGHLIGHT_FLOW_STORAGE_KEY = 'chat-highlight-flow';
     const HIGHLIGHT_COLORS_STORAGE_KEY = 'chat-highlight-colors';
+    // 顏色數量上限只有這一份定義，設定頁透過共享出口取用
+    const MAX_HIGHLIGHT_COLORS = 8;
     const DEFAULT_HIGHLIGHT_COLORS = ['#06c755', '#ffc53d', '#ff6b57', '#a66cff'];
     const URL_REGEX = /(https?:\/\/[^\s]+)/g;
 
@@ -78,7 +80,10 @@
         searchRequestToken: 0,
         initialEmpty: false,
         highlightRules: { keywords: [], users: [] },
-        messagesCache: new Map()
+        // 高亮重掃時要對回訊息資料，但只需要這兩個欄位——存整包訊息物件會讓長時間停在
+        // 同一個群組的工作階段一直長大（輪詢每 3 秒往裡面塞）
+        messagesCache: new Map(),
+        groupsRefreshQueued: false
     };
 
     const els = {};
@@ -162,7 +167,7 @@
                 if (Array.isArray(parsed)) {
                     const normalized = parsed.map(normalizeHexColor).filter(Boolean);
                     if (normalized.length > 0) {
-                        return normalized.slice(0, 8);
+                        return normalized.slice(0, MAX_HIGHLIGHT_COLORS);
                     }
                 }
             }
@@ -186,9 +191,12 @@
         buildHighlightGradient,
         hexToGlow,
         normalizeHexColor,
+        loadHighlightFlow,
+        loadHighlightColors,
         HIGHLIGHT_FLOW_STORAGE_KEY,
         HIGHLIGHT_COLORS_STORAGE_KEY,
-        DEFAULT_HIGHLIGHT_COLORS
+        DEFAULT_HIGHLIGHT_COLORS,
+        MAX_HIGHLIGHT_COLORS
     };
 
     // === 通用快捷選單（Context Menu）===
@@ -583,7 +591,8 @@
 
         if (isMessagesOnly) {
             els.groupDeleteModalP1.textContent = `即將刪除「${group.displayName}」的全部歷史訊息，包含所有圖片、影片、語音與檔案。`;
-            els.groupDeleteModalP2.textContent = '刪除後無法復原。群組本身、成員與設定會保留。';
+            els.groupDeleteModalP2.textContent = '刪除後無法復原。群組的名稱、成員與設定會保留，但因為沒有訊息了，'
+                + '群組會從左側清單消失，直到有新訊息才會重新出現。';
             els.groupDeleteModalP3.classList.add('d-none');
         } else {
             els.groupDeleteModalP1.textContent = `即將刪除「${group.displayName}」，包含該群組的全部歷史訊息、圖片、影片、語音、檔案、成員快取與匿名代號。`;
@@ -611,10 +620,18 @@
         if (!instance) {
             return;
         }
+
+        // 先掛好「淡入結束就再關一次」的守衛再呼叫 hide()，並在真的關掉時把它拆掉。
+        // 不用「hide() 之後還有沒有 show class」來判斷——Bootstrap 的 hide() 有多條提早
+        // return 的路徑，只有轉場中那條是我們要補的；靠 class 猜會在其他路徑留下一個
+        // 永不觸發的監聽器，等下一次開啟對話框時才引爆（淡入完成的瞬間自己關掉）
+        const hideAfterShown = () => instance.hide();
+        els.groupDeleteModal.addEventListener('shown.bs.modal', hideAfterShown, { once: true });
+        els.groupDeleteModal.addEventListener('hidden.bs.modal', () => {
+            els.groupDeleteModal.removeEventListener('shown.bs.modal', hideAfterShown);
+        }, { once: true });
+
         instance.hide();
-        if (els.groupDeleteModal.classList.contains('show')) {
-            els.groupDeleteModal.addEventListener('shown.bs.modal', () => instance.hide(), { once: true });
-        }
     }
 
     async function executeGroupDelete(type, group) {
@@ -1092,7 +1109,7 @@
     function appendMessages(messages, animate) {
         const list = els.messageList;
         for (const message of messages) {
-            state.messagesCache.set(message.id, message);
+            state.messagesCache.set(message.id, { text: message.text, userId: message.userId });
             const key = dateKey(message.eventTimestamp);
             if (key !== state.lastAppendedDateKey) {
                 list.appendChild(createDateSeparator(message.eventTimestamp));
@@ -1132,7 +1149,7 @@
         let lastDateKey = null;
         let lastSenderId = null;
         for (const message of messages) {
-            state.messagesCache.set(message.id, message);
+            state.messagesCache.set(message.id, { text: message.text, userId: message.userId });
             const key = dateKey(message.eventTimestamp);
             if (key !== lastDateKey) {
                 fragment.appendChild(createDateSeparator(message.eventTimestamp));
@@ -1564,6 +1581,9 @@
     // 不能走 pollGroups——那支在分頁被判定為隱藏時會整個跳過，畫面會留著已經不存在的群組
     async function refreshGroupList() {
         if (state.groupsPolling) {
+            // 剛好有一次 10 秒輪詢在飛就排隊，等它結束再跑一次。直接 return 會讓
+            // 「刪除完成」的刷新被靜默丟掉，已刪除的群組會繼續留在側欄最多 10 秒
+            state.groupsRefreshQueued = true;
             return;
         }
         state.groupsPolling = true;
@@ -1617,6 +1637,11 @@
             }
         } finally {
             state.groupsPolling = false;
+        }
+
+        if (state.groupsRefreshQueued) {
+            state.groupsRefreshQueued = false;
+            await refreshGroupList();
         }
     }
 

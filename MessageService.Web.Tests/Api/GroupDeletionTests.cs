@@ -128,6 +128,8 @@ public class GroupDeletionTests : IDisposable
         Assert.Equal(1, await db.AnonymousIdentities.CountAsync(a => a.GroupId == groupId));
         Assert.Equal(1, await db.MaskKeywordGroups.CountAsync(g => g.GroupId == groupId));
         Assert.Equal(1, await db.UserAliases.CountAsync(u => u.UserId == userId));
+        // 只刪訊息的路徑不碰高亮規則，回傳的計數必為 0
+        Assert.Equal(0, dto.HighlightScopeCount);
     }
 
     [Fact]
@@ -300,6 +302,22 @@ public class GroupDeletionTests : IDisposable
                     }
                 });
 
+            // 高亮規則：一條逐群組的關鍵字範圍列、一筆綁該群組的人員規則、
+            // 一筆「全部群組」的人員規則（後者不可以被刪掉）
+            var highlightKeyword = new HighlightKeyword
+            {
+                Keyword = "警示",
+                ApplyToAllGroups = false
+            };
+            dbContext.HighlightKeywords.Add(highlightKeyword);
+            dbContext.HighlightKeywordGroups.Add(new HighlightKeywordGroup
+            {
+                HighlightKeyword = highlightKeyword,
+                GroupId = groupId
+            });
+            dbContext.HighlightUsers.Add(new HighlightUser { UserId = userId, GroupId = groupId });
+            dbContext.HighlightUsers.Add(new HighlightUser { UserId = userId, GroupId = null });
+
             // G2 作為隔離驗證對照
             dbContext.Groups.Add(new Group
             {
@@ -351,6 +369,13 @@ public class GroupDeletionTests : IDisposable
         Assert.Equal(0, await db.GroupMessages.CountAsync(m => m.GroupId == groupId));
         Assert.Empty(await db.MessageContents.ToListAsync());
         Assert.Empty(await db.MessageContentBlobs.ToListAsync());
+
+        // 高亮規則：綁這個群組的兩筆都要清掉，「全部群組」那筆與關鍵字本體要留著
+        Assert.Equal(0, await db.HighlightKeywordGroups.CountAsync(g => g.GroupId == groupId));
+        Assert.Equal(0, await db.HighlightUsers.CountAsync(u => u.GroupId == groupId));
+        Assert.Equal(1, await db.HighlightUsers.CountAsync(u => u.GroupId == null));
+        Assert.True(await db.HighlightKeywords.AnyAsync(k => k.Keyword == "警示"));
+        Assert.Equal(2, dto.HighlightScopeCount);
 
         // MaskKeywords 本體仍在
         Assert.True(await db.MaskKeywords.AnyAsync(k => k.Keyword == "機密"));
