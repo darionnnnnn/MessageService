@@ -6,7 +6,7 @@
     // 沒必要用同一個頻率打
     const GROUP_POLL_INTERVAL_MS = 10000;
     const NEAR_BOTTOM_THRESHOLD_PX = 80;
-    const NEAR_TOP_THRESHOLD_PX = 8;
+    const NEAR_TOP_THRESHOLD_PX = 40;
     const INITIAL_DAYS = 3;
     const LOAD_MORE_DAYS = 7;
     // 與 MessagesController.MaxDays 對齊；超過就別再放大視窗，免得按鈕變成按了沒反應
@@ -60,6 +60,7 @@
         // 每次切換群組就 +1；非同步請求回來時若對不上，代表是前一個群組的過期回應，必須丟棄
         requestToken: 0,
         following: true,
+        autoScrolling: false,
         unreadCount: 0,
         // 側欄各群組的「最後已讀訊息 Id」基準，每台裝置各自記在 localStorage（見 READ_STATE_KEY）。
         // 未讀數字本身由後端依這份基準計算，前端只負責維護基準
@@ -783,6 +784,7 @@
     }
 
     function resetChatPanel() {
+        stopAutoScroll();
         state.groupId = null;
         state.oldestId = null;
         state.newestId = null;
@@ -1233,10 +1235,40 @@
         return buildReadyContentNode(type, content.id, content.fileName);
     }
 
+    // 跟隨模式下把底部釘住。ResizeObserver 是主要機制，但它的回呼要等一個繪製框架——
+    // 分頁被瀏覽器節流時（背景分頁、某些嵌入式檢視）不會觸發，媒體載入完成撐高列表就漏接了。
+    // 媒體元素的 load／loadedmetadata 事件不受繪製節流影響，兩條路徑並用才涵蓋得完整。
+    function repinToBottomIfFollowing() {
+        if (state.following && !state.historicalView) {
+            scrollToBottom(false);
+        }
+    }
+
+    // 對容器內的媒體元素掛一次性的載入事件；error 也要掛，載入失敗同樣會改變高度
+    // （fallback 內容取代原本的佔位），不掛的話失敗那一則就會把畫面卡在半空中
+    function watchMediaForRepin(container) {
+        for (const media of container.querySelectorAll('img, video, audio')) {
+            if (media.dataset.repinBound === '1') {
+                continue;
+            }
+            media.dataset.repinBound = '1';
+            const done = () => repinToBottomIfFollowing();
+            media.addEventListener('load', done, { once: true });
+            media.addEventListener('error', done, { once: true });
+            if (media.tagName !== 'IMG') {
+                media.addEventListener('loadedmetadata', done, { once: true });
+            }
+        }
+    }
+
     function createMessageRow(message, showAvatarAndName) {
         const row = document.createElement('div');
         row.className = 'message-row' + (showAvatarAndName ? ' show-avatar' : '');
         row.dataset.messageId = String(message.id);
+
+        if (messageResizeObserver) {
+            messageResizeObserver.observe(row);
+        }
 
         const avatar = buildAvatarElement('', {
             pictureUrl: message.pictureUrl,
@@ -1295,6 +1327,8 @@
         if (message.content && isDownloadInProgress(message.content.downloadStatus)) {
             state.pendingContentIds.add(message.content.id);
         }
+
+        watchMediaForRepin(row);
 
         return row;
     }
@@ -1374,6 +1408,16 @@
                 ? buildStickerFallbackNode({ text: '(貼圖)' }) 
                 : buildFailedNode());
         pendingEl.replaceWith(replacement);
+
+        // 「內容抓取中…」換成真實媒體是非同步撐高列表的另一條路徑：
+        // 換上去的當下高度還是佔位值，圖片解碼完才會長高，同樣要補捲
+        if (replacement instanceof Element) {
+            watchMediaForRepin(replacement);
+            if (replacement.matches('img, video, audio')) {
+                watchMediaForRepin(replacement.parentElement ?? replacement);
+            }
+        }
+        repinToBottomIfFollowing();
     }
 
     // === 圖片燈箱：預設縮到符合版面，點擊在「符合版面／原尺寸」間切換 ===
@@ -1414,6 +1458,29 @@
 
     // === 置底跟隨 ===
 
+    let autoScrollTimer = null;
+    let messageResizeObserver = null;
+
+    function stopAutoScroll() {
+        state.autoScrolling = false;
+        if (autoScrollTimer !== null) {
+            clearTimeout(autoScrollTimer);
+            autoScrollTimer = null;
+        }
+    }
+
+    function startAutoScroll() {
+        stopAutoScroll();
+        state.autoScrolling = true;
+        autoScrollTimer = setTimeout(() => {
+            stopAutoScroll();
+            const near = isNearBottom();
+            if (near !== state.following) {
+                setFollowing(near);
+            }
+        }, 1000);
+    }
+
     function isNearBottom() {
         const list = els.messageList;
         return list.scrollHeight - list.scrollTop - list.clientHeight < NEAR_BOTTOM_THRESHOLD_PX;
@@ -1424,6 +1491,11 @@
     }
 
     function scrollToBottom(smooth) {
+        if (smooth) {
+            startAutoScroll();
+        } else {
+            stopAutoScroll();
+        }
         els.messageList.scrollTo({ top: els.messageList.scrollHeight, behavior: smooth ? 'smooth' : 'auto' });
     }
 
@@ -1755,6 +1827,7 @@
     }
 
     async function jumpToSearchResult(result, query) {
+        stopAutoScroll();
         const token = ++state.requestToken;
 
         if (result.groupId !== state.groupId) {
@@ -1909,6 +1982,7 @@
     }
 
     async function selectGroup(groupId) {
+        stopAutoScroll();
         const token = ++state.requestToken;
 
         state.groupId = groupId;
@@ -1952,6 +2026,9 @@
     }
 
     function clearMessageList() {
+        if (messageResizeObserver) {
+            messageResizeObserver.disconnect();
+        }
         els.messageList.innerHTML = '';
         state.messagesCache.clear();
         state.pendingContentIds.clear();
@@ -1982,9 +2059,8 @@
     function updateLoadMoreButton() {
         els.loadMoreBtn.disabled = !state.hasMoreOlder;
         els.loadMoreBtn.textContent = state.hasMoreOlder ? '載入更早 7 天' : '沒有更早的訊息';
-        // 「載入更早」是操作入口，常駐；「沒有更早的訊息」只是告知狀態，捲到畫面中間看到很突兀，
-        // 只在捲到最頂部附近時才顯示
-        els.loadMoreBtn.classList.toggle('d-none', !state.hasMoreOlder && !isNearTop());
+        // 不論是否有更早訊息，膠囊只在捲到最頂部附近時才顯示
+        els.loadMoreBtn.classList.toggle('d-none', !isNearTop());
     }
 
     function updateLoadNewerButton() {
@@ -2546,6 +2622,8 @@
                 bootstrap.Modal.getInstance(els.imageModal)?.hide();
             }
         });
+        messageResizeObserver = new ResizeObserver(repinToBottomIfFollowing);
+
         els.loadMoreBtn.addEventListener('click', loadOlder);
         els.loadNewerBtn.addEventListener('click', loadNewer);
         els.groupSearch.addEventListener('input', () => renderGroupList(els.groupSearch.value));
@@ -2556,11 +2634,22 @@
         });
         els.messageList.addEventListener('scroll', () => {
             const near = isNearBottom();
-            if (near !== state.following) {
-                setFollowing(near);
+            if (near) {
+                if (state.autoScrolling) {
+                    stopAutoScroll();
+                }
+                if (!state.following) {
+                    setFollowing(true);
+                }
+            } else {
+                if (!state.autoScrolling) {
+                    if (state.following) {
+                        setFollowing(false);
+                    }
+                }
             }
             updateLoadMoreButton();
-            if (state.historicalView && isNearBottom()) {
+            if (state.historicalView && near) {
                 loadNewer();
             }
         });
