@@ -665,4 +665,44 @@ public class LineConnectivityTesterTests
 
         Assert.Empty(logger.Logs);
     }
+
+    [Fact]
+    public async Task TestConnectivityAsync_InternalTimeout_TaskCanceledException_ReturnsTimeoutDescriptionWithoutCallerInterrupted()
+    {
+        var factory = CreateFactory(_ => throw new TaskCanceledException("The operation was canceled."));
+        var options = new LineOptions { OutboundVia = LineOutboundVia.Direct };
+        var tester = CreateTester(factory, options);
+
+        var results = await tester.TestConnectivityAsync(cancellationToken: CancellationToken.None);
+
+        Assert.Equal(4, results.Count);
+        Assert.All(results, r =>
+        {
+            Assert.False(r.Success);
+            Assert.Contains("連線逾時", r.Description);
+            Assert.Contains(r.Target, r.Description);
+            Assert.DoesNotContain("呼叫端中斷", r.Description);
+        });
+    }
+
+    [Fact]
+    public async Task TestConnectivityAsync_ExternalTokenCancelled_ReturnsCancelledClassification()
+    {
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        var factory = CreateFactory(_ => throw new TaskCanceledException("The operation was canceled."));
+        var options = new LineOptions { OutboundVia = LineOutboundVia.Direct };
+        var tester = CreateTester(factory, options);
+
+        var results = await tester.TestConnectivityAsync(cancellationToken: cts.Token);
+
+        Assert.Equal(4, results.Count);
+        Assert.All(results, r =>
+        {
+            Assert.False(r.Success);
+            Assert.Contains("請求已取消", r.Description);
+            Assert.Contains("呼叫端中斷", r.Description);
+        });
+    }
 }

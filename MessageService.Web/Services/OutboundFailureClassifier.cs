@@ -72,7 +72,7 @@ public static class OutboundFailureClassifier
 
         if (requestError is HttpRequestError.NameResolutionError || socketError is SocketError.HostNotFound)
         {
-            return WithHost("DNS 解析失敗：{0}無法解析（防火牆或 DNS 設定）", host);
+            return WithCounterpart("DNS 解析失敗：{0}無法解析（防火牆或 DNS 設定）", host);
         }
 
         // 路由不可達與 DNS 解析失敗是兩回事：企業防火牆 DROP 掉封包時看到的是這一類，
@@ -80,12 +80,12 @@ public static class OutboundFailureClassifier
         if (socketError is SocketError.HostUnreachable or SocketError.NetworkUnreachable
             or SocketError.HostDown or SocketError.NetworkDown)
         {
-            return WithHost("網路無法到達：{0}沒有路由（防火牆 DROP 或路由設定）", host);
+            return WithCounterpart("網路無法到達：{0}沒有路由（防火牆 DROP 或路由設定）", host);
         }
 
         if (socketError is SocketError.ConnectionRefused)
         {
-            return WithHost("連線被拒：{0}拒絕連線（目標服務未啟動或防火牆 REJECT）", host);
+            return WithCounterpart("連線被拒：{0}拒絕連線（目標服務未啟動或防火牆 REJECT）", host);
         }
 
         if (tlsFailure || requestError is HttpRequestError.SecureConnectionError)
@@ -95,7 +95,7 @@ public static class OutboundFailureClassifier
 
         if (timedOut || socketError is SocketError.TimedOut)
         {
-            return WithHost("連線逾時：{0}沒有回應（防火牆很可能未開通）", host);
+            return WithCounterpart("連線逾時：{0}沒有回應（防火牆很可能未開通）", host);
         }
 
         // 取消要跟逾時分開：HttpClient 逾時丟的 TaskCanceledException 內層帶 TimeoutException
@@ -112,6 +112,13 @@ public static class OutboundFailureClassifier
     /// <summary>host 取不到時不要印出空括號或 null。</summary>
     private static string WithHost(string template, string? host) =>
         string.Format(template, host is null ? "" : $"{host} ");
+
+    /// <summary>連線層失敗的模板本身沒有主詞，host 取不到時要補一個，否則會變成
+    /// 「連線逾時：沒有回應」這種缺主詞的破句（實測心跳 log 出現過）。
+    /// 狀態碼類的不走這條：它們的模板自己已經有主詞（「對端伺服器錯誤」），
+    /// 而 <c>var other</c> 那條傳進來的是預先格式化好的「：host」字串、不是 host。</summary>
+    private static string WithCounterpart(string template, string? host) =>
+        WithHost(template, host ?? "對方");
 
     private static IEnumerable<Exception> EnumerateExceptions(Exception ex)
     {

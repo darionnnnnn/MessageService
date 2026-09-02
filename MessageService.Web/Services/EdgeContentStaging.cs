@@ -3,6 +3,10 @@ using Microsoft.Extensions.Options;
 
 namespace MessageService.Services;
 
+/// <summary>Accepted：回給 Core 的「我收下了」清單（含先前已收過的，語意不變）。
+/// NewlyAccepted：這次才第一次寫進暫存區的，只有這些需要入列下載。</summary>
+public sealed record ContentDispatchResult(IReadOnlyList<long> Accepted, IReadOnlyList<long> NewlyAccepted);
+
 /// <summary>拉取模式下，Edge 端已下載完成、等 Core 來取走的媒體暫存區。
 ///
 /// 走記憶體不落磁碟：Core 每秒輪詢一次，暫存的生命週期通常只有幾秒。代價是 Edge 重啟會遺失，
@@ -48,9 +52,10 @@ public class EdgeContentStaging(IOptions<IngestOptions> options)
     ///
     /// 已經在派工中或已下載完成的 Id 直接視為收下但不重複處理（冪等）：poll 回應遺失時
     /// Core 會重派同一批，不能因此下載兩次。</summary>
-    public IReadOnlyList<long> AcceptDispatch(IReadOnlyList<ContentWorkItem> items)
+    public ContentDispatchResult AcceptDispatch(IReadOnlyList<ContentWorkItem> items)
     {
         var accepted = new List<long>(items.Count);
+        var newlyAccepted = new List<long>(items.Count);
         lock (_syncLock)
         {
             foreach (var item in items)
@@ -69,9 +74,10 @@ public class EdgeContentStaging(IOptions<IngestOptions> options)
 
                 _dispatched[item.ContentId] = item;
                 accepted.Add(item.ContentId);
+                newlyAccepted.Add(item.ContentId);
             }
         }
-        return accepted;
+        return new ContentDispatchResult(accepted, newlyAccepted);
     }
 
     /// <summary>目前待下載的項目 Id（給 ContentDownloadService 的 work source 用）。</summary>
