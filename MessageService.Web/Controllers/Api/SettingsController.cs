@@ -347,6 +347,140 @@ public class SettingsController(
         return NoContent();
     }
 
+    // === 訊息高亮（作業 B-1）===
+
+    [HttpGet("highlight-keywords")]
+    public async Task<ActionResult<List<HighlightKeywordDto>>> GetHighlightKeywords(CancellationToken cancellationToken)
+    {
+        var keywords = await LoadHighlightKeywordDtosAsync(cancellationToken);
+        return Ok(keywords);
+    }
+
+    [HttpPost("highlight-keywords")]
+    public async Task<ActionResult<HighlightKeywordDto>> CreateHighlightKeyword(
+        [FromBody] UpsertHighlightKeywordDto dto, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(dto.Keyword))
+        {
+            return BadRequest("Keyword is required.");
+        }
+
+        var keyword = new HighlightKeyword
+        {
+            Keyword = dto.Keyword,
+            ApplyToAllGroups = dto.ApplyToAllGroups
+        };
+        ApplyHighlightGroupSelection(keyword, dto);
+
+        dbContext.HighlightKeywords.Add(keyword);
+        await dbContext.SaveChangesAsync(cancellationToken);
+
+        return Ok(ToHighlightKeywordDto(keyword));
+    }
+
+    [HttpPut("highlight-keywords/{id:int}")]
+    public async Task<ActionResult<HighlightKeywordDto>> UpdateHighlightKeyword(
+        int id, [FromBody] UpsertHighlightKeywordDto dto, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(dto.Keyword))
+        {
+            return BadRequest("Keyword is required.");
+        }
+
+        var keyword = await dbContext.HighlightKeywords
+            .Include(k => k.Groups)
+            .FirstOrDefaultAsync(k => k.Id == id, cancellationToken);
+
+        if (keyword is null)
+        {
+            return NotFound();
+        }
+
+        keyword.Keyword = dto.Keyword;
+        keyword.ApplyToAllGroups = dto.ApplyToAllGroups;
+        dbContext.HighlightKeywordGroups.RemoveRange(keyword.Groups);
+        keyword.Groups.Clear();
+        ApplyHighlightGroupSelection(keyword, dto);
+
+        await dbContext.SaveChangesAsync(cancellationToken);
+        return Ok(ToHighlightKeywordDto(keyword));
+    }
+
+    [HttpDelete("highlight-keywords/{id:int}")]
+    public async Task<IActionResult> DeleteHighlightKeyword(int id, CancellationToken cancellationToken)
+    {
+        var keyword = await dbContext.HighlightKeywords.FirstOrDefaultAsync(k => k.Id == id, cancellationToken);
+        if (keyword is null)
+        {
+            return NotFound();
+        }
+
+        dbContext.HighlightKeywords.Remove(keyword);
+        await dbContext.SaveChangesAsync(cancellationToken);
+        return NoContent();
+    }
+
+    [HttpGet("highlight-users")]
+    public async Task<ActionResult<List<HighlightUserDto>>> GetHighlightUsers(CancellationToken cancellationToken)
+    {
+        var users = await LoadHighlightUserDtosAsync(cancellationToken);
+        return Ok(users);
+    }
+
+    [HttpPost("highlight-users")]
+    public async Task<ActionResult<HighlightUserDto>> CreateHighlightUser(
+        [FromBody] UpsertHighlightUserDto dto, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(dto.UserId))
+        {
+            return BadRequest("UserId is required.");
+        }
+
+        var existing = await dbContext.HighlightUsers
+            .FirstOrDefaultAsync(
+                u => u.UserId == dto.UserId && (dto.GroupId == null ? u.GroupId == null : u.GroupId == dto.GroupId),
+                cancellationToken);
+
+        if (existing is not null)
+        {
+            var existingDto = await ResolveHighlightUserDtoAsync(existing, cancellationToken);
+            return Ok(existingDto);
+        }
+
+        var user = new HighlightUser
+        {
+            UserId = dto.UserId,
+            GroupId = dto.GroupId
+        };
+        dbContext.HighlightUsers.Add(user);
+        await dbContext.SaveChangesAsync(cancellationToken);
+
+        var createdDto = await ResolveHighlightUserDtoAsync(user, cancellationToken);
+        return Ok(createdDto);
+    }
+
+    [HttpDelete("highlight-users/{id:int}")]
+    public async Task<IActionResult> DeleteHighlightUser(int id, CancellationToken cancellationToken)
+    {
+        var user = await dbContext.HighlightUsers.FirstOrDefaultAsync(u => u.Id == id, cancellationToken);
+        if (user is null)
+        {
+            return NotFound();
+        }
+
+        dbContext.HighlightUsers.Remove(user);
+        await dbContext.SaveChangesAsync(cancellationToken);
+        return NoContent();
+    }
+
+    [HttpGet("highlight-rules")]
+    public async Task<ActionResult<HighlightRulesDto>> GetHighlightRules(CancellationToken cancellationToken)
+    {
+        var keywords = await LoadHighlightKeywordDtosAsync(cancellationToken);
+        var users = await LoadHighlightUserDtosAsync(cancellationToken);
+        return Ok(new HighlightRulesDto(keywords, users));
+    }
+
     private static string ComputeStatus(TimeSpan age, TimeSpan interval)
     {
         if (age < interval * 2)
@@ -372,4 +506,132 @@ public class SettingsController(
     private static MaskKeywordDto ToDto(MaskKeyword keyword) => new(
         keyword.Id, keyword.Keyword, keyword.Replacement, keyword.ApplyToAllGroups,
         keyword.Groups.Select(g => g.GroupId).ToList());
+
+    private async Task<List<HighlightKeywordDto>> LoadHighlightKeywordDtosAsync(CancellationToken cancellationToken)
+    {
+        var keywords = await dbContext.HighlightKeywords
+            .AsNoTracking()
+            .Include(k => k.Groups)
+            .OrderBy(k => k.Id)
+            .ToListAsync(cancellationToken);
+
+        return keywords.Select(ToHighlightKeywordDto).ToList();
+    }
+
+    private static void ApplyHighlightGroupSelection(HighlightKeyword keyword, UpsertHighlightKeywordDto dto)
+    {
+        if (dto.ApplyToAllGroups || dto.GroupIds is null)
+        {
+            return;
+        }
+
+        foreach (var groupId in dto.GroupIds.Distinct())
+        {
+            keyword.Groups.Add(new HighlightKeywordGroup { GroupId = groupId });
+        }
+    }
+
+    private static HighlightKeywordDto ToHighlightKeywordDto(HighlightKeyword keyword) => new(
+        keyword.Id,
+        keyword.Keyword,
+        keyword.ApplyToAllGroups,
+        keyword.Groups.Select(g => g.GroupId).ToList());
+
+    private async Task<List<HighlightUserDto>> LoadHighlightUserDtosAsync(CancellationToken cancellationToken)
+    {
+        var users = await dbContext.HighlightUsers
+            .AsNoTracking()
+            .OrderBy(u => u.Id)
+            .ToListAsync(cancellationToken);
+
+        if (users.Count == 0)
+        {
+            return [];
+        }
+
+        var userIds = users.Select(u => u.UserId).Distinct().ToList();
+        var groupIds = users.Where(u => u.GroupId != null).Select(u => u.GroupId!).Distinct().ToList();
+
+        Dictionary<string, string> groupNames = [];
+        if (groupIds.Count > 0)
+        {
+            groupNames = await dbContext.Groups
+                .AsNoTracking()
+                .Where(g => groupIds.Contains(g.GroupId))
+                .ToDictionaryAsync(g => g.GroupId, g => g.GroupName ?? g.GroupId, cancellationToken);
+        }
+
+        var members = await dbContext.GroupMembers
+            .AsNoTracking()
+            .Where(m => userIds.Contains(m.UserId))
+            .Select(m => new
+            {
+                m.GroupId,
+                m.UserId,
+                m.DisplayName,
+                m.UpdatedAt
+            })
+            .ToListAsync(cancellationToken);
+
+        var maskingRules = await maskingService.LoadRulesAsync(cancellationToken);
+
+        Dictionary<(string GroupId, string UserId), string> identities = [];
+        if (maskingRules.RequiresAnonymousIdentity)
+        {
+            var relevantGroupIds = members.Select(m => m.GroupId).Distinct().ToList();
+            if (relevantGroupIds.Count > 0)
+            {
+                identities = await dbContext.AnonymousIdentities
+                    .AsNoTracking()
+                    .Where(a => relevantGroupIds.Contains(a.GroupId) && userIds.Contains(a.UserId))
+                    .ToDictionaryAsync(a => (a.GroupId, a.UserId), a => a.Label, cancellationToken);
+            }
+        }
+
+        var result = new List<HighlightUserDto>(users.Count);
+        foreach (var user in users)
+        {
+            string? groupName = null;
+            if (user.GroupId != null)
+            {
+                groupName = groupNames.TryGetValue(user.GroupId, out var name) ? name : user.GroupId;
+            }
+
+            var userMembers = members.Where(m => m.UserId == user.UserId).ToList();
+            var targetMember = user.GroupId != null
+                ? (userMembers.FirstOrDefault(m => m.GroupId == user.GroupId)
+                   ?? userMembers.OrderByDescending(m => m.UpdatedAt).FirstOrDefault())
+                : userMembers.OrderByDescending(m => m.UpdatedAt).FirstOrDefault();
+
+            string displayName;
+            if (maskingRules.RequiresAnonymousIdentity)
+            {
+                if (targetMember != null && identities.TryGetValue((targetMember.GroupId, user.UserId), out var label))
+                {
+                    displayName = label;
+                }
+                else
+                {
+                    displayName = user.UserId;
+                }
+            }
+            else
+            {
+                displayName = targetMember?.DisplayName ?? user.UserId;
+            }
+
+            result.Add(new HighlightUserDto(user.Id, user.UserId, user.GroupId, displayName, groupName));
+        }
+
+        return result;
+    }
+
+    /// <summary>單筆高亮人員的 DTO 解析。名稱與群組名的解析規則只在
+    /// <see cref="LoadHighlightUserDtosAsync"/> 寫一份，這裡直接複用後挑出目標那一筆——
+    /// HighlightUsers 是使用者手動維護的小表，整批載入的成本遠低於維護兩份會漂移的解析邏輯。</summary>
+    private async Task<HighlightUserDto> ResolveHighlightUserDtoAsync(HighlightUser user, CancellationToken cancellationToken)
+    {
+        var all = await LoadHighlightUserDtosAsync(cancellationToken);
+        return all.First(u => u.Id == user.Id);
+    }
 }

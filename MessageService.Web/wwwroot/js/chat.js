@@ -6,7 +6,7 @@
     // 沒必要用同一個頻率打
     const GROUP_POLL_INTERVAL_MS = 10000;
     const NEAR_BOTTOM_THRESHOLD_PX = 80;
-    const NEAR_TOP_THRESHOLD_PX = 8;
+    const NEAR_TOP_THRESHOLD_PX = 40;
     const INITIAL_DAYS = 3;
     const LOAD_MORE_DAYS = 7;
     // 與 MessagesController.MaxDays 對齊；超過就別再放大視窗，免得按鈕變成按了沒反應
@@ -23,6 +23,17 @@
     const FONT_SIZE_STORAGE_KEY = 'chat-font-size';
     const FONT_SIZES = ['small', 'medium', 'large'];
     const DEFAULT_FONT_SIZE = 'medium';
+    const HIGHLIGHT_FLOW_STORAGE_KEY = 'chat-highlight-flow';
+    const HIGHLIGHT_COLORS_STORAGE_KEY = 'chat-highlight-colors';
+    const HIGHLIGHT_OPACITY_STORAGE_KEY = 'chat-highlight-opacity';
+    const DEFAULT_HIGHLIGHT_OPACITY = 0.5;
+    // 強度的合法區間只有這一份定義：settings.js 透過共享出口取用，
+    // 設定頁滑桿的 min/max 也在初始化時由 JS 依這兩個值填上
+    const HIGHLIGHT_OPACITY_MIN = 0.1;
+    const HIGHLIGHT_OPACITY_MAX = 1;
+    // 顏色數量上限只有這一份定義，設定頁透過共享出口取用
+    const MAX_HIGHLIGHT_COLORS = 8;
+    const DEFAULT_HIGHLIGHT_COLORS = ['#06c755', '#ffc53d', '#ff6b57', '#a66cff'];
     const URL_REGEX = /(https?:\/\/[^\s]+)/g;
 
     // 對應後端 AvatarIconCatalog 的 IconKey；同一份代號清單，兩邊各自維護一份對照表
@@ -53,6 +64,7 @@
         // 每次切換群組就 +1；非同步請求回來時若對不上，代表是前一個群組的過期回應，必須丟棄
         requestToken: 0,
         following: true,
+        autoScrolling: false,
         unreadCount: 0,
         // 側欄各群組的「最後已讀訊息 Id」基準，每台裝置各自記在 localStorage（見 READ_STATE_KEY）。
         // 未讀數字本身由後端依這份基準計算，前端只負責維護基準
@@ -60,6 +72,8 @@
         // 側欄收合狀態（expanded / rail / hidden）與展開時的寬度（px），皆存 localStorage
         sidebarState: 'expanded',
         sidebarWidth: 320,
+        fullscreen: false,
+        pendingDeleteModalHide: false,
         pendingContentIds: new Set(),
         lastAppendedDateKey: null,
         lastAppendedSenderId: null,
@@ -72,13 +86,736 @@
         noMoreNewerAt: null,
         searchScope: 'group',
         // 跟 requestToken 分開算——切群組不該讓正在飛的搜尋請求作廢，反之亦然
-        searchRequestToken: 0
+        searchRequestToken: 0,
+        initialEmpty: false,
+        highlightRules: { keywords: [], users: [] },
+        // 高亮重掃時要對回訊息資料，但只需要這兩個欄位——存整包訊息物件會讓長時間停在
+        // 同一個群組的工作階段一直長大（輪詢每 3 秒往裡面塞）
+        messagesCache: new Map(),
+        groupsRefreshQueued: false
     };
 
     const els = {};
 
     function $(id) {
         return document.getElementById(id);
+    }
+
+    function showToast(message, isError) {
+        const container = $('toast-container');
+        if (!container) {
+            return;
+        }
+        const toast = document.createElement('div');
+        toast.className = 'toast align-items-center text-bg-' + (isError ? 'danger' : 'success') + ' border-0';
+        toast.setAttribute('role', 'alert');
+
+        const flex = document.createElement('div');
+        flex.className = 'd-flex';
+        const body = document.createElement('div');
+        body.className = 'toast-body';
+        body.textContent = message;
+        flex.appendChild(body);
+        toast.appendChild(flex);
+
+        container.appendChild(toast);
+        const instance = bootstrap.Toast.getOrCreateInstance(toast, { delay: 2500 });
+        instance.show();
+        toast.addEventListener('hidden.bs.toast', () => toast.remove());
+    }
+
+    window.messageServiceToast = showToast;
+
+    // === 訊息高亮色彩處理與共享出口 ===
+
+    function normalizeHexColor(color) {
+        if (!color || typeof color !== 'string') {
+            return null;
+        }
+        const trimmed = color.trim().toLowerCase();
+        return /^#[0-9a-f]{6}$/.test(trimmed) ? trimmed : null;
+    }
+
+    // 把 #rrggbb 轉成帶透明度的 rgba()，給發光陰影用——邊框是漸層，
+    // 光暈取第一個顏色就好，不然多色光暈疊在一起會糊成一團灰
+    function hexToGlow(hex, alpha) {
+        const value = normalizeHexColor(hex);
+        if (!value) {
+            return `rgba(6, 199, 85, ${alpha})`;
+        }
+        const r = parseInt(value.slice(1, 3), 16);
+        const g = parseInt(value.slice(3, 5), 16);
+        const b = parseInt(value.slice(5, 7), 16);
+        return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+    }
+
+    // 光暈透明度統一以 opacity * 0.7 計算，聊天頁與設定頁預覽共用
+    function computeHighlightGlow(hex, opacity) {
+        return hexToGlow(hex, opacity * 0.7);
+    }
+
+    function buildHighlightGradient(colors, opacity = DEFAULT_HIGHLIGHT_OPACITY) {
+        const list = (colors && colors.length > 0) ? colors : DEFAULT_HIGHLIGHT_COLORS;
+        const rgbaColors = list.map(c => hexToGlow(c, opacity));
+        if (rgbaColors.length === 1) {
+            return `linear-gradient(135deg, ${rgbaColors[0]}, ${rgbaColors[0]})`;
+        }
+        return `linear-gradient(135deg, ${rgbaColors.join(', ')})`;
+    }
+
+    function loadHighlightFlow() {
+        try {
+            const saved = localStorage.getItem(HIGHLIGHT_FLOW_STORAGE_KEY);
+            return saved === null ? true : saved === '1';
+        } catch {
+            return true;
+        }
+    }
+
+    function loadHighlightColors() {
+        try {
+            const saved = localStorage.getItem(HIGHLIGHT_COLORS_STORAGE_KEY);
+            if (saved) {
+                const parsed = JSON.parse(saved);
+                if (Array.isArray(parsed)) {
+                    const normalized = parsed.map(normalizeHexColor).filter(Boolean);
+                    if (normalized.length > 0) {
+                        return normalized.slice(0, MAX_HIGHLIGHT_COLORS);
+                    }
+                }
+            }
+        } catch {
+        }
+        return [...DEFAULT_HIGHLIGHT_COLORS];
+    }
+
+    // 合法區間的判定只有這一份，三個呼叫端（讀 localStorage、設定頁預覽、滑桿事件）共用
+    function clampHighlightOpacity(value) {
+        if (!Number.isFinite(value)) {
+            return DEFAULT_HIGHLIGHT_OPACITY;
+        }
+        return Math.min(HIGHLIGHT_OPACITY_MAX, Math.max(HIGHLIGHT_OPACITY_MIN, value));
+    }
+
+    function loadHighlightOpacity() {
+        try {
+            const saved = localStorage.getItem(HIGHLIGHT_OPACITY_STORAGE_KEY);
+            if (saved !== null) {
+                return clampHighlightOpacity(parseFloat(saved));
+            }
+        } catch {
+        }
+        return DEFAULT_HIGHLIGHT_OPACITY;
+    }
+
+    function applyHighlightVisualSettings() {
+        const colors = loadHighlightColors();
+        const flowEnabled = loadHighlightFlow();
+        const opacity = loadHighlightOpacity();
+        const gradient = buildHighlightGradient(colors, opacity);
+        const glow = computeHighlightGlow(colors[0], opacity);
+
+        document.documentElement.style.setProperty('--highlight-gradient', gradient);
+        document.documentElement.style.setProperty('--highlight-glow', glow);
+        document.documentElement.classList.toggle('highlight-flowing', flowEnabled);
+    }
+
+    window.messageServiceHighlight = {
+        buildHighlightGradient,
+        hexToGlow,
+        computeHighlightGlow,
+        normalizeHexColor,
+        loadHighlightFlow,
+        loadHighlightColors,
+        loadHighlightOpacity,
+        applyHighlightVisualSettings,
+        HIGHLIGHT_FLOW_STORAGE_KEY,
+        HIGHLIGHT_COLORS_STORAGE_KEY,
+        HIGHLIGHT_OPACITY_STORAGE_KEY,
+        clampHighlightOpacity,
+        HIGHLIGHT_OPACITY_MIN,
+        HIGHLIGHT_OPACITY_MAX,
+        DEFAULT_HIGHLIGHT_COLORS,
+        DEFAULT_HIGHLIGHT_OPACITY,
+        MAX_HIGHLIGHT_COLORS
+    };
+
+    // === 通用快捷選單（Context Menu）===
+
+    let activeContextMenu = null;
+
+    function closeContextMenu() {
+        if (!activeContextMenu) {
+            return;
+        }
+        activeContextMenu.cleanup();
+        activeContextMenu.element.remove();
+        activeContextMenu = null;
+    }
+
+    function showContextMenu(anchorEvent, items) {
+        closeContextMenu();
+        if (!items || items.length === 0) {
+            return;
+        }
+
+        const menu = document.createElement('div');
+        menu.className = 'context-menu';
+        menu.setAttribute('role', 'menu');
+        menu.tabIndex = -1;
+
+        for (const item of items) {
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'context-menu-item' + (item.danger ? ' context-menu-item-danger' : '');
+            btn.setAttribute('role', 'menuitem');
+            btn.textContent = item.label;
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                closeContextMenu();
+                if (typeof item.onSelect === 'function') {
+                    item.onSelect();
+                }
+            });
+            menu.appendChild(btn);
+        }
+
+        menu.style.visibility = 'hidden';
+        menu.style.left = '0px';
+        menu.style.top = '0px';
+        document.body.appendChild(menu);
+
+        const rect = menu.getBoundingClientRect();
+        const menuWidth = rect.width;
+        const menuHeight = rect.height;
+        const viewportWidth = window.innerWidth;
+        const viewportHeight = window.innerHeight;
+
+        const clickX = anchorEvent.clientX ?? 0;
+        const clickY = anchorEvent.clientY ?? 0;
+
+        let posX = clickX;
+        let posY = clickY;
+
+        if (posX + menuWidth > viewportWidth) {
+            posX = Math.max(0, clickX - menuWidth);
+        }
+        if (posY + menuHeight > viewportHeight) {
+            posY = Math.max(0, clickY - menuHeight);
+        }
+
+        menu.style.left = `${posX}px`;
+        menu.style.top = `${posY}px`;
+        menu.style.visibility = '';
+
+        // 鍵盤導航：↑↓ 在項目間移動，Enter 觸發，Esc 關閉
+        const handleKeyDown = (e) => {
+            const buttons = Array.from(menu.querySelectorAll('.context-menu-item:not(:disabled)'));
+            if (buttons.length === 0) {
+                return;
+            }
+            const currentIndex = buttons.indexOf(document.activeElement);
+            if (e.key === 'ArrowDown') {
+                e.preventDefault();
+                const nextIndex = (currentIndex + 1) % buttons.length;
+                buttons[nextIndex]?.focus();
+            } else if (e.key === 'ArrowUp') {
+                e.preventDefault();
+                const prevIndex = (currentIndex - 1 + buttons.length) % buttons.length;
+                buttons[prevIndex]?.focus();
+            } else if (e.key === 'Escape') {
+                e.preventDefault();
+                closeContextMenu();
+            }
+        };
+
+        const handlePointerDownOutside = (e) => {
+            if (!menu.contains(e.target)) {
+                closeContextMenu();
+            }
+        };
+
+        const handleScrollOrResize = () => {
+            closeContextMenu();
+        };
+
+        menu.addEventListener('keydown', handleKeyDown);
+        window.addEventListener('scroll', handleScrollOrResize, { capture: true, passive: true });
+        window.addEventListener('resize', handleScrollOrResize, { passive: true });
+
+        const timer = setTimeout(() => {
+            document.addEventListener('pointerdown', handlePointerDownOutside, true);
+        }, 0);
+
+        const cleanup = () => {
+            clearTimeout(timer);
+            menu.removeEventListener('keydown', handleKeyDown);
+            document.removeEventListener('pointerdown', handlePointerDownOutside, true);
+            window.removeEventListener('scroll', handleScrollOrResize, { capture: true });
+            window.removeEventListener('resize', handleScrollOrResize);
+        };
+
+        activeContextMenu = { element: menu, cleanup };
+
+        // 自動聚焦第一項
+        const firstBtn = menu.querySelector('.context-menu-item');
+        if (firstBtn) {
+            firstBtn.focus();
+        }
+    }
+
+    function showGroupContextMenu(anchorEvent, group) {
+        const items = [
+            {
+                label: '刪除歷史訊息',
+                danger: false,
+                onSelect: () => openDeleteModal('messages', group)
+            },
+            {
+                label: '刪除群組',
+                danger: true,
+                onSelect: () => openDeleteModal('group', group)
+            }
+        ];
+        showContextMenu(anchorEvent, items);
+    }
+
+    // === 訊息高亮規則與選單 ===
+
+    async function loadHighlightRules() {
+        try {
+            const rules = await fetchJson('api/settings/highlight-rules');
+            state.highlightRules = {
+                keywords: Array.isArray(rules?.keywords) ? rules.keywords : [],
+                users: Array.isArray(rules?.users) ? rules.users : []
+            };
+        } catch (err) {
+            state.highlightRules = { keywords: [], users: [] };
+            console.warn('載入訊息高亮規則失敗：', err);
+        }
+    }
+
+    // 取得訊息命中高亮規則的所有關鍵字（去重、依長度由長到短排序，避免短關鍵字先切斷長關鍵字）
+    function matchedHighlightKeywords(message) {
+        if (!message || typeof message.text !== 'string' || message.text.length === 0) {
+            return [];
+        }
+        const keywords = state.highlightRules?.keywords;
+        if (!Array.isArray(keywords) || keywords.length === 0) {
+            return [];
+        }
+
+        const textLower = message.text.toLowerCase();
+        const currentGroupId = state.groupId;
+        const matched = new Set();
+
+        for (const kwRule of keywords) {
+            if (!kwRule || !kwRule.keyword) {
+                continue;
+            }
+            const matchScope = kwRule.applyToAllGroups === true ||
+                (Array.isArray(kwRule.groupIds) && currentGroupId && kwRule.groupIds.includes(currentGroupId));
+            if (matchScope && textLower.includes(kwRule.keyword.toLowerCase())) {
+                matched.add(kwRule.keyword);
+            }
+        }
+
+        return Array.from(matched).sort((a, b) => b.length - a.length);
+    }
+
+    function isHighlighted(message) {
+        if (!message) {
+            return false;
+        }
+        if (matchedHighlightKeywords(message).length > 0) {
+            return true;
+        }
+
+        // 人員命中判定：message.userId 非空時比對
+        const users = state.highlightRules?.users;
+        if (Array.isArray(users) && users.length > 0 && message.userId) {
+            const currentGroupId = state.groupId;
+            for (const userRule of users) {
+                if (userRule && userRule.userId === message.userId) {
+                    if (userRule.groupId === null || userRule.groupId === currentGroupId) {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        return false;
+    }
+
+    function refreshHighlightClasses() {
+        if (!els.messageList) {
+            return;
+        }
+        const rows = els.messageList.querySelectorAll('.message-row');
+        for (const row of rows) {
+            const id = Number(row.dataset.messageId);
+            const message = state.messagesCache.get(id);
+            if (!message) {
+                continue;
+            }
+            const bubble = row.querySelector('.bubble');
+            if (bubble) {
+                bubble.classList.toggle('highlighted', isHighlighted(message));
+            }
+        }
+    }
+
+    function showAvatarContextMenu(anchorEvent, message) {
+        if (!message || !message.userId) {
+            return;
+        }
+
+        const userRules = state.highlightRules?.users || [];
+        const allGroupRule = userRules.find(r => r.userId === message.userId && r.groupId === null);
+        const currentGroupRule = state.groupId
+            ? userRules.find(r => r.userId === message.userId && r.groupId === state.groupId)
+            : null;
+
+        const items = [];
+
+        // 全部群組項目
+        if (allGroupRule) {
+            items.push({
+                label: '取消高亮（全部群組）',
+                danger: false,
+                onSelect: () => removeHighlightUser(allGroupRule.id, 'all')
+            });
+        } else {
+            items.push({
+                label: '高亮此人（全部群組）',
+                danger: false,
+                onSelect: () => addHighlightUser(message.userId, null)
+            });
+        }
+
+        // 目前群組項目（有目前群組時才顯示）
+        if (state.groupId) {
+            if (currentGroupRule) {
+                items.push({
+                    label: '取消高亮（目前群組）',
+                    danger: false,
+                    onSelect: () => removeHighlightUser(currentGroupRule.id, 'current')
+                });
+            } else {
+                items.push({
+                    label: '高亮此人（目前群組）',
+                    danger: false,
+                    onSelect: () => addHighlightUser(message.userId, state.groupId)
+                });
+            }
+        }
+
+        showContextMenu(anchorEvent, items);
+    }
+
+    async function addHighlightUser(userId, groupId) {
+        try {
+            const response = await fetch('api/settings/highlight-users', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ userId, groupId })
+            });
+            if (!response.ok) {
+                showToast('操作失敗，請稍後再試', true);
+                return;
+            }
+            const created = await response.json();
+            if (!state.highlightRules) {
+                state.highlightRules = { keywords: [], users: [] };
+            }
+            if (!Array.isArray(state.highlightRules.users)) {
+                state.highlightRules.users = [];
+            }
+            const existsIndex = state.highlightRules.users.findIndex(u => u.id === created.id);
+            if (existsIndex >= 0) {
+                state.highlightRules.users[existsIndex] = created;
+            } else {
+                state.highlightRules.users.push(created);
+            }
+
+            refreshHighlightClasses();
+            showToast(groupId === null ? '已將此人加入高亮（全部群組）' : '已將此人加入高亮（目前群組）');
+        } catch {
+            showToast('操作失敗，請稍後再試', true);
+        }
+    }
+
+    async function removeHighlightUser(id, scope) {
+        try {
+            const response = await fetch(`api/settings/highlight-users/${encodeURIComponent(id)}`, {
+                method: 'DELETE'
+            });
+            if (!response.ok && response.status !== 404) {
+                showToast('操作失敗，請稍後再試', true);
+                return;
+            }
+            if (state.highlightRules?.users) {
+                state.highlightRules.users = state.highlightRules.users.filter(u => u.id !== id);
+            }
+
+            refreshHighlightClasses();
+            showToast(scope === 'all' ? '已取消此人的高亮（全部群組）' : '已取消此人的高亮（目前群組）');
+        } catch {
+            showToast('操作失敗，請稍後再試', true);
+        }
+    }
+
+    // 右鍵與長按的共用觸發器：側欄群組項目與訊息頭貼共用同一套手勢
+    // （桌面右鍵、手機長按 500ms、位移超過 10px 取消、長按後抑制那一次 click）。
+    // openMenu 收到的參數只需要有 clientX／clientY，長按時會自己補上按下的座標。
+    function attachContextMenuTriggers(el, openMenu, shouldIgnore) {
+        let longPressTimer = null;
+        let suppressNextClick = false;
+        let startX = 0;
+        let startY = 0;
+
+        const cancelLongPress = () => {
+            if (longPressTimer) {
+                clearTimeout(longPressTimer);
+                longPressTimer = null;
+            }
+        };
+
+        el.addEventListener('contextmenu', (e) => {
+            if (typeof shouldIgnore === 'function' && shouldIgnore(e)) {
+                return;
+            }
+            e.preventDefault();
+            e.stopPropagation();
+            cancelLongPress();
+            openMenu(e);
+        });
+
+        el.addEventListener('pointerdown', (e) => {
+            if (e.button !== undefined && e.button !== 0) {
+                return;
+            }
+            if (typeof shouldIgnore === 'function' && shouldIgnore(e)) {
+                return;
+            }
+            e.stopPropagation();
+            cancelLongPress();
+            suppressNextClick = false;
+            startX = e.clientX;
+            startY = e.clientY;
+            longPressTimer = setTimeout(() => {
+                longPressTimer = null;
+                suppressNextClick = true;
+                openMenu({ clientX: startX, clientY: startY, target: e.target });
+            }, 500);
+        });
+
+        el.addEventListener('pointermove', (e) => {
+            if (!longPressTimer) {
+                return;
+            }
+            if (Math.hypot(e.clientX - startX, e.clientY - startY) > 10) {
+                cancelLongPress();
+            }
+        });
+
+        el.addEventListener('pointerup', cancelLongPress);
+        el.addEventListener('pointercancel', cancelLongPress);
+
+        // 回傳「這一次 click 是不是長按帶出來的」，讓呼叫端決定要不要吞掉自己的 click 行為
+        return function consumeSuppressedClick() {
+            if (!suppressNextClick) {
+                return false;
+            }
+            suppressNextClick = false;
+            return true;
+        };
+    }
+
+    // === 頁面內全螢幕模式 ===
+
+    function isExcludedContextTarget(e) {
+        const target = e?.target;
+        if (!target || typeof target.closest !== 'function') {
+            return false;
+        }
+        return Boolean(target.closest('.bubble, .avatar, .group-item, .search-panel, button, input, a, textarea, select, label'));
+    }
+
+    function showPanelContextMenu(anchorEvent) {
+        if (isExcludedContextTarget(anchorEvent)) {
+            return;
+        }
+        const items = [
+            {
+                label: state.fullscreen ? '關閉全螢幕' : '全螢幕',
+                danger: false,
+                onSelect: toggleFullscreen
+            }
+        ];
+        showContextMenu(anchorEvent, items);
+    }
+
+    function enterFullscreen() {
+        if (state.fullscreen) {
+            return;
+        }
+        // 手機版的單欄切換靠 mobile-chat-open；全螢幕一定是看訊息，所以進來時補上，
+        // 但離開時要還原成進來前的樣子，否則本來停在群組列表的人會被丟在空的對話面板
+        state.hadMobileChatOpenBeforeFullscreen = els.chatApp.classList.contains('mobile-chat-open');
+        state.fullscreen = true;
+        els.chatApp.classList.add('fullscreen');
+        els.chatApp.classList.add('mobile-chat-open');
+        renderFullscreenGroupBar();
+        const activeItem = els.fullscreenGroupBar?.querySelector('.fullscreen-group-item.active');
+        if (activeItem) {
+            activeItem.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'auto' });
+        }
+    }
+
+    function exitFullscreen() {
+        if (!state.fullscreen) {
+            return;
+        }
+        state.fullscreen = false;
+        els.chatApp.classList.remove('fullscreen');
+        // 側欄的三態不需要還原：全螢幕期間收合鈕與分隔線都不可見，state.sidebarState 不會被改動，
+        // 隱藏純粹是 CSS 的事，離開時 class 一拿掉就自動回到原本的樣子
+        if (!state.hadMobileChatOpenBeforeFullscreen) {
+            els.chatApp.classList.remove('mobile-chat-open');
+        }
+        state.hadMobileChatOpenBeforeFullscreen = false;
+    }
+
+    function toggleFullscreen() {
+        if (state.fullscreen) {
+            exitFullscreen();
+        } else {
+            enterFullscreen();
+        }
+    }
+
+    // === 群組刪除／訊息清除對話框與收斂 ===
+
+    function openDeleteModal(type, group) {
+        const isMessagesOnly = type === 'messages';
+
+        els.groupDeleteModalTitle.textContent = isMessagesOnly ? '刪除歷史訊息' : '刪除群組';
+        els.groupDeleteConfirmBtn.textContent = isMessagesOnly ? '刪除歷史訊息' : '刪除群組';
+        els.groupDeleteConfirmBtn.disabled = false;
+        els.groupDeleteCancelBtn.disabled = false;
+        els.groupDeleteModalCloseBtn.disabled = false;
+
+        if (isMessagesOnly) {
+            els.groupDeleteModalP1.textContent = `即將刪除「${group.displayName}」的全部歷史訊息，包含所有圖片、影片、語音與檔案。`;
+            els.groupDeleteModalP2.textContent = '刪除後無法復原。群組的名稱、成員與設定會保留，但因為沒有訊息了，'
+                + '群組會從左側清單消失，直到有新訊息才會重新出現。';
+            els.groupDeleteModalP3.classList.add('d-none');
+        } else {
+            els.groupDeleteModalP1.textContent = `即將刪除「${group.displayName}」，包含該群組的全部歷史訊息、圖片、影片、語音、檔案、成員快取與匿名代號。`;
+            els.groupDeleteModalP2.textContent = '刪除後無法復原。';
+            els.groupDeleteModalP3.textContent = 'bot 仍在這個 LINE 群組時，之後的新訊息會讓群組重新出現。要永久停止收錄，請將 bot 退出該群組。';
+            els.groupDeleteModalP3.classList.remove('d-none');
+        }
+
+        els.groupDeleteConfirmBtn.onclick = () => executeGroupDelete(type, group);
+
+        // 不可逆操作：點背景與 Esc 都不關閉，只能按「取消」或「確認」離開，
+        // 執行期間兩個按鈕都會被停用，避免中途關掉對話框卻不知道刪除有沒有完成
+        state.pendingDeleteModalHide = false;
+        const modalInstance = bootstrap.Modal.getOrCreateInstance(els.groupDeleteModal, {
+            backdrop: 'static',
+            keyboard: false
+        });
+        modalInstance.show();
+    }
+
+    // Bootstrap 在 modal 的淡入轉場還沒結束時會直接忽略 hide()（內部的 _isTransitioning 旗標）。
+    // 刪除很快回來時（本機資料庫常常 50ms 內就完成）關閉指令就這樣被吞掉，
+    // 對話框會永遠停在「處理中…」，但刪除其實已經做完了。轉場結束後補關一次。
+    function hideDeleteModal() {
+        const instance = bootstrap.Modal.getInstance(els.groupDeleteModal);
+        if (!instance) {
+            return;
+        }
+
+        // Bootstrap 在淡入轉場結束前呼叫 hide() 會被直接忽略。這裡不每次掛 once 監聯器
+        // （hide() 有多條提早 return 的路徑，任何一條沒觸發 shown/hidden 就會留下殘留監聽器，
+        // 等下一次開啟才引爆），改用一個旗標：初始化時掛好常駐的 shown.bs.modal 監聽，
+        // 看到旗標就補關一次；openDeleteModal 開啟前一律清旗標，殘留不可能跨到下一次
+        state.pendingDeleteModalHide = true;
+        instance.hide();
+    }
+
+    async function executeGroupDelete(type, group) {
+        els.groupDeleteConfirmBtn.disabled = true;
+        els.groupDeleteConfirmBtn.textContent = '處理中…';
+        els.groupDeleteCancelBtn.disabled = true;
+        els.groupDeleteModalCloseBtn.disabled = true;
+
+        const url = type === 'messages'
+            ? `api/groups/${encodeURIComponent(group.groupId)}/messages`
+            : `api/groups/${encodeURIComponent(group.groupId)}`;
+
+        try {
+            const response = await fetch(url, { method: 'DELETE' });
+
+            if (response.status === 404) {
+                hideDeleteModal();
+                showToast('群組已不存在，清單已更新', true);
+                if (state.groupId === group.groupId) {
+                    resetChatPanel();
+                }
+                await refreshGroupList();
+            } else if (!response.ok) {
+                hideDeleteModal();
+                showToast('刪除失敗，請稍後再試', true);
+            } else {
+                const result = await response.json();
+                hideDeleteModal();
+                const count = result?.messageCount ?? 0;
+                if (type === 'messages') {
+                    showToast(`已刪除「${group.displayName}」的 ${count} 則歷史訊息`);
+                } else {
+                    showToast(`已刪除群組「${group.displayName}」（${count} 則訊息）`);
+                }
+                if (state.groupId === group.groupId) {
+                    resetChatPanel();
+                }
+                await refreshGroupList();
+            }
+        } catch {
+            hideDeleteModal();
+            showToast('刪除失敗，請稍後再試', true);
+        } finally {
+            els.groupDeleteConfirmBtn.disabled = false;
+            els.groupDeleteConfirmBtn.textContent = type === 'messages' ? '刪除歷史訊息' : '刪除群組';
+            els.groupDeleteCancelBtn.disabled = false;
+            els.groupDeleteModalCloseBtn.disabled = false;
+        }
+    }
+
+    function resetChatPanel() {
+        stopAutoScroll();
+        state.groupId = null;
+        state.oldestId = null;
+        state.newestId = null;
+        state.windowNewestId = null;
+        state.daysWindow = INITIAL_DAYS;
+        state.hasMoreOlder = false;
+        state.historicalView = false;
+        state.noMoreNewer = false;
+        state.noMoreNewerAt = null;
+        state.requestToken++;
+
+        updateHistoricalBanner();
+        updateLoadNewerButton();
+        setFollowing(true);
+        clearMessageList();
+        updateActiveGroupItem();
+        updateChatHeader(null);
+        updateLoadMoreButton();
+        els.chatApp.classList.remove('mobile-chat-open');
     }
 
     async function fetchJson(url, options) {
@@ -212,6 +949,94 @@
         }
     }
 
+    // 把 text 裡命中的關鍵字片段包成 <span class="highlight-keyword">，其餘為純文字節點。
+    // 關鍵字已依長度由長到短排序，以先命中者為準、不巢狀包裹
+    function buildKeywordHighlightedFragment(text, keywords) {
+        const fragment = document.createDocumentFragment();
+        if (!text || !keywords || keywords.length === 0) {
+            fragment.appendChild(document.createTextNode(text ?? ''));
+            return fragment;
+        }
+
+        const lowerText = text.toLowerCase();
+        const intervals = [];
+
+        for (const kw of keywords) {
+            if (!kw) {
+                continue;
+            }
+            const lowerKw = kw.toLowerCase();
+            if (!lowerKw) {
+                continue;
+            }
+            let cursor = 0;
+            while (cursor < lowerText.length) {
+                const idx = lowerText.indexOf(lowerKw, cursor);
+                if (idx === -1) {
+                    break;
+                }
+                const end = idx + lowerKw.length;
+                const overlaps = intervals.some(iv => idx < iv.end && end > iv.start);
+                if (!overlaps) {
+                    intervals.push({ start: idx, end });
+                }
+                cursor = idx + 1;
+            }
+        }
+
+        if (intervals.length === 0) {
+            fragment.appendChild(document.createTextNode(text));
+            return fragment;
+        }
+
+        intervals.sort((a, b) => a.start - b.start);
+
+        let lastIndex = 0;
+        for (const { start, end } of intervals) {
+            if (start > lastIndex) {
+                fragment.appendChild(document.createTextNode(text.slice(lastIndex, start)));
+            }
+            const span = document.createElement('span');
+            span.className = 'highlight-keyword';
+            span.textContent = text.slice(start, end);
+            fragment.appendChild(span);
+            lastIndex = end;
+        }
+        if (lastIndex < text.length) {
+            fragment.appendChild(document.createTextNode(text.slice(lastIndex)));
+        }
+
+        return fragment;
+    }
+
+    // 對容器內不在 <a> 內部的文字節點進行關鍵字加粗放大標記
+    function applyHighlightKeywordsToContainer(container, keywords) {
+        if (!container || !keywords || keywords.length === 0) {
+            return;
+        }
+        const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+        const textNodes = [];
+        let node = walker.nextNode();
+        while (node) {
+            if (!node.parentElement?.closest('a')) {
+                textNodes.push(node);
+            }
+            node = walker.nextNode();
+        }
+        for (const textNode of textNodes) {
+            const text = textNode.textContent;
+            if (!text) {
+                continue;
+            }
+            const lowerText = text.toLowerCase();
+            const hasAnyMatch = keywords.some(kw => kw && lowerText.includes(kw.toLowerCase()));
+            if (!hasAnyMatch) {
+                continue;
+            }
+            textNode.replaceWith(buildKeywordHighlightedFragment(text, keywords));
+        }
+    }
+
     // 把 text 裡所有（不分大小寫）符合 query 的片段包成 <mark>，其餘仍是純文字節點；
     // 搜尋結果列表跟訊息串裡的關鍵字高亮共用同一份邏輯
     function buildHighlightedFragment(text, query) {
@@ -242,9 +1067,8 @@
         return fragment;
     }
 
-    // 跳轉到搜尋結果後，把目前渲染出來的訊息串裡符合關鍵字的文字節點換成上面那份高亮結果
-    // （只處理純文字節點、跳過 <a> 連結內部，避免弄壞連結）；每個文字節點只標第一個符合的地方，
-    // 對聊天訊息這種短文字已經夠用，不做進一步的多重比對
+    // 跳轉到搜尋結果後，把目前渲染出來的訊息串裡符合搜尋關鍵字的文字節點換成搜尋標記
+    // （只處理純文字節點、跳過 <a> 連結內部，標記所有符合之處）
     function highlightQueryInMessageList(query) {
         if (!query) {
             return;
@@ -255,7 +1079,9 @@
             const textNodes = [];
             let node = walker.nextNode();
             while (node) {
-                textNodes.push(node);
+                if (!node.parentElement?.closest('a')) {
+                    textNodes.push(node);
+                }
                 node = walker.nextNode();
             }
             for (const textNode of textNodes) {
@@ -395,6 +1221,10 @@
         if (type === 'text') {
             const div = document.createElement('div');
             appendLinkifiedText(div, message.text ?? '');
+            const matched = matchedHighlightKeywords(message);
+            if (matched.length > 0) {
+                applyHighlightKeywordsToContainer(div, matched);
+            }
             return div;
         }
         if (type === 'sticker') {
@@ -417,6 +1247,41 @@
         return buildReadyContentNode(type, content.id, content.fileName);
     }
 
+    // 跟隨模式下把底部釘住。ResizeObserver 是主要機制，但它的回呼要等一個繪製框架——
+    // 分頁被瀏覽器節流時（背景分頁、某些嵌入式檢視）不會觸發，媒體載入完成撐高列表就漏接了。
+    // 媒體元素的 load／loadedmetadata 事件不受繪製節流影響，兩條路徑並用才涵蓋得完整。
+    function repinToBottomIfFollowing() {
+        if (!state.following || state.historicalView) {
+            return;
+        }
+        if (state.autoScrolling) {
+            // 平滑捲動途中內容又長高：只重新瞄準新的底部，**不重設**保護期。
+            // 走 scrollToBottom(true) 會重新計時 1 秒，多張圖片陸續載入時保護期被無限延長，
+            // 使用者這段期間往上捲會被忽略、再被下一次補捲拉回底部，形同捲不上去
+            els.messageList.scrollTo({ top: els.messageList.scrollHeight, behavior: 'smooth' });
+            return;
+        }
+        // 不在平滑捲動期間就直接瞬跳，免得每張圖片載入完都放一次動畫
+        scrollToBottom(false);
+    }
+
+    // 對容器內的媒體元素掛一次性的載入事件；error 也要掛，載入失敗同樣會改變高度
+    // （fallback 內容取代原本的佔位），不掛的話失敗那一則就會把畫面卡在半空中
+    function watchMediaForRepin(container) {
+        for (const media of container.querySelectorAll('img, video, audio')) {
+            if (media.dataset.repinBound === '1') {
+                continue;
+            }
+            media.dataset.repinBound = '1';
+            const done = () => repinToBottomIfFollowing();
+            media.addEventListener('load', done, { once: true });
+            media.addEventListener('error', done, { once: true });
+            if (media.tagName !== 'IMG') {
+                media.addEventListener('loadedmetadata', done, { once: true });
+            }
+        }
+    }
+
     function createMessageRow(message, showAvatarAndName) {
         const row = document.createElement('div');
         row.className = 'message-row' + (showAvatarAndName ? ' show-avatar' : '');
@@ -428,6 +1293,18 @@
             colorSeed: message.userId || message.displayName || '?'
         });
         avatar.title = message.userId ? `${message.displayName}（${message.userId}）` : message.displayName;
+
+        if (message.userId) {
+            const consumeAvatarClick = attachContextMenuTriggers(
+                avatar, (e) => showAvatarContextMenu(e, message));
+            avatar.addEventListener('click', (e) => {
+                if (consumeAvatarClick()) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                }
+            });
+        }
+
         row.appendChild(avatar);
 
         const group = document.createElement('div');
@@ -443,10 +1320,12 @@
             group.appendChild(name);
         }
 
+        const isHigh = isHighlighted(message);
         const bubble = document.createElement('div');
         bubble.className = 'bubble'
             + (message.messageType === 'sticker' ? ' sticker' : '')
-            + (showAvatarAndName ? ' has-tail' : '');
+            + (showAvatarAndName ? ' has-tail' : '')
+            + (isHigh ? ' highlighted' : '');
         bubble.appendChild(buildContentNode(message));
 
         // LINE 的時間戳貼在泡泡外側，不是泡泡裡面
@@ -466,12 +1345,24 @@
             state.pendingContentIds.add(message.content.id);
         }
 
+        watchMediaForRepin(row);
+
         return row;
+    }
+
+    // 只觀察往下接進來的列。prepend 進來的是「載入更早」的舊訊息，使用者正停在上面讀，
+    // 那些列的圖片載入撐高時把畫面拉到底會直接毀掉閱讀位置（訊息少到撐不滿視窗時
+    // isNearBottom 恆為真、following 也恆為真，一按載入更早就會被拉走）
+    function observeRowForRepin(row) {
+        if (messageResizeObserver) {
+            messageResizeObserver.observe(row);
+        }
     }
 
     function appendMessages(messages, animate) {
         const list = els.messageList;
         for (const message of messages) {
+            state.messagesCache.set(message.id, { text: message.text, userId: message.userId });
             const key = dateKey(message.eventTimestamp);
             if (key !== state.lastAppendedDateKey) {
                 list.appendChild(createDateSeparator(message.eventTimestamp));
@@ -483,6 +1374,7 @@
             state.lastAppendedSenderId = message.userId;
 
             const row = createMessageRow(message, showAvatarAndName);
+            observeRowForRepin(row);
             if (animate) {
                 row.classList.add('message-enter');
             }
@@ -511,6 +1403,7 @@
         let lastDateKey = null;
         let lastSenderId = null;
         for (const message of messages) {
+            state.messagesCache.set(message.id, { text: message.text, userId: message.userId });
             const key = dateKey(message.eventTimestamp);
             if (key !== lastDateKey) {
                 fragment.appendChild(createDateSeparator(message.eventTimestamp));
@@ -542,6 +1435,16 @@
                 ? buildStickerFallbackNode({ text: '(貼圖)' }) 
                 : buildFailedNode());
         pendingEl.replaceWith(replacement);
+
+        // 「內容抓取中…」換成真實媒體是非同步撐高列表的另一條路徑：
+        // 換上去的當下高度還是佔位值，圖片解碼完才會長高，同樣要補捲
+        if (replacement instanceof Element) {
+            watchMediaForRepin(replacement);
+            if (replacement.matches('img, video, audio')) {
+                watchMediaForRepin(replacement.parentElement ?? replacement);
+            }
+        }
+        repinToBottomIfFollowing();
     }
 
     // === 圖片燈箱：預設縮到符合版面，點擊在「符合版面／原尺寸」間切換 ===
@@ -582,6 +1485,29 @@
 
     // === 置底跟隨 ===
 
+    let autoScrollTimer = null;
+    let messageResizeObserver = null;
+
+    function stopAutoScroll() {
+        state.autoScrolling = false;
+        if (autoScrollTimer !== null) {
+            clearTimeout(autoScrollTimer);
+            autoScrollTimer = null;
+        }
+    }
+
+    function startAutoScroll() {
+        stopAutoScroll();
+        state.autoScrolling = true;
+        autoScrollTimer = setTimeout(() => {
+            stopAutoScroll();
+            const near = isNearBottom();
+            if (near !== state.following) {
+                setFollowing(near);
+            }
+        }, 1000);
+    }
+
     function isNearBottom() {
         const list = els.messageList;
         return list.scrollHeight - list.scrollTop - list.clientHeight < NEAR_BOTTOM_THRESHOLD_PX;
@@ -592,6 +1518,11 @@
     }
 
     function scrollToBottom(smooth) {
+        if (smooth) {
+            startAutoScroll();
+        } else {
+            stopAutoScroll();
+        }
         els.messageList.scrollTo({ top: els.messageList.scrollHeight, behavior: smooth ? 'smooth' : 'auto' });
     }
 
@@ -615,7 +1546,51 @@
         updateFollowUi();
     }
 
-    // === 側欄：群組列表 ===
+    // === 側欄：群組列表與全螢幕群組橫列 ===
+
+    // 取得群組未讀 badge 文字。規則：unreadCount > 0 且不是目前群組才顯示，超過 99 顯示 99+
+    function getUnreadBadgeText(group, currentGroupId = state.groupId) {
+        if (!group || !(group.unreadCount > 0) || group.groupId === currentGroupId) {
+            return null;
+        }
+        return group.unreadCount > 99 ? '99+' : String(group.unreadCount);
+    }
+
+    function renderFullscreenGroupBar() {
+        if (!els.fullscreenGroupBar) {
+            return;
+        }
+        els.fullscreenGroupBar.innerHTML = '';
+        for (const group of state.groups) {
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'fullscreen-group-item' + (group.groupId === state.groupId ? ' active' : '');
+            btn.dataset.groupId = group.groupId;
+            btn.title = group.displayName;
+            btn.setAttribute('aria-label', group.displayName);
+
+            const avatar = buildAvatarElement('fullscreen-group-avatar', {
+                pictureUrl: group.pictureUrl,
+                iconKey: 'group',
+                isGroup: true
+            });
+            btn.appendChild(avatar);
+
+            const badgeText = getUnreadBadgeText(group, state.groupId);
+            if (badgeText) {
+                const badge = document.createElement('span');
+                badge.className = 'fullscreen-group-badge';
+                badge.textContent = badgeText;
+                btn.appendChild(badge);
+            }
+
+            btn.addEventListener('click', () => {
+                selectGroup(group.groupId);
+            });
+
+            els.fullscreenGroupBar.appendChild(btn);
+        }
+    }
 
     function renderGroupList(filterText) {
         const filter = (filterText || '').trim().toLowerCase();
@@ -630,6 +1605,7 @@
             empty.className = 'group-list-empty';
             empty.textContent = '尚無群組資料';
             els.groupList.appendChild(empty);
+            syncFullscreenGroupBar();
             return;
         }
 
@@ -638,12 +1614,27 @@
             empty.className = 'group-list-empty';
             empty.textContent = '找不到符合的群組';
             els.groupList.appendChild(empty);
+            syncFullscreenGroupBar();
             return;
         }
 
         for (const group of groups) {
             els.groupList.appendChild(createGroupItem(group));
         }
+
+        syncFullscreenGroupBar();
+    }
+
+    // 全螢幕群組列跟著側欄一起重畫，並保留橫向捲動位置（10 秒輪詢會重建整條）。
+    // 這裡刻意不套側欄的搜尋過濾——全螢幕時側欄與它的搜尋框都看不到，
+    // 過濾結果會變成使用者無從得知也無從解除的隱形狀態
+    function syncFullscreenGroupBar() {
+        if (!state.fullscreen || !els.fullscreenGroupBar) {
+            return;
+        }
+        const prevScrollLeft = els.fullscreenGroupBar.scrollLeft;
+        renderFullscreenGroupBar();
+        els.fullscreenGroupBar.scrollLeft = prevScrollLeft;
     }
 
     function createGroupItem(group) {
@@ -692,16 +1683,25 @@
         }
 
         // 正在看的群組視為已讀，不顯示 badge；其餘顯示未讀數，上限 99+
-        if (group.unreadCount > 0 && group.groupId !== state.groupId) {
+        const badgeText = getUnreadBadgeText(group, state.groupId);
+        if (badgeText) {
             const badge = document.createElement('span');
             badge.className = 'group-item-badge';
-            badge.textContent = group.unreadCount > 99 ? '99+' : String(group.unreadCount);
+            badge.textContent = badgeText;
             meta.appendChild(badge);
         }
 
         btn.appendChild(meta);
 
-        btn.addEventListener('click', () => {
+        const consumeGroupClick = attachContextMenuTriggers(
+            btn, (e) => showGroupContextMenu(e, group));
+
+        btn.addEventListener('click', (e) => {
+            if (consumeGroupClick()) {
+                e.preventDefault();
+                e.stopPropagation();
+                return;
+            }
             selectGroup(group.groupId);
             els.chatApp.classList.add('mobile-chat-open');
         });
@@ -716,6 +1716,15 @@
             // 選取中的群組不顯示未讀 badge（開啟即已讀），立即把既有 badge 拿掉
             if (isActive) {
                 item.querySelector('.group-item-badge')?.remove();
+            }
+        }
+        if (els.fullscreenGroupBar) {
+            for (const item of els.fullscreenGroupBar.querySelectorAll('.fullscreen-group-item')) {
+                const isActive = item.dataset.groupId === state.groupId;
+                item.classList.toggle('active', isActive);
+                if (isActive) {
+                    item.querySelector('.fullscreen-group-badge')?.remove();
+                }
             }
         }
     }
@@ -845,6 +1854,7 @@
     }
 
     async function jumpToSearchResult(result, query) {
+        stopAutoScroll();
         const token = ++state.requestToken;
 
         if (result.groupId !== state.groupId) {
@@ -913,6 +1923,7 @@
         renderGroupList(els.groupSearch.value);
 
         if (groups.length === 0) {
+            state.initialEmpty = true;
             return;
         }
 
@@ -920,9 +1931,22 @@
     }
 
     // loadGroups() 只在頁面載入時跑一次；之後靠這支輪詢讓側欄（新群組/預覽/排序）
-    // 定期跟資料庫同步，不然使用者在別的群組發言，側欄要重新整理才會出現
+    // 定期跟資料庫同步，不然使用者在別的群組發言，側欄要重新整理才會出現。
+    // 分頁隱藏時跳過，省掉背景分頁的無謂請求
     async function pollGroups() {
-        if (document.hidden || state.groupsPolling) {
+        if (document.hidden) {
+            return;
+        }
+        await refreshGroupList();
+    }
+
+    // 側欄清單的實際刷新。刪除群組／清空訊息這種「使用者剛按下去」的操作直接呼叫這支，
+    // 不能走 pollGroups——那支在分頁被判定為隱藏時會整個跳過，畫面會留著已經不存在的群組
+    async function refreshGroupList() {
+        if (state.groupsPolling) {
+            // 剛好有一次 10 秒輪詢在飛就排隊，等它結束再跑一次。直接 return 會讓
+            // 「刪除完成」的刷新被靜默丟掉，已刪除的群組會繼續留在側欄最多 10 秒
+            state.groupsRefreshQueued = true;
             return;
         }
         state.groupsPolling = true;
@@ -933,6 +1957,13 @@
                 body: JSON.stringify(readRequestBody())
             });
             state.groups = groups;
+
+            // 只有在請求成功回傳後才做判斷：若目前開著的群組不在清單中，代表在別台裝置被刪除或訊息被清空
+            if (state.groupId !== null && !groups.some(g => g.groupId === state.groupId)) {
+                resetChatPanel();
+                showToast('目前的群組已不存在或訊息已被清空');
+            }
+
             // 側欄每 10 秒更新一次；latch 生效後只要該群組的 lastMessageId 真的變了（有新訊息，
             // 或後端把漂移的值修正回來），就解除 latch 讓「載入更新」重新可用。比對的是「值有沒有變」
             // 而不是「有沒有大於 windowNewestId」——漂移情境下後者恆為真，latch 會每 10 秒被解除一次
@@ -950,7 +1981,8 @@
             renderGroupList(els.groupSearch.value);
             els.groupList.scrollTop = previousScrollTop;
 
-            if (state.groupId === null && groups.length > 0) {
+            if (state.initialEmpty && groups.length > 0) {
+                state.initialEmpty = false;
                 // 啟動時資料庫還沒有任何群組，之後第一筆訊息進來就自動帶使用者進去，
                 // 不必自己重新整理頁面才看得到
                 await selectGroup(groups[0].groupId);
@@ -969,9 +2001,15 @@
         } finally {
             state.groupsPolling = false;
         }
+
+        if (state.groupsRefreshQueued) {
+            state.groupsRefreshQueued = false;
+            await refreshGroupList();
+        }
     }
 
     async function selectGroup(groupId) {
+        stopAutoScroll();
         const token = ++state.requestToken;
 
         state.groupId = groupId;
@@ -1015,7 +2053,11 @@
     }
 
     function clearMessageList() {
+        if (messageResizeObserver) {
+            messageResizeObserver.disconnect();
+        }
         els.messageList.innerHTML = '';
+        state.messagesCache.clear();
         state.pendingContentIds.clear();
         state.lastAppendedDateKey = null;
         state.lastAppendedSenderId = null;
@@ -1044,9 +2086,8 @@
     function updateLoadMoreButton() {
         els.loadMoreBtn.disabled = !state.hasMoreOlder;
         els.loadMoreBtn.textContent = state.hasMoreOlder ? '載入更早 7 天' : '沒有更早的訊息';
-        // 「載入更早」是操作入口，常駐；「沒有更早的訊息」只是告知狀態，捲到畫面中間看到很突兀，
-        // 只在捲到最頂部附近時才顯示
-        els.loadMoreBtn.classList.toggle('d-none', !state.hasMoreOlder && !isNearTop());
+        // 不論是否有更早訊息，膠囊只在捲到最頂部附近時才顯示
+        els.loadMoreBtn.classList.toggle('d-none', !isNearTop());
     }
 
     function updateLoadNewerButton() {
@@ -1221,8 +2262,15 @@
 
     const FONT_BASE_PX_STORAGE_KEY = 'chat-font-base-px';
     const DEFAULT_FONT_BASE_PX = 20;
-    const FONT_BASE_PX_MIN = 12;
+    const FONT_BASE_PX_MIN = 8;
     const FONT_BASE_PX_MAX = 28;
+
+    window.messageServiceFont = {
+        FONT_BASE_PX_STORAGE_KEY,
+        FONT_BASE_PX_MIN,
+        FONT_BASE_PX_MAX,
+        DEFAULT_FONT_BASE_PX
+    };
 
     // 「中」檔的實際 px 大小，跟設定 modal 的「字體大小」數值輸入共用同一個 localStorage key；
     // 這裡只讀不寫——調整數值的介面在設定 modal，聊天頁的 Aa 選單維持小/中/大三檔切換。
@@ -1549,8 +2597,10 @@
 
     // === 初始化 ===
 
-    function init() {
+    async function init() {
         els.chatApp = $('chat-app');
+        els.chatPanel = $('chat-panel');
+        els.fullscreenGroupBar = $('fullscreen-group-bar');
         els.sidebar = $('sidebar');
         els.groupSearch = $('group-search');
         els.groupList = $('group-list');
@@ -1578,6 +2628,24 @@
         els.searchScopeButtons = Array.from(document.querySelectorAll('.search-scope-toggle [data-scope]'));
         els.historicalBanner = $('historical-banner');
         els.historicalBackBtn = $('historical-back-btn');
+        els.groupDeleteModal = $('group-delete-modal');
+        els.groupDeleteModalTitle = $('group-delete-modal-title');
+        els.groupDeleteModalCloseBtn = $('group-delete-modal-close-btn');
+        els.groupDeleteModalP1 = $('group-delete-modal-p1');
+        els.groupDeleteModalP2 = $('group-delete-modal-p2');
+        els.groupDeleteModalP3 = $('group-delete-modal-p3');
+        els.groupDeleteCancelBtn = $('group-delete-cancel-btn');
+        els.groupDeleteConfirmBtn = $('group-delete-confirm-btn');
+        // 見 hideDeleteModal：淡入中被忽略的 hide() 在轉場結束後補做
+        els.groupDeleteModal.addEventListener('shown.bs.modal', () => {
+            if (state.pendingDeleteModalHide) {
+                state.pendingDeleteModalHide = false;
+                bootstrap.Modal.getInstance(els.groupDeleteModal)?.hide();
+            }
+        });
+        els.groupDeleteModal.addEventListener('hidden.bs.modal', () => {
+            state.pendingDeleteModalHide = false;
+        });
 
         initFontSizeToggle();
         applyChatWidth();
@@ -1591,6 +2659,8 @@
                 bootstrap.Modal.getInstance(els.imageModal)?.hide();
             }
         });
+        messageResizeObserver = new ResizeObserver(repinToBottomIfFollowing);
+
         els.loadMoreBtn.addEventListener('click', loadOlder);
         els.loadNewerBtn.addEventListener('click', loadNewer);
         els.groupSearch.addEventListener('input', () => renderGroupList(els.groupSearch.value));
@@ -1601,11 +2671,22 @@
         });
         els.messageList.addEventListener('scroll', () => {
             const near = isNearBottom();
-            if (near !== state.following) {
-                setFollowing(near);
+            if (near) {
+                if (state.autoScrolling) {
+                    stopAutoScroll();
+                }
+                if (!state.following) {
+                    setFollowing(true);
+                }
+            } else {
+                if (!state.autoScrolling) {
+                    if (state.following) {
+                        setFollowing(false);
+                    }
+                }
             }
             updateLoadMoreButton();
-            if (state.historicalView && isNearBottom()) {
+            if (state.historicalView && near) {
                 loadNewer();
             }
         });
@@ -1622,6 +2703,9 @@
         els.searchInput.addEventListener('keydown', (e) => {
             if (e.key === 'Escape') {
                 closeSearchPanel();
+                // 不讓它冒泡到全螢幕的 Esc 處理：那邊看到面板已經關掉，會接著把全螢幕也退掉，
+                // 焦點在搜尋框時按一次 Esc 就跳了兩級
+                e.stopPropagation();
             }
         });
         for (const btn of els.searchScopeButtons) {
@@ -1640,15 +2724,40 @@
         }
         els.historicalBackBtn.addEventListener('click', () => selectGroup(state.groupId));
 
+        attachContextMenuTriggers(els.chatPanel, (e) => showPanelContextMenu(e), isExcludedContextTarget);
+
+        document.addEventListener('keydown', (e) => {
+            if (e.key !== 'Escape' || !state.fullscreen) {
+                return;
+            }
+            if (activeContextMenu) {
+                return;
+            }
+            if (document.querySelector('.modal.show')) {
+                return;
+            }
+            if (els.searchPanel && !els.searchPanel.classList.contains('d-none')) {
+                closeSearchPanel();
+                e.preventDefault();
+                return;
+            }
+            e.preventDefault();
+            exitFullscreen();
+        });
+
         // 設定 modal 關掉時，如果這次開啟期間真的改了東西（名稱顯示模式、關鍵字規則等），
         // settings.js 會發這個事件——重新載入目前群組的訊息視窗＋側欄，不用使用者自己重新整理
-        document.addEventListener('messageservice:settings-changed', () => {
+        document.addEventListener('messageservice:settings-changed', async () => {
+            await loadHighlightRules();
+            applyHighlightVisualSettings();
             if (state.groupId) {
                 selectGroup(state.groupId);
             }
             pollGroups();
         });
 
+        applyHighlightVisualSettings();
+        await loadHighlightRules();
         loadGroups().catch(() => setConnectionOk(false));
         setInterval(pollNewer, POLL_INTERVAL_MS);
         setInterval(pollGroups, GROUP_POLL_INTERVAL_MS);

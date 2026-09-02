@@ -198,6 +198,55 @@ namespace MessageService.Data.Migrations.Sqlite
                     b.ToTable("GroupPictures");
                 });
 
+            modelBuilder.Entity("MessageService.Models.HighlightKeyword", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER");
+
+                    b.Property<bool>("ApplyToAllGroups")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Keyword")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("HighlightKeywords");
+                });
+
+            modelBuilder.Entity("MessageService.Models.HighlightKeywordGroup", b =>
+                {
+                    b.Property<int>("HighlightKeywordId")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("GroupId")
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("HighlightKeywordId", "GroupId");
+
+                    b.ToTable("HighlightKeywordGroups");
+                });
+
+            modelBuilder.Entity("MessageService.Models.HighlightUser", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("GroupId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("UserId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("HighlightUsers");
+                });
+
             modelBuilder.Entity("MessageService.Models.HostHeartbeat", b =>
                 {
                     b.Property<string>("Role")
@@ -400,6 +449,17 @@ namespace MessageService.Data.Migrations.Sqlite
                     b.Navigation("Group");
                 });
 
+            modelBuilder.Entity("MessageService.Models.HighlightKeywordGroup", b =>
+                {
+                    b.HasOne("MessageService.Models.HighlightKeyword", "HighlightKeyword")
+                        .WithMany("Groups")
+                        .HasForeignKey("HighlightKeywordId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("HighlightKeyword");
+                });
+
             modelBuilder.Entity("MessageService.Models.MaskKeywordGroup", b =>
                 {
                     b.HasOne("MessageService.Models.MaskKeyword", "MaskKeyword")
@@ -446,6 +506,11 @@ namespace MessageService.Data.Migrations.Sqlite
             modelBuilder.Entity("MessageService.Models.GroupMessage", b =>
                 {
                     b.Navigation("Content");
+                });
+
+            modelBuilder.Entity("MessageService.Models.HighlightKeyword", b =>
+                {
+                    b.Navigation("Groups");
                 });
 
             modelBuilder.Entity("MessageService.Models.MaskKeyword", b =>

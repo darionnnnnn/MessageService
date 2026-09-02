@@ -6,8 +6,6 @@
                 <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="關閉"></button>
             </div>
             <div id="settings-modal-body" class="modal-body">
-                <div id="toast-container" class="toast-container position-fixed bottom-0 end-0 p-3"></div>
-
                 <div id="settings-app" class="settings-app">
                     <ul class="nav nav-tabs" id="settings-tabs" role="tablist">
                         <li class="nav-item" role="presentation">
@@ -18,6 +16,9 @@
                         </li>
                         <li class="nav-item" role="presentation">
                             <button class="nav-link" id="tab-keywords-btn" data-bs-toggle="tab" data-bs-target="#tab-keywords" type="button" role="tab" aria-controls="tab-keywords" aria-selected="false">關鍵字遮蔽</button>
+                        </li>
+                        <li class="nav-item" role="presentation">
+                            <button class="nav-link" id="tab-highlight-btn" data-bs-toggle="tab" data-bs-target="#tab-highlight" type="button" role="tab" aria-controls="tab-highlight" aria-selected="false">訊息高亮</button>
                         </li>
                         <li class="nav-item" role="presentation">
                             <button class="nav-link" id="tab-hosts-btn" data-bs-toggle="tab" data-bs-target="#tab-hosts" type="button" role="tab" aria-controls="tab-hosts" aria-selected="false">主機狀態</button>
@@ -31,7 +32,7 @@
                                     <div class="col-auto">
                                         <label for="font-base-px-input" class="form-label">字體大小（px）</label>
                                         <input type="number" class="form-control form-control-sm" id="font-base-px-input"
-                                               min="12" max="28" step="1" style="width:6rem">
+                                               step="1" style="width:6rem">
                                     </div>
                                     <div class="col-auto">
                                         <span id="font-base-px-preview">預覽：今天天氣真好</span>
@@ -175,6 +176,106 @@
                                         <button type="submit" class="btn btn-primary btn-sm">新增規則</button>
                                     </div>
                                 </form>
+                            </section>
+                        </div>
+
+                        <div class="tab-pane fade" id="tab-highlight" role="tabpanel" aria-labelledby="tab-highlight-btn">
+                            <section class="settings-card">
+                                <h6 class="settings-card-title">高亮關鍵字</h6>
+                                <p class="form-text">與「關鍵字遮蔽」重疊的關鍵字不會高亮：遮蔽先套用，文字已經被換成替換字元。</p>
+                                <table class="table table-sm align-middle">
+                                    <thead>
+                                        <tr>
+                                            <th>關鍵字</th>
+                                            <th>套用群組</th>
+                                            <th></th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="highlight-keyword-tbody"></tbody>
+                                </table>
+
+                                <form id="highlight-keyword-form" class="row g-3 align-items-start border-top pt-3">
+                                    <div class="col-auto">
+                                        <label for="highlight-keyword-input" class="form-label">關鍵字</label>
+                                        <input type="text" class="form-control form-control-sm" id="highlight-keyword-input" required>
+                                    </div>
+
+                                    <div class="col-auto">
+                                        <span class="form-label d-block">套用範圍</span>
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="radio" name="highlight-scope-mode" id="highlight-scope-all" checked>
+                                            <label class="form-check-label" for="highlight-scope-all">全部群組</label>
+                                        </div>
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="radio" name="highlight-scope-mode" id="highlight-scope-selected">
+                                            <label class="form-check-label" for="highlight-scope-selected">指定群組</label>
+                                        </div>
+                                        <div id="highlight-scope-group-checkboxes" class="ms-3 mt-1 d-none"></div>
+                                    </div>
+
+                                    <div class="col-auto align-self-end">
+                                        <button type="submit" class="btn btn-primary btn-sm">新增規則</button>
+                                    </div>
+                                </form>
+                            </section>
+
+                            <section class="settings-card">
+                                <h6 class="settings-card-title">高亮人員</h6>
+                                <table class="table table-sm align-middle">
+                                    <thead>
+                                        <tr>
+                                            <th>名稱</th>
+                                            <th>套用範圍</th>
+                                            <th></th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="highlight-user-tbody"></tbody>
+                                </table>
+                                <p id="highlight-users-empty" class="form-text d-none">尚未加入任何人員。在聊天畫面的成員頭貼上按右鍵（手機長按）即可加入高亮。</p>
+                            </section>
+
+                            <section class="settings-card">
+                                <h6 class="settings-card-title">顯示效果</h6>
+                                <div class="form-check">
+                                    <input class="form-check-input" type="checkbox" id="highlight-flow-toggle">
+                                    <label class="form-check-label" for="highlight-flow-toggle">邊框流動效果</label>
+                                </div>
+                                <p class="form-text">關閉後邊框仍會發光，但不會流動。系統設定為減少動態效果時一律不流動。</p>
+
+                                <div class="mb-3">
+                                    <div class="d-flex justify-content-between align-items-center mb-1">
+                                        <label for="highlight-opacity-range" class="form-label mb-0">高亮強度</label>
+                                        <span id="highlight-opacity-value" class="text-muted small">50%</span>
+                                    </div>
+                                    <input type="range" class="form-range" id="highlight-opacity-range" step="0.05">
+                                    <p class="form-text">數值越低邊框越淡，適合訊息量大時降低干擾。</p>
+                                </div>
+
+                                <div class="mb-3">
+                                    <label class="form-label d-block">預設色票（點擊加入或移除）</label>
+                                    <div id="highlight-preset-colors" class="d-flex flex-wrap gap-2 align-items-center"></div>
+                                </div>
+
+                                <div class="row g-2 align-items-center mb-3">
+                                    <div class="col-auto">
+                                        <label for="highlight-custom-color-input" class="form-label mb-0">自訂顏色</label>
+                                    </div>
+                                    <div class="col-auto">
+                                        <input type="color" class="form-control form-control-color form-control-sm" id="highlight-custom-color-input" value="#06c755" title="選擇自訂顏色">
+                                    </div>
+                                    <div class="col-auto">
+                                        <button type="button" class="btn btn-outline-secondary btn-sm" id="highlight-add-color-btn">加入自訂顏色</button>
+                                    </div>
+                                </div>
+
+                                <div class="mb-3">
+                                    <label class="form-label d-block">目前選用的顏色（依漸層順序）</label>
+                                    <div id="highlight-selected-colors" class="d-flex flex-wrap gap-2 align-items-center"></div>
+                                </div>
+
+                                <div class="highlight-preview-box mt-3">
+                                    <div class="highlight-preview-bubble flowing" id="highlight-preview-bubble">這是一則高亮訊息範例 ✨</div>
+                                </div>
                             </section>
                         </div>
 

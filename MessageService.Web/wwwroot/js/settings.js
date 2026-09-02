@@ -21,23 +21,10 @@
         return text ? JSON.parse(text) : null;
     }
 
+    // toast 的建構邏輯只在 chat.js 寫一份（容器在聊天頁層級，設定 modal 內外都看得到）。
+    // 這裡刻意不加「找不到就靜默略過」的保護——真的沒載到 chat.js 是頁面壞了，要當場炸出來
     function showToast(message, isError) {
-        const toast = document.createElement('div');
-        toast.className = 'toast align-items-center text-bg-' + (isError ? 'danger' : 'success') + ' border-0';
-        toast.setAttribute('role', 'alert');
-
-        const flex = document.createElement('div');
-        flex.className = 'd-flex';
-        const body = document.createElement('div');
-        body.className = 'toast-body';
-        body.textContent = message;
-        flex.appendChild(body);
-        toast.appendChild(flex);
-
-        els.toastContainer.appendChild(toast);
-        const instance = bootstrap.Toast.getOrCreateInstance(toast, { delay: 2500 });
-        instance.show();
-        toast.addEventListener('hidden.bs.toast', () => toast.remove());
+        window.messageServiceToast(message, isError);
     }
 
     function groupDisplayName(groupId) {
@@ -146,6 +133,372 @@
         } catch {
             showToast('新增失敗', true);
         }
+    }
+
+    // === 訊息高亮（高亮關鍵字、高亮人員、顯示效果） ===
+
+    const {
+        buildHighlightGradient,
+        computeHighlightGlow,
+        normalizeHexColor,
+        loadHighlightFlow,
+        loadHighlightColors,
+        loadHighlightOpacity,
+        clampHighlightOpacity,
+        HIGHLIGHT_OPACITY_MIN,
+        HIGHLIGHT_OPACITY_MAX,
+        applyHighlightVisualSettings,
+        HIGHLIGHT_FLOW_STORAGE_KEY,
+        HIGHLIGHT_COLORS_STORAGE_KEY,
+        HIGHLIGHT_OPACITY_STORAGE_KEY,
+        DEFAULT_HIGHLIGHT_COLORS,
+        MAX_HIGHLIGHT_COLORS
+    } = window.messageServiceHighlight;
+    const MIN_HIGHLIGHT_COLORS = 1;
+    const PRESET_HIGHLIGHT_COLORS = [
+        { hex: '#06c755', name: '綠' },
+        { hex: '#ffc53d', name: '黃' },
+        { hex: '#ff6b57', name: '珊瑚紅' },
+        { hex: '#a66cff', name: '紫' },
+        { hex: '#ff8a3d', name: '橘' },
+        { hex: '#00b8d9', name: '青' },
+        { hex: '#f25ca2', name: '粉' },
+        { hex: '#5b7fff', name: '靛' }
+    ];
+
+    let highlightColors = [...DEFAULT_HIGHLIGHT_COLORS];
+
+    // --- 高亮關鍵字 ---
+
+    function renderHighlightKeywordRow(keyword) {
+        const tr = document.createElement('tr');
+
+        const keywordTd = document.createElement('td');
+        keywordTd.textContent = keyword.keyword;
+        tr.appendChild(keywordTd);
+
+        const scopeTd = document.createElement('td');
+        scopeTd.textContent = keyword.applyToAllGroups
+            ? '全部群組'
+            : (keyword.groupIds.map(groupDisplayName).join('、') || '（未指定）');
+        tr.appendChild(scopeTd);
+
+        const actionTd = document.createElement('td');
+        const deleteBtn = document.createElement('button');
+        deleteBtn.type = 'button';
+        deleteBtn.className = 'btn btn-outline-danger btn-sm';
+        deleteBtn.textContent = '刪除';
+        deleteBtn.addEventListener('click', () => deleteHighlightKeyword(keyword.id));
+        actionTd.appendChild(deleteBtn);
+        tr.appendChild(actionTd);
+
+        return tr;
+    }
+
+    async function loadHighlightKeywords() {
+        const keywords = await fetchJson('api/settings/highlight-keywords');
+        els.highlightKeywordTbody.innerHTML = '';
+        for (const keyword of keywords) {
+            els.highlightKeywordTbody.appendChild(renderHighlightKeywordRow(keyword));
+        }
+    }
+
+    async function deleteHighlightKeyword(id) {
+        try {
+            await fetchJson(`api/settings/highlight-keywords/${id}`, { method: 'DELETE' });
+            settingsDirty = true;
+            showToast('已刪除高亮關鍵字');
+            await loadHighlightKeywords();
+        } catch {
+            showToast('刪除失敗', true);
+        }
+    }
+
+    function renderHighlightScopeCheckboxes() {
+        els.highlightScopeGroupCheckboxes.innerHTML = '';
+        for (const group of groupsCache) {
+            const wrap = document.createElement('div');
+            wrap.className = 'form-check';
+
+            const input = document.createElement('input');
+            input.className = 'form-check-input';
+            input.type = 'checkbox';
+            input.value = group.groupId;
+            input.id = `highlight-scope-group-${group.groupId}`;
+
+            const label = document.createElement('label');
+            label.className = 'form-check-label';
+            label.setAttribute('for', input.id);
+            label.textContent = group.displayName;
+
+            wrap.appendChild(input);
+            wrap.appendChild(label);
+            els.highlightScopeGroupCheckboxes.appendChild(wrap);
+        }
+    }
+
+    async function handleHighlightKeywordSubmit(event) {
+        event.preventDefault();
+        const keyword = els.highlightKeywordInput.value.trim();
+        if (!keyword) {
+            return;
+        }
+
+        const applyToAllGroups = els.highlightScopeAll.checked;
+        const groupIds = applyToAllGroups
+            ? []
+            : Array.from(els.highlightScopeGroupCheckboxes.querySelectorAll('input:checked')).map(i => i.value);
+
+        try {
+            await fetchJson('api/settings/highlight-keywords', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ keyword, applyToAllGroups, groupIds })
+            });
+            settingsDirty = true;
+            showToast('已新增高亮關鍵字');
+            els.highlightKeywordForm.reset();
+            els.highlightScopeGroupCheckboxes.classList.add('d-none');
+            await loadHighlightKeywords();
+        } catch {
+            showToast('新增失敗', true);
+        }
+    }
+
+    // --- 高亮人員 ---
+
+    function renderHighlightUserRow(user) {
+        const tr = document.createElement('tr');
+
+        const nameTd = document.createElement('td');
+        nameTd.textContent = user.displayName;
+        tr.appendChild(nameTd);
+
+        const scopeTd = document.createElement('td');
+        scopeTd.textContent = user.groupId == null ? '全部群組' : (user.groupName || '（未知群組）');
+        tr.appendChild(scopeTd);
+
+        const actionTd = document.createElement('td');
+        const removeBtn = document.createElement('button');
+        removeBtn.type = 'button';
+        removeBtn.className = 'btn btn-outline-danger btn-sm';
+        removeBtn.textContent = '移除';
+        removeBtn.addEventListener('click', () => deleteHighlightUser(user.id));
+        actionTd.appendChild(removeBtn);
+        tr.appendChild(actionTd);
+
+        return tr;
+    }
+
+    async function loadHighlightUsers() {
+        const users = await fetchJson('api/settings/highlight-users');
+        els.highlightUsersEmpty.classList.toggle('d-none', Boolean(users && users.length > 0));
+        els.highlightUserTbody.innerHTML = '';
+        if (users) {
+            for (const user of users) {
+                els.highlightUserTbody.appendChild(renderHighlightUserRow(user));
+            }
+        }
+    }
+
+    async function deleteHighlightUser(id) {
+        try {
+            await fetchJson(`api/settings/highlight-users/${id}`, { method: 'DELETE' });
+            settingsDirty = true;
+            showToast('已移除人員高亮');
+            await loadHighlightUsers();
+        } catch {
+            showToast('移除失敗', true);
+        }
+    }
+
+    // --- 顯示效果（流動開關與顏色） ---
+
+    function saveHighlightFlow(enabled) {
+        try {
+            localStorage.setItem(HIGHLIGHT_FLOW_STORAGE_KEY, enabled ? '1' : '0');
+        } catch {
+            // localStorage 不可用就只套用當次工作階段
+        }
+    }
+
+    function saveHighlightColors(colors) {
+        try {
+            localStorage.setItem(HIGHLIGHT_COLORS_STORAGE_KEY, JSON.stringify(colors));
+        } catch {
+            // localStorage 不可用就只套用當次工作階段
+        }
+    }
+
+    function saveHighlightOpacity(opacity) {
+        try {
+            localStorage.setItem(HIGHLIGHT_OPACITY_STORAGE_KEY, String(opacity));
+        } catch {
+            // localStorage 不可用就只套用當次工作階段
+        }
+    }
+
+    function updateHighlightPreview() {
+        if (!els.highlightPreviewBubble) {
+            return;
+        }
+        const rawOpacity = els.highlightOpacityRange ? parseFloat(els.highlightOpacityRange.value) : loadHighlightOpacity();
+        const opacity = clampHighlightOpacity(rawOpacity);
+        const gradient = buildHighlightGradient(highlightColors, opacity);
+        els.highlightPreviewBubble.style.setProperty('--highlight-preview-gradient', gradient);
+        els.highlightPreviewBubble.style.setProperty('--highlight-preview-glow', computeHighlightGlow(highlightColors[0], opacity));
+        const flowEnabled = els.highlightFlowToggle.checked;
+        els.highlightPreviewBubble.classList.toggle('flowing', flowEnabled);
+    }
+
+    function renderPresetSwatches() {
+        els.highlightPresetColors.innerHTML = '';
+        for (const preset of PRESET_HIGHLIGHT_COLORS) {
+            const hex = preset.hex.toLowerCase();
+            const isSelected = highlightColors.includes(hex);
+
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = `highlight-color-swatch-btn${isSelected ? ' active' : ''}`;
+            btn.style.backgroundColor = hex;
+            btn.title = `${preset.name} (${hex})`;
+            btn.setAttribute('aria-label', `${preset.name} ${hex}`);
+            if (isSelected) {
+                btn.textContent = '✓';
+            }
+
+            btn.addEventListener('click', () => handlePresetColorClick(hex));
+            els.highlightPresetColors.appendChild(btn);
+        }
+    }
+
+    function renderSelectedColors() {
+        els.highlightSelectedColors.innerHTML = '';
+        highlightColors.forEach((hex, idx) => {
+            const item = document.createElement('div');
+            item.className = 'highlight-selected-color-item';
+
+            const dot = document.createElement('span');
+            dot.className = 'highlight-selected-color-dot';
+            dot.style.backgroundColor = hex;
+            item.appendChild(dot);
+
+            const code = document.createElement('code');
+            code.textContent = hex;
+            item.appendChild(code);
+
+            const removeBtn = document.createElement('button');
+            removeBtn.type = 'button';
+            removeBtn.className = 'highlight-remove-color-btn';
+            removeBtn.setAttribute('aria-label', `移除顏色 ${hex}`);
+            removeBtn.textContent = '×';
+            removeBtn.addEventListener('click', () => removeHighlightColor(idx));
+            item.appendChild(removeBtn);
+
+            els.highlightSelectedColors.appendChild(item);
+        });
+    }
+
+    function renderHighlightVisualUI() {
+        renderPresetSwatches();
+        renderSelectedColors();
+        updateHighlightPreview();
+    }
+
+    function handlePresetColorClick(hex) {
+        if (highlightColors.includes(hex)) {
+            if (highlightColors.length <= MIN_HIGHLIGHT_COLORS) {
+                showToast('至少要保留一個顏色', true);
+                return;
+            }
+            highlightColors = highlightColors.filter(c => c !== hex);
+            saveHighlightColors(highlightColors);
+            settingsDirty = true;
+            renderHighlightVisualUI();
+        } else {
+            if (highlightColors.length >= MAX_HIGHLIGHT_COLORS) {
+                showToast('最多只能選 8 個顏色', true);
+                return;
+            }
+            highlightColors.push(hex);
+            saveHighlightColors(highlightColors);
+            settingsDirty = true;
+            renderHighlightVisualUI();
+        }
+    }
+
+    function handleAddCustomColor() {
+        const raw = els.highlightCustomColorInput.value;
+        const hex = normalizeHexColor(raw);
+        if (!hex) {
+            return;
+        }
+        if (highlightColors.includes(hex)) {
+            showToast('這個顏色已經在清單裡', true);
+            return;
+        }
+        if (highlightColors.length >= MAX_HIGHLIGHT_COLORS) {
+            showToast('最多只能選 8 個顏色', true);
+            return;
+        }
+        highlightColors.push(hex);
+        saveHighlightColors(highlightColors);
+        settingsDirty = true;
+        renderHighlightVisualUI();
+    }
+
+    function removeHighlightColor(idx) {
+        if (highlightColors.length <= MIN_HIGHLIGHT_COLORS) {
+            showToast('至少要保留一個顏色', true);
+            return;
+        }
+        highlightColors.splice(idx, 1);
+        saveHighlightColors(highlightColors);
+        settingsDirty = true;
+        renderHighlightVisualUI();
+    }
+
+    function initHighlightVisualSettings() {
+        const flowEnabled = loadHighlightFlow();
+        els.highlightFlowToggle.checked = flowEnabled;
+        const opacity = loadHighlightOpacity();
+        if (els.highlightOpacityRange) {
+            // 區間由 chat.js 的共享出口提供，HTML 不再手寫一份（比照字體大小的作法）
+            els.highlightOpacityRange.setAttribute('min', String(HIGHLIGHT_OPACITY_MIN));
+            els.highlightOpacityRange.setAttribute('max', String(HIGHLIGHT_OPACITY_MAX));
+            els.highlightOpacityRange.value = String(opacity);
+        }
+        if (els.highlightOpacityValue) {
+            els.highlightOpacityValue.textContent = `${Math.round(opacity * 100)}%`;
+        }
+        highlightColors = loadHighlightColors();
+
+        renderHighlightVisualUI();
+
+        els.highlightFlowToggle.addEventListener('change', () => {
+            const enabled = els.highlightFlowToggle.checked;
+            saveHighlightFlow(enabled);
+            settingsDirty = true;
+            updateHighlightPreview();
+        });
+
+        if (els.highlightOpacityRange) {
+            els.highlightOpacityRange.addEventListener('input', () => {
+                const rawVal = parseFloat(els.highlightOpacityRange.value);
+                const val = clampHighlightOpacity(rawVal);
+                if (els.highlightOpacityValue) {
+                    els.highlightOpacityValue.textContent = `${Math.round(val * 100)}%`;
+                }
+                saveHighlightOpacity(val);
+                settingsDirty = true;
+                updateHighlightPreview();
+                // 強度是要「邊調邊看」的設定，光看 modal 裡的預覽泡泡判斷不了實際訊息串的效果。
+                // 比照字體大小的既有作法，即時套到背後的聊天畫面上（設定 modal 跟聊天頁是同一個頁面）
+                applyHighlightVisualSettings();
+            });
+        }
+
+        els.highlightAddColorBtn.addEventListener('click', handleAddCustomColor);
     }
 
     // === 名稱顯示 ===
@@ -319,10 +672,12 @@
     // === 字體大小（跟對話頁共用同一份 localStorage key，這裡改了對話頁下次開啟也會吃到；
     //     對話頁的「中」檔＝這裡設定的數值，「小」「大」依既有比例跟著調整） ===
 
-    const FONT_BASE_PX_STORAGE_KEY = 'chat-font-base-px';
-    const DEFAULT_FONT_BASE_PX = 20;
-    const FONT_BASE_PX_MIN = 12;
-    const FONT_BASE_PX_MAX = 28;
+    const {
+        FONT_BASE_PX_STORAGE_KEY,
+        FONT_BASE_PX_MIN,
+        FONT_BASE_PX_MAX,
+        DEFAULT_FONT_BASE_PX
+    } = window.messageServiceFont;
 
     function loadFontBasePx() {
         let saved;
@@ -343,6 +698,8 @@
     }
 
     function initFontBasePx() {
+        els.fontBasePxInput.setAttribute('min', String(FONT_BASE_PX_MIN));
+        els.fontBasePxInput.setAttribute('max', String(FONT_BASE_PX_MAX));
         // 頁面載入時 chat.js 已經套用過一次同一份設定，這裡只需要把輸入框的顯示值補上
         els.fontBasePxInput.value = loadFontBasePx();
 
@@ -607,7 +964,6 @@
     function wireElements() {
         els.fontBasePxInput = $('font-base-px-input');
         els.fullWidthToggle = $('full-width-toggle');
-        els.toastContainer = $('toast-container');
         els.keywordTbody = $('keyword-tbody');
         els.keywordForm = $('keyword-form');
         els.keywordInput = $('keyword-input');
@@ -617,6 +973,22 @@
         els.scopeAll = $('scope-all');
         els.scopeSelected = $('scope-selected');
         els.scopeGroupCheckboxes = $('scope-group-checkboxes');
+        els.highlightKeywordTbody = $('highlight-keyword-tbody');
+        els.highlightKeywordForm = $('highlight-keyword-form');
+        els.highlightKeywordInput = $('highlight-keyword-input');
+        els.highlightScopeAll = $('highlight-scope-all');
+        els.highlightScopeSelected = $('highlight-scope-selected');
+        els.highlightScopeGroupCheckboxes = $('highlight-scope-group-checkboxes');
+        els.highlightUserTbody = $('highlight-user-tbody');
+        els.highlightUsersEmpty = $('highlight-users-empty');
+        els.highlightFlowToggle = $('highlight-flow-toggle');
+        els.highlightOpacityRange = $('highlight-opacity-range');
+        els.highlightOpacityValue = $('highlight-opacity-value');
+        els.highlightPresetColors = $('highlight-preset-colors');
+        els.highlightCustomColorInput = $('highlight-custom-color-input');
+        els.highlightAddColorBtn = $('highlight-add-color-btn');
+        els.highlightSelectedColors = $('highlight-selected-colors');
+        els.highlightPreviewBubble = $('highlight-preview-bubble');
         els.aliasEditor = $('alias-editor');
         els.aliasGroupFilter = $('alias-group-filter');
         els.aliasTbody = $('alias-tbody');
@@ -641,12 +1013,17 @@
     function wireStaticListeners() {
         initFontBasePx();
         initFullWidthToggle();
+        initHighlightVisualSettings();
 
         els.replacementCustom.addEventListener('change', () => { els.replacementInput.disabled = false; });
         els.replacementDefault.addEventListener('change', () => { els.replacementInput.disabled = true; });
         els.scopeSelected.addEventListener('change', () => els.scopeGroupCheckboxes.classList.remove('d-none'));
         els.scopeAll.addEventListener('change', () => els.scopeGroupCheckboxes.classList.add('d-none'));
         els.keywordForm.addEventListener('submit', handleKeywordSubmit);
+
+        els.highlightScopeSelected.addEventListener('change', () => els.highlightScopeGroupCheckboxes.classList.remove('d-none'));
+        els.highlightScopeAll.addEventListener('change', () => els.highlightScopeGroupCheckboxes.classList.add('d-none'));
+        els.highlightKeywordForm.addEventListener('submit', handleHighlightKeywordSubmit);
 
         document.querySelectorAll('input[name="display-mode"]').forEach(
             radio => radio.addEventListener('change', handleDisplayModeChange));
@@ -689,6 +1066,7 @@
     async function loadInitialData() {
         groupsCache = await fetchJson('api/groups');
         renderScopeCheckboxes();
+        renderHighlightScopeCheckboxes();
 
         els.aliasGroupFilter.innerHTML = '';
         const allOption = document.createElement('option');
@@ -703,7 +1081,8 @@
         }
 
         await Promise.all([
-            loadKeywords(), loadDisplaySettings(), loadPiiMaskingSettings(), loadRetentionSettings(),
+            loadKeywords(), loadHighlightKeywords(), loadHighlightUsers(),
+            loadDisplaySettings(), loadPiiMaskingSettings(), loadRetentionSettings(),
             loadDatabaseStatus(), loadHostHeartbeats(), loadMessageFlow()
         ]);
     }

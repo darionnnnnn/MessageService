@@ -43,6 +43,7 @@
                 <span id="chat-header-name" class="chat-header-name">選擇一個群組</span>
                 <span id="chat-header-members" class="chat-header-members"></span>
             </div>
+            <div id="fullscreen-group-bar" class="fullscreen-group-bar" role="tablist" aria-label="群組列表"></div>
             <button id="search-toggle-btn" type="button" class="btn btn-sm btn-header-action" aria-label="搜尋訊息">🔍</button>
             <div class="font-size-toggle dropdown">
                 <button class="btn btn-sm btn-header-action dropdown-toggle" type="button" id="font-size-dropdown-btn" data-bs-toggle="dropdown" aria-expanded="false">Aa</button>
@@ -108,6 +109,28 @@
         </div>
     </div>
 </div>
+
+<div class="modal fade" id="group-delete-modal" tabindex="-1" aria-hidden="true" aria-labelledby="group-delete-modal-title">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="group-delete-modal-title"></h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="關閉" id="group-delete-modal-close-btn"></button>
+            </div>
+            <div class="modal-body" id="group-delete-modal-body">
+                <p id="group-delete-modal-p1" class="mb-2"></p>
+                <p id="group-delete-modal-p2" class="mb-2 text-danger"></p>
+                <p id="group-delete-modal-p3" class="mb-0 text-secondary d-none"></p>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal" id="group-delete-cancel-btn">取消</button>
+                <button type="button" class="btn btn-danger" id="group-delete-confirm-btn"></button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div id="toast-container" class="toast-container position-fixed bottom-0 end-0 p-3"></div>
 
 @await Html.PartialAsync("_SettingsModal")
 

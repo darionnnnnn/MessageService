@@ -363,9 +363,9 @@ body.chat-page .chat-app {
 }
 
 .message-row .avatar {
-    width: 2.1rem;
-    height: 2.1rem;
-    font-size: 1.05rem;
+    width: calc(var(--chat-base-current) * 2.1rem / 1.15rem);
+    height: calc(var(--chat-base-current) * 2.1rem / 1.15rem);
+    font-size: calc(var(--chat-base-current) * 1.05rem / 1.15rem);
     visibility: hidden;
 }
 
@@ -714,8 +714,10 @@ body.chat-page .chat-app {
 .message-list {
     flex: 1 1 auto;
     overflow-y: auto;
-    /* 頂端留白要跟著載入更早膠囊的字級一起長高，字級最大檔時膠囊才不會蓋到第一則訊息 */
-    padding: calc(1.8rem + 1rem * var(--font-scale, 1)) var(--gutter) var(--gutter);
+    /* 頂端留白：1.2rem 涵蓋膠囊的 top (.6rem) 與上下 padding (.6rem)；
+       後項依 --chat-base-current 等比放大（係數 1.5rem / 1.15rem 高於膠囊字級的 .9rem / 1.15rem * 行高），
+       確保在 8px～28px 全區間膠囊皆不遮擋第一則訊息，且小字級時不會殘留過大空白 */
+    padding: calc(1.2rem + var(--chat-base-current) * 1.5rem / 1.15rem) var(--gutter) var(--gutter);
     display: flex;
     flex-direction: column;
 }
@@ -797,6 +799,12 @@ body.chat-page .chat-app {
     word-break: break-all;
 }
 
+/* 命中訊息高亮關鍵字：粗體＋放大 1px（1px 是使用者要求的絕對值，不隨字級等比縮放） */
+.highlight-keyword {
+    font-weight: 700;
+    font-size: calc(1em + 1px);
+}
+
 /* 同一組第一顆泡泡指向頭貼的小尾巴，仿 LINE 樣式。頭貼是頂端對齊，尾巴要在左上角
    才指得到頭貼——尺寸用 em 跟著字級縮放，字級放大後圓角變大時尾巴才不會脫節；
    左上圓角同步縮小，讓尾巴與泡泡邊緣自然銜接 */
@@ -828,6 +836,27 @@ body.chat-page .chat-app {
 
 .bubble.sticker.has-tail::before {
     display: none;
+}
+
+/* 命中訊息高亮：流動漸層邊框＋光暈 */
+.bubble.highlighted {
+    border: 2px solid transparent;
+    background: linear-gradient(var(--line-bubble-bg), var(--line-bubble-bg)) padding-box,
+                var(--highlight-gradient, linear-gradient(135deg, #06c755, #ffc53d, #ff6b57, #a66cff)) border-box;
+    background-size: 100% 100%, 300% 300%;
+    box-shadow: 0 0 10px var(--highlight-glow, rgba(6, 199, 85, .35));
+}
+
+html.highlight-flowing .bubble.highlighted:not(.sticker) {
+    animation: highlight-flow-anim 4s ease infinite;
+}
+
+/* 貼圖泡泡維持透明底色，高亮改以 drop-shadow 光暈呈現，不產生白底方塊 */
+.bubble.sticker.highlighted {
+    background: transparent;
+    border: none;
+    box-shadow: none;
+    filter: drop-shadow(0 0 8px var(--highlight-glow, rgba(6, 199, 85, .35)));
 }
 
 /* 貼圖跟 LINE 一樣浮貼在背景上，不裝進白色泡泡；固定尺寸不跟字級縮放
@@ -992,8 +1021,60 @@ body.chat-page .chat-app {
     outline-offset: 2px;
 }
 
+/* === 右鍵／長按快捷選單 === */
+
+.context-menu {
+    position: fixed;
+    z-index: 1055;
+    min-width: 140px;
+    background: #fff;
+    border-radius: var(--radius-md);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, .18), 0 1px 3px rgba(0, 0, 0, .08);
+    padding: .35rem;
+    display: flex;
+    flex-direction: column;
+    gap: .15rem;
+    border: 1px solid #e5e5e5;
+}
+
+.context-menu-item {
+    display: block;
+    width: 100%;
+    text-align: left;
+    border: none;
+    background: transparent;
+    padding: .45rem .75rem;
+    font-size: calc(var(--chat-base-current) * .95rem / 1.15rem);
+    color: #1b1b1b;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    transition: background-color var(--transition-fast), color var(--transition-fast);
+    white-space: nowrap;
+}
+
+.context-menu-item:hover,
+.context-menu-item:focus-visible {
+    background: var(--sidebar-hover);
+    outline: none;
+}
+
+.context-menu-item-danger {
+    color: #dc3545;
+}
+
+.context-menu-item-danger:hover,
+.context-menu-item-danger:focus-visible {
+    background: #ffebee;
+    color: #b02a37;
+}
+
 @media (prefers-reduced-motion: reduce) {
-    .message-row.message-enter {
+    .message-row.message-enter,
+    .message-row.message-highlight-flash .bubble,
+    .highlight-preview-bubble.flowing,
+    /* 選擇器要跟上面那條高亮流動規則一樣具體（含 :not(.sticker)），
+       否則特異性比它低、animation: none 會被蓋掉，減少動態效果等於沒生效 */
+    html.highlight-flowing .bubble.highlighted:not(.sticker) {
         animation: none;
     }
 
@@ -1003,7 +1084,10 @@ body.chat-page .chat-app {
     .mobile-back-btn,
     .sidebar-resizer,
     .sidebar-collapse-btn,
-    .sidebar-expand-btn {
+    .sidebar-expand-btn,
+    .context-menu-item,
+    .fullscreen-group-item,
+    .highlight-color-swatch-btn {
         transition: none;
     }
 }
@@ -1202,3 +1286,204 @@ body.chat-page .chat-app {
         display: none;
     }
 }
+
+/* === 頁面內全螢幕模式與群組橫列 === */
+
+.fullscreen-group-bar {
+    display: none;
+    flex: 1 1 auto;
+    min-width: 0;
+    align-items: center;
+    gap: .5rem;
+    overflow-x: auto;
+    /* 橫向捲動會把 overflow-y 也變成裁切，所以未讀 badge 不能溢出到項目框外
+       （見 .fullscreen-group-badge 貼齊角落而非 -3px），這裡才能把上下內距歸零、
+       讓整條標頭再矮一截——全螢幕的目的就是把高度讓給訊息 */
+    overflow-y: hidden;
+    padding: 0;
+    scrollbar-width: thin;
+}
+
+.fullscreen-group-item {
+    flex: none;
+    position: relative;
+    background: transparent;
+    border: none;
+    padding: 2px;
+    border-radius: 42%;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    transition: background-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.fullscreen-group-item:hover {
+    background: var(--sidebar-hover);
+}
+
+.fullscreen-group-item.active {
+    box-shadow: 0 0 0 2px var(--line-green);
+    background: rgba(6, 199, 85, .1);
+}
+
+.fullscreen-group-item:focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 2px;
+}
+
+.fullscreen-group-avatar {
+    width: 32px;
+    height: 32px;
+    font-size: 1.05rem;
+    border-radius: 38%;
+}
+
+.fullscreen-group-badge {
+    position: absolute;
+    top: 0;
+    right: 0;
+    background: var(--unread-badge-bg);
+    color: #fff;
+    font-weight: 700;
+    font-size: calc(var(--chat-base-current) * .72rem / 1.15rem);
+    line-height: 1;
+    padding: .2em .4em;
+    border-radius: 999px;
+    min-width: 1.4em;
+    text-align: center;
+    box-shadow: 0 0 0 1.5px #fff;
+    pointer-events: none;
+    z-index: 1;
+}
+
+.chat-app.fullscreen .sidebar,
+.chat-app.fullscreen .sidebar-resizer {
+    display: none !important;
+}
+
+.chat-app.fullscreen .chat-panel {
+    display: flex !important;
+}
+
+.chat-app.fullscreen .composer-bar {
+    display: none;
+}
+
+.chat-app.fullscreen .chat-header {
+    padding-top: .3rem;
+    padding-bottom: .3rem;
+}
+
+.chat-app.fullscreen .chat-header-avatar,
+.chat-app.fullscreen .chat-header-info,
+.chat-app.fullscreen .sidebar-expand-btn,
+.chat-app.fullscreen .mobile-back-btn {
+    display: none !important;
+}
+
+.chat-app.fullscreen .fullscreen-group-bar {
+    display: flex;
+}
+
+/* === 訊息高亮設定（預覽與顏色選取器） === */
+
+.highlight-preview-box {
+    background: var(--line-chat-bg);
+    padding: 1.25rem;
+    border-radius: var(--radius-md);
+    display: flex;
+    justify-content: flex-start;
+    align-items: center;
+}
+
+.highlight-preview-bubble {
+    position: relative;
+    background: #fff;
+    color: var(--line-text);
+    border-radius: .9rem;
+    padding: .5rem .75rem;
+    font-size: calc(var(--chat-base-current, 20px) * 1.15rem / 1.15rem);
+    max-width: 100%;
+    border: 2px solid transparent;
+    background: linear-gradient(#fff, #fff) padding-box,
+                var(--highlight-preview-gradient, linear-gradient(135deg, #06c755, #ffc53d, #ff6b57, #a66cff)) border-box;
+    background-size: 100% 100%, 300% 300%;
+    box-shadow: 0 0 10px var(--highlight-preview-glow, rgba(6, 199, 85, .35));
+}
+
+.highlight-preview-bubble.flowing {
+    animation: highlight-flow-anim 4s ease infinite;
+}
+
+@keyframes highlight-flow-anim {
+    0% { background-position: 0% 0%, 0% 50%; }
+    50% { background-position: 0% 0%, 100% 50%; }
+    100% { background-position: 0% 0%, 0% 50%; }
+}
+
+.highlight-color-swatch-btn {
+    width: 2.2rem;
+    height: 2.2rem;
+    border-radius: var(--radius-sm);
+    border: 2px solid transparent;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: #fff;
+    font-weight: 700;
+    font-size: 1rem;
+    text-shadow: 0 1px 2px rgba(0, 0, 0, .6);
+    transition: transform var(--transition-fast), box-shadow var(--transition-fast);
+    padding: 0;
+}
+
+.highlight-color-swatch-btn:hover {
+    transform: scale(1.08);
+}
+
+.highlight-color-swatch-btn.active {
+    border-color: #111;
+    box-shadow: 0 0 0 2px #fff, 0 0 0 4px var(--focus-ring);
+}
+
+.highlight-selected-color-item {
+    display: inline-flex;
+    align-items: center;
+    gap: .4rem;
+    background: #f8f9fa;
+    border: 1px solid #dee2e6;
+    border-radius: 999px;
+    padding: .2rem .6rem .2rem .35rem;
+    font-size: .9rem;
+}
+
+.highlight-selected-color-dot {
+    width: 1.1rem;
+    height: 1.1rem;
+    border-radius: 50%;
+    border: 1px solid rgba(0, 0, 0, .15);
+    flex: none;
+}
+
+.highlight-selected-color-item code {
+    font-size: .85rem;
+    color: #333;
+}
+
+.highlight-remove-color-btn {
+    border: none;
+    background: transparent;
+    color: #888;
+    font-size: 1.1rem;
+    line-height: 1;
+    padding: 0 .15rem;
+    cursor: pointer;
+    border-radius: 50%;
+}
+
+.highlight-remove-color-btn:hover {
+    color: #dc3545;
+}
+
