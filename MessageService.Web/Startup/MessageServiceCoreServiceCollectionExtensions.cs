@@ -207,6 +207,7 @@ public static class MessageServiceCoreServiceCollectionExtensions
             builder.Services.AddScoped<ContentStreamService>();
             builder.Services.AddScoped<IMaskingService, MaskingService>();
             builder.Services.AddScoped<IAnonymousIdentityService, AnonymousIdentityService>();
+            builder.Services.AddScoped<GroupDeletionService>();
         }
 
         // 媒體下載／頭貼快取的資料來源：有資料庫就直接查（AllInOne／Core／Viewer，包含

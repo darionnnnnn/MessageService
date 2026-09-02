@@ -11,7 +11,10 @@ namespace MessageService.Web.Controllers.Api;
 [ApiController]
 [Route("api/groups")]
 [RequiresCapability(Capability.Viewer)]
-public class GroupsController(MessageDbContext dbContext, IMaskingService maskingService) : ControllerBase
+public class GroupsController(
+    MessageDbContext dbContext,
+    IMaskingService maskingService,
+    GroupDeletionService groupDeletionService) : ControllerBase
 {
     // 側欄未讀數的上限：超過就一律顯示「99+」，也順便讓 COUNT 查詢在 SQL 端就截斷，
     // 不必真的數完一個很久沒看的群組累積的成千上萬則
@@ -39,6 +42,35 @@ public class GroupsController(MessageDbContext dbContext, IMaskingService maskin
         [FromBody] GroupListRequestDto? request, CancellationToken cancellationToken)
     {
         return await BuildGroupListAsync(request?.Read ?? new Dictionary<string, long>(), cancellationToken);
+    }
+
+    /// <summary>刪除指定群組的全部歷史訊息，保留群組本體與快取。</summary>
+    [HttpDelete("{groupId}/messages")]
+    public async Task<ActionResult<GroupDeletionResultDto>> DeleteMessages(
+        string groupId, CancellationToken cancellationToken)
+    {
+        var result = await groupDeletionService.DeleteMessagesAsync(groupId, cancellationToken);
+        if (result is null)
+        {
+            return NotFound();
+        }
+
+        return Ok(new GroupDeletionResultDto(result.MessageCount, 0, 0, 0));
+    }
+
+    /// <summary>刪除指定群組本體及其所有相關資料。</summary>
+    [HttpDelete("{groupId}")]
+    public async Task<ActionResult<GroupDeletionResultDto>> DeleteGroup(
+        string groupId, CancellationToken cancellationToken)
+    {
+        var result = await groupDeletionService.DeleteGroupAsync(groupId, cancellationToken);
+        if (result is null)
+        {
+            return NotFound();
+        }
+
+        return Ok(new GroupDeletionResultDto(
+            result.MessageCount, result.MemberCount, result.AnonymousIdentityCount, result.MaskKeywordScopeCount));
     }
 
     private async Task<ActionResult<IReadOnlyList<GroupDto>>> BuildGroupListAsync(
