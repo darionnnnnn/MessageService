@@ -343,11 +343,17 @@ public static class MessageServiceCoreServiceCollectionExtensions
             {
                 ConfigureLineClient(sp, client, "line/api/");
             }).AddHttpMessageHandler<LineAuthorizationHandler>();
+            // 緩衝上限必須大於 MaxImageSize（預留 1024 位元組餘量），
+            // 避免稍微超過 2MB 的圖片在 ReadAsByteArrayAsync 階段直接噴緩衝溢位例外被當成 Transient，
+            // 讓 DownloadPictureAsync 能讀入並依實際長度正確判定為永久失敗（Permanent）。
             builder.Services.AddHttpClient(LineProfileClient.ImageHttpClientName,
-                client => client.MaxResponseContentBufferSize = LineProfileClient.MaxImageSize);
+                client => client.MaxResponseContentBufferSize = LineProfileClient.MaxImageSize + 1024);
 
             builder.Services.AddHostedService<ContentDownloadService>();
             builder.Services.AddHostedService<ProfileRefreshService>();
+            // 補刷的產物是「丟進刷新佇列的工作」，只有真的會消費佇列、也真的能打 LINE 的
+            // 那台跑才有意義；資料來源由 IProfileStore 決定，AllInOne 查本機資料庫、Edge 打 Core 的 ingest API。
+            builder.Services.AddHostedService<ProfileBackfillService>();
         }
         else
         {

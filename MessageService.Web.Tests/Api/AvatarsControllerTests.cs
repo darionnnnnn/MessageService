@@ -112,7 +112,7 @@ public class AvatarsControllerTests : IDisposable
     [InlineData("Anonymous")]
     [InlineData("MaskMiddle")]
     [InlineData("CustomAlias")]
-    public async Task GetGroupAvatar_WhenNotOriginalDisplayMode_ReturnsNotFound(string mode)
+    public async Task GetGroupAvatar_WhenNotOriginalDisplayMode_ReturnsOkWithPicture(string mode)
     {
         var pictureBytes = new byte[] { 0x01, 0x02, 0x03, 0x04 };
         var now = DateTimeOffset.UtcNow;
@@ -131,7 +131,110 @@ public class AvatarsControllerTests : IDisposable
 
         var response = await _fixture.Client.GetAsync("/api/groups/G1/avatar");
 
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadAsByteArrayAsync();
+        Assert.Equal(pictureBytes, body);
+    }
+
+    [Theory]
+    [InlineData("Anonymous")]
+    [InlineData("MaskMiddle")]
+    [InlineData("CustomAlias")]
+    public async Task GetMemberAvatar_WhenNotOriginalDisplayMode_ReturnsNotFound(string mode)
+    {
+        var pictureBytes = new byte[] { 0x01, 0x02, 0x03, 0x04 };
+        var now = DateTimeOffset.UtcNow;
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            (await dbContext.ViewerSettings.SingleAsync()).NameDisplayMode = Enum.Parse<NameDisplayMode>(mode);
+            dbContext.GroupMembers.Add(new GroupMember
+            {
+                GroupId = "G1",
+                UserId = "U1",
+                DisplayName = "User 1",
+                Picture = new GroupMemberPicture { GroupId = "G1", UserId = "U1", Content = pictureBytes },
+                PictureContentType = "image/png",
+                PictureUpdatedAt = now
+            });
+        });
+
+        var response = await _fixture.Client.GetAsync("/api/groups/G1/members/U1/avatar");
+
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task GetGroupAvatar_WhenPictureContentIsEmpty_ReturnsNotFound()
+    {
+        var now = DateTimeOffset.UtcNow;
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            dbContext.Groups.Add(new Group
+            {
+                GroupId = "G1",
+                GroupName = "Group 1",
+                Picture = new GroupPicture { GroupId = "G1", Content = Array.Empty<byte>() },
+                PictureContentType = "image/jpeg",
+                PictureUpdatedAt = now
+            });
+        });
+
+        var response = await _fixture.Client.GetAsync("/api/groups/G1/avatar");
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task GetMemberAvatar_WhenPictureContentIsEmpty_ReturnsNotFound()
+    {
+        var now = DateTimeOffset.UtcNow;
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            dbContext.GroupMembers.Add(new GroupMember
+            {
+                GroupId = "G1",
+                UserId = "U1",
+                DisplayName = "User 1",
+                Picture = new GroupMemberPicture { GroupId = "G1", UserId = "U1", Content = Array.Empty<byte>() },
+                PictureContentType = "image/png",
+                PictureUpdatedAt = now
+            });
+        });
+
+        var response = await _fixture.Client.GetAsync("/api/groups/G1/members/U1/avatar");
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task GetGroupAvatar_When304NotModified_IncludesETagAndCacheControlHeaders()
+    {
+        var pictureBytes = new byte[] { 0x01, 0x02, 0x03, 0x04 };
+        var now = DateTimeOffset.UtcNow;
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            dbContext.Groups.Add(new Group
+            {
+                GroupId = "G1",
+                GroupName = "Group 1",
+                Picture = new GroupPicture { GroupId = "G1", Content = pictureBytes },
+                PictureContentType = "image/jpeg",
+                PictureUpdatedAt = now
+            });
+        });
+
+        var response1 = await _fixture.Client.GetAsync("/api/groups/G1/avatar");
+        var etag = response1.Headers.ETag?.Tag;
+        Assert.NotNull(etag);
+
+        var request2 = new HttpRequestMessage(HttpMethod.Get, "/api/groups/G1/avatar");
+        request2.Headers.IfNoneMatch.ParseAdd(etag);
+        var response2 = await _fixture.Client.SendAsync(request2);
+
+        Assert.Equal(HttpStatusCode.NotModified, response2.StatusCode);
+        Assert.NotNull(response2.Headers.ETag);
+        Assert.Equal(etag, response2.Headers.ETag?.Tag);
+        Assert.NotNull(response2.Headers.CacheControl);
     }
 
     [Fact]
@@ -161,6 +264,8 @@ public class AvatarsControllerTests : IDisposable
         var response2 = await _fixture.Client.SendAsync(request2);
 
         Assert.Equal(HttpStatusCode.NotModified, response2.StatusCode);
+        Assert.NotNull(response2.Headers.ETag);
+        Assert.Equal(etag, response2.Headers.ETag?.Tag);
         var body = await response2.Content.ReadAsByteArrayAsync();
         Assert.Empty(body);
     }
@@ -335,6 +440,8 @@ public class AvatarsControllerTests : IDisposable
         var response2 = await _fixture.Client.SendAsync(request2);
 
         Assert.Equal(HttpStatusCode.NotModified, response2.StatusCode);
+        Assert.NotNull(response2.Headers.ETag);
+        Assert.Equal(etag, response2.Headers.ETag?.Tag);
         var body = await response2.Content.ReadAsByteArrayAsync();
         Assert.Empty(body);
     }

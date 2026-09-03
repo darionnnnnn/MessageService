@@ -118,7 +118,7 @@ public class MessagesController(
         var members = await dbContext.GroupMembers
             .AsNoTracking()
             .Where(m => m.GroupId == groupId && userIds.Contains(m.UserId))
-            .Select(m => new { m.UserId, m.DisplayName, HasPicture = m.Picture != null })
+            .Select(m => new { m.UserId, m.DisplayName, m.PictureUrl, HasPicture = m.Picture != null })
             .ToDictionaryAsync(m => m.UserId, cancellationToken);
 
         // 一個請求只載入一次遮蔽規則，套用到每則訊息時全是同步運算，不會每則訊息各打一次 DB
@@ -141,31 +141,33 @@ public class MessagesController(
 
             if (r.UserId is null)
             {
-                return new MessageDto(r.Id, r.MessageType, text, null, "(未知)", r.EventTimestamp, content, null, null, r.StickerId);
+                return new MessageDto(r.Id, r.MessageType, text, null, "(未知)", r.EventTimestamp, content, null, null, r.StickerId, false);
             }
 
             members.TryGetValue(r.UserId, out var member);
+            anonymousIdentities.TryGetValue(r.UserId, out var identity);
 
-            string displayName;
-            string? pictureUrl;
-            string avatarIcon;
-            if (maskingRules.RequiresAnonymousIdentity)
-            {
-                var identity = anonymousIdentities[r.UserId];
-                displayName = maskingRules.ResolveDisplayName(r.UserId, member?.DisplayName, identity.Label);
-                pictureUrl = null;
-                avatarIcon = identity.IconKey;
-            }
-            else
-            {
-                displayName = maskingRules.ResolveDisplayName(r.UserId, member?.DisplayName);
-                // 非 Original 模式下真實頭貼一律不外流，即使前端不渲染，URL 本身就是身分線索
-                pictureUrl = maskingRules.RevealsOriginalProfile && member?.HasPicture == true ? $"api/groups/{groupId}/members/{r.UserId}/avatar" : null;
-                // 一律附上決定性的 fallback 圖示 key，前端在 PictureUrl 缺失或載入失敗時可以直接換上
-                avatarIcon = AvatarIconCatalog.ForHash(r.UserId).IconKey;
-            }
+            var profile = MemberProfileResolver.Resolve(
+                groupId,
+                r.UserId,
+                member?.DisplayName,
+                member?.PictureUrl,
+                member?.HasPicture == true,
+                maskingRules,
+                identity);
 
-            return new MessageDto(r.Id, r.MessageType, text, r.UserId, displayName, r.EventTimestamp, content, pictureUrl, avatarIcon, r.StickerId);
+            return new MessageDto(
+                r.Id,
+                r.MessageType,
+                text,
+                r.UserId,
+                profile.DisplayName,
+                r.EventTimestamp,
+                content,
+                profile.PictureUrl,
+                profile.AvatarIcon,
+                r.StickerId,
+                profile.ProfileResolved);
         }).ToList();
 
         // hasMore：初載/往前加載都要判斷是否還有更早的訊息；輪詢（afterId）不需要，省一次查詢

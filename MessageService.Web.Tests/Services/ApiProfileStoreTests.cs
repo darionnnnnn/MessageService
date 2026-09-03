@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging.Abstractions;
 using System.Net;
 using System.Net.Http.Json;
 using MessageService.Services;
@@ -14,7 +15,7 @@ public class ApiProfileStoreTests
         Func<HttpRequestMessage, HttpResponseMessage> responder)
     {
         var handler = new FakeHttpMessageHandler(responder);
-        return (new ApiProfileStore(new FakeHttpClientFactory(handler)), handler);
+        return (new ApiProfileStore(new FakeHttpClientFactory(handler), NullLogger<ApiProfileStore>.Instance), handler);
     }
 
     [Fact]
@@ -94,5 +95,55 @@ public class ApiProfileStoreTests
 
         await Assert.ThrowsAsync<HttpRequestException>(
             () => store.UpsertGroupAsync("G1", new GroupSummary("G1", null, null), CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task GetStaleProfilesAsync_OldCoreWithoutEndpoint_ReturnsEmptyInsteadOfThrowing()
+    {
+        // 升級過渡期（先升 Edge 再升 Core 的錯誤順序）舊版 Core 回 404：當作沒有候選，
+        // 不能拋例外讓 ProfileBackfillService 每輪都記一筆 error
+        var (store, _) = Create(_ => new HttpResponseMessage(HttpStatusCode.NotFound));
+
+        var tasks = await store.GetStaleProfilesAsync(50, DateTimeOffset.UtcNow, CancellationToken.None);
+
+        Assert.Empty(tasks);
+    }
+
+    [Fact]
+    public async Task GetStaleProfilesAsync_ServerError_StillThrows()
+    {
+        // 404 以外的失敗維持往外拋，交給 ProfileBackfillService 記 log 下一輪再試
+        var (store, _) = Create(_ => new HttpResponseMessage(HttpStatusCode.InternalServerError));
+
+        await Assert.ThrowsAsync<HttpRequestException>(
+            () => store.GetStaleProfilesAsync(50, DateTimeOffset.UtcNow, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task GetStaleProfilesAsync_BuildsQueryWithEscapedCutoff_AndParsesResponse()
+    {
+        var expectedTasks = new List<ProfileRefreshTask>
+        {
+            new("G1", null),
+            new("G1", "U1")
+        };
+        var (store, handler) = Create(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = JsonContent.Create(expectedTasks)
+        });
+        var cutoff = new DateTimeOffset(2026, 8, 12, 10, 0, 0, TimeSpan.Zero);
+
+        var tasks = await store.GetStaleProfilesAsync(50, cutoff, CancellationToken.None);
+
+        Assert.Equal(2, tasks.Count);
+        Assert.Equal("G1", tasks[0].GroupId);
+        Assert.Null(tasks[0].UserId);
+        Assert.Equal("G1", tasks[1].GroupId);
+        Assert.Equal("U1", tasks[1].UserId);
+
+        var uri = handler.LastRequest!.RequestUri!;
+        Assert.Equal("/api/ingest/profiles/stale", uri.AbsolutePath);
+        Assert.Contains("max=50", uri.Query);
+        Assert.Contains("cutoff=2026-08-12T10%3A00%3A00.0000000%2B00%3A00", uri.Query);
     }
 }

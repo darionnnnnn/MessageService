@@ -13,6 +13,9 @@ public class Group
     public string? PictureFetchedUrl { get; set; }
     public DateTimeOffset? PictureUpdatedAt { get; set; }
 
+    /// <summary>LINE 官方 API 回傳的群組成員總數。為 null 代表尚未抓取或抓取失敗。</summary>
+    public int? MemberCount { get; set; }
+
     /// <summary>側欄反正規化：GroupsController 改讀這兩欄，不用再對 GroupMessages 全表做
     /// GroupBy+Max。由 GroupLastMessageTracker 在訊息落地時維護；null 代表這個群組還沒有任何
     /// 訊息（理論上不會發生——Groups 列本身只在有訊息或頭貼快取寫入時才會建立）或是保留期清除

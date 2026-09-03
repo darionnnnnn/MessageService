@@ -26,4 +26,13 @@ public class FakeProfileStore : IProfileStore
         UpsertedMembers.Add((groupId, userId, profile));
         return Task.CompletedTask;
     }
+
+    public List<ProfileRefreshTask> StaleProfilesToReturn { get; set; } = [];
+    public List<(int Max, DateTimeOffset Cutoff)> GetStaleProfilesCalls { get; } = [];
+
+    public Task<IReadOnlyList<ProfileRefreshTask>> GetStaleProfilesAsync(int max, DateTimeOffset cutoff, CancellationToken cancellationToken)
+    {
+        GetStaleProfilesCalls.Add((max, cutoff));
+        return Task.FromResult<IReadOnlyList<ProfileRefreshTask>>(StaleProfilesToReturn.Take(max).ToList());
+    }
 }

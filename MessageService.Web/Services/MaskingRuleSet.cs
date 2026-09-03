@@ -49,6 +49,9 @@ public partial class MaskingRuleSet(
         return text;
     }
 
+    public bool HasAliasFor(string userId) =>
+        mode == NameDisplayMode.CustomAlias && aliases.ContainsKey(userId);
+
     public string ResolveDisplayName(string userId, string? rawDisplayName, string? anonymousLabel = null)
     {
         if (mode == NameDisplayMode.Anonymous)

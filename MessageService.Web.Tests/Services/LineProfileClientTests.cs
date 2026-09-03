@@ -304,4 +304,193 @@ public class LineProfileClientTests
         await client.GetGroupSummaryAsync("123", null, false, CancellationToken.None);
         Assert.Contains("https://profile.line-scdn.net/pic.jpg", requestedUrls);
     }
+
+    [Fact]
+    public async Task GetGroupSummaryAsync_PictureOversizedWithoutContentLength_ReportsPermanentlyUnavailable()
+    {
+        // LINE 回應若未帶 Content-Length，但在 ReadAsByteArrayAsync 讀取後發現超過 MaxImageSize，
+        // 必須判定為 Permanent 永久失敗，避免無限期重抓
+        var handler = new FakeHttpMessageHandler(request =>
+        {
+            if (request.RequestUri!.AbsolutePath.Contains("/v2/bot/group/G1/summary"))
+            {
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent("""{"groupId":"G1","groupName":"群組","pictureUrl":"https://profile.line-scdn.net/chunked-big.png"}""")
+                };
+            }
+
+            var oversized = new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new ByteArrayContent(new byte[LineProfileClient.MaxImageSize + 10])
+            };
+            oversized.Content.Headers.ContentLength = null; // 刻意不帶 Content-Length
+            return oversized;
+        });
+
+        var client = new LineProfileClient(
+            new FakeHttpClientFactory(handler), CreateOptions(), NullLogger<LineProfileClient>.Instance);
+
+        var summary = await client.GetGroupSummaryAsync("G1", null, false, CancellationToken.None);
+
+        Assert.NotNull(summary);
+        Assert.Null(summary!.PictureBytes);
+        Assert.True(summary.PicturePermanentlyUnavailable);
+        Assert.False(summary.PictureDownloadFailed);
+    }
+
+    [Fact]
+    public async Task GetGroupSummaryAsync_PictureBufferOverflow_ReportsPermanentlyUnavailable()
+    {
+        // 即使留有餘量，若圖檔遠大於 MaxResponseContentBufferSize 導致 HttpClient 噴出緩衝溢位例外，
+        // 亦必須正確判定為 Permanent 永久失敗
+        var handler = new FakeHttpMessageHandler(request =>
+        {
+            if (request.RequestUri!.AbsolutePath.Contains("/v2/bot/group/G1/summary"))
+            {
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent("""{"groupId":"G1","groupName":"群組","pictureUrl":"https://profile.line-scdn.net/huge.png"}""")
+                };
+            }
+
+            throw new HttpRequestException(
+                HttpRequestError.ConfigurationLimitExceeded,
+                "Cannot write more bytes to the buffer than the configured maximum buffer size: 2098176.");
+        });
+
+        var client = new LineProfileClient(
+            new FakeHttpClientFactory(handler), CreateOptions(), NullLogger<LineProfileClient>.Instance);
+
+        var summary = await client.GetGroupSummaryAsync("G1", null, false, CancellationToken.None);
+
+        Assert.NotNull(summary);
+        Assert.Null(summary!.PictureBytes);
+        Assert.True(summary.PicturePermanentlyUnavailable);
+        Assert.False(summary.PictureDownloadFailed);
+    }
+
+    [Fact]
+    public async Task GetGroupSummaryAsync_PictureHttpClientTimeout_ReportsTransientFailure()
+    {
+        // HttpClient 逾時實際上丟的是 TaskCanceledException（OperationCanceledException 的子類），
+        // 而不是 HttpRequestException。若 catch 無條件重拋 OperationCanceledException，
+        // 這條路徑會讓一次逾時把整個群組刷新中斷、名稱也寫不進去——判斷依據必須看取消權杖
+        var handler = new FakeHttpMessageHandler(request =>
+        {
+            if (request.RequestUri!.AbsolutePath.Contains("/v2/bot/group/G1/summary"))
+            {
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent("""{"groupId":"G1","groupName":"群組","pictureUrl":"https://profile.line-scdn.net/timeout.png"}""")
+                };
+            }
+
+            throw new TaskCanceledException("The request was canceled due to the configured HttpClient.Timeout",
+                new TimeoutException());
+        });
+
+        var client = new LineProfileClient(
+            new FakeHttpClientFactory(handler), CreateOptions(), NullLogger<LineProfileClient>.Instance);
+
+        var summary = await client.GetGroupSummaryAsync("G1", null, false, CancellationToken.None);
+
+        Assert.NotNull(summary);
+        Assert.Equal("群組", summary!.GroupName);
+        Assert.True(summary.PictureDownloadFailed);
+        Assert.False(summary.PicturePermanentlyUnavailable);
+    }
+
+    [Fact]
+    public async Task GetGroupSummaryAsync_PictureTimeout_ReportsTransientFailure()
+    {
+        // 連線逾時屬於暫時性網路問題，必須維持 TransientFailure
+        var handler = new FakeHttpMessageHandler(request =>
+        {
+            if (request.RequestUri!.AbsolutePath.Contains("/v2/bot/group/G1/summary"))
+            {
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent("""{"groupId":"G1","groupName":"群組","pictureUrl":"https://profile.line-scdn.net/timeout.png"}""")
+                };
+            }
+
+            throw new HttpRequestException("The request was canceled due to the configured HttpClient.Timeout",
+                new TimeoutException());
+        });
+
+        var client = new LineProfileClient(
+            new FakeHttpClientFactory(handler), CreateOptions(), NullLogger<LineProfileClient>.Instance);
+
+        var summary = await client.GetGroupSummaryAsync("G1", null, false, CancellationToken.None);
+
+        Assert.NotNull(summary);
+        Assert.True(summary!.PictureDownloadFailed);
+        Assert.False(summary.PicturePermanentlyUnavailable);
+    }
+
+    [Fact]
+    public async Task GetGroupSummaryAsync_IncludesMemberCount_WhenCountEndpointSucceeds()
+    {
+        var handler = new FakeHttpMessageHandler(request =>
+        {
+            if (request.RequestUri!.AbsolutePath.Contains("/v2/bot/group/G1/summary"))
+            {
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent("""{"groupId":"G1","groupName":"群組","pictureUrl":null}""")
+                };
+            }
+
+            if (request.RequestUri!.AbsolutePath.Contains("/v2/bot/group/G1/members/count"))
+            {
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent("""{"count":42}""")
+                };
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.NotFound);
+        });
+
+        var client = new LineProfileClient(
+            new FakeHttpClientFactory(handler), CreateOptions(), NullLogger<LineProfileClient>.Instance);
+
+        var summary = await client.GetGroupSummaryAsync("G1", null, false, CancellationToken.None);
+
+        Assert.NotNull(summary);
+        Assert.Equal(42, summary!.MemberCount);
+    }
+
+    [Fact]
+    public async Task GetGroupSummaryAsync_WhenMemberCountEndpointFails_ReturnsSummaryWithNullMemberCount()
+    {
+        var handler = new FakeHttpMessageHandler(request =>
+        {
+            if (request.RequestUri!.AbsolutePath.Contains("/v2/bot/group/G1/summary"))
+            {
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent("""{"groupId":"G1","groupName":"群組","pictureUrl":null}""")
+                };
+            }
+
+            if (request.RequestUri!.AbsolutePath.Contains("/v2/bot/group/G1/members/count"))
+            {
+                return new HttpResponseMessage(HttpStatusCode.InternalServerError);
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.NotFound);
+        });
+
+        var client = new LineProfileClient(
+            new FakeHttpClientFactory(handler), CreateOptions(), NullLogger<LineProfileClient>.Instance);
+
+        var summary = await client.GetGroupSummaryAsync("G1", null, false, CancellationToken.None);
+
+        Assert.NotNull(summary);
+        Assert.Equal("G1", summary!.GroupId);
+        Assert.Equal("群組", summary.GroupName);
+        Assert.Null(summary.MemberCount); // 不阻斷群組刷新，回傳 null
+    }
 }

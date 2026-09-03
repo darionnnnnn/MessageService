@@ -65,6 +65,7 @@ public class LineProfileClient : ILineProfileClient
 
         var pictureUrl = root.TryGetProperty("pictureUrl", out var picture) ? picture.GetString() : null;
         var pictureFetch = await DownloadPictureAsync(pictureUrl, knownPictureUrl, hasPicture, cancellationToken);
+        var memberCount = await GetGroupMemberCountAsync(groupId, cancellationToken);
 
         return new GroupSummary(
             root.GetProperty("groupId").GetString() ?? groupId,
@@ -73,7 +74,45 @@ public class LineProfileClient : ILineProfileClient
             pictureFetch.Bytes,
             pictureFetch.ContentType,
             pictureFetch.TransientFailure,
-            pictureFetch.PermanentlyUnavailable);
+            pictureFetch.PermanentlyUnavailable,
+            memberCount);
+    }
+
+    /// <summary>
+    /// 取得群組真實成員總數（GET v2/bot/group/{groupId}/members/count）。
+    /// 失敗時不拋出例外，回傳 null 以避免影響整個群組 profile 的刷新。
+    /// </summary>
+    public async Task<int?> GetGroupMemberCountAsync(string groupId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var response = await _httpClient.GetAsync($"v2/bot/group/{groupId}/members/count", cancellationToken);
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogWarning("Failed to get member count for group {GroupId}: HTTP {StatusCode}", groupId, response.StatusCode);
+                return null;
+            }
+
+            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
+            if (document.RootElement.TryGetProperty("count", out var countElement) && countElement.TryGetInt32(out var count))
+            {
+                return count;
+            }
+
+            return null;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // 只有呼叫端真的取消才往外丟；HttpClient 逾時同樣是 TaskCanceledException，
+            // 無條件重拋會讓一次逾時把整個群組刷新（含名稱）一起中斷
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to get member count for group {GroupId}", groupId);
+            return null;
+        }
     }
 
     public async Task<MemberProfile?> GetGroupMemberProfileAsync(string groupId, string userId, string? knownPictureUrl, bool hasPicture, CancellationToken cancellationToken)
@@ -158,15 +197,48 @@ public class LineProfileClient : ILineProfileClient
             
             return PictureFetch.Downloaded(bytes, response.Content.Headers.ContentType?.MediaType);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // 同上：HttpClient 逾時丟的 TaskCanceledException 也是 OperationCanceledException 的子類，
+            // 判斷依據一律看取消權杖，否則逾時會被當成「呼叫端取消」而不是暫時性下載失敗
+            throw;
+        }
+        catch (Exception ex)
         {
             var targetHost = requestUrl ?? pictureUrl;
             _logger.LogWarning(ex, "Failed to download profile picture from {PictureUrl}: {FailureReason}",
                 pictureUrl, OutboundFailureClassifier.Classify(ex, targetHost));
 
-            // 404／410 代表這個網址本身沒東西，重試多少次都一樣
-            var permanent = ex is HttpRequestException { StatusCode: System.Net.HttpStatusCode.NotFound or System.Net.HttpStatusCode.Gone };
+            // 404／410 代表這個網址本身沒東西，重試多少次都一樣；
+            // 緩衝溢位代表圖片超過上限，亦為永久失敗，避免無限重抓。
+            var permanent = IsPermanentPictureDownloadFailure(ex);
             return permanent ? PictureFetch.Permanent : PictureFetch.Transient;
         }
+    }
+
+    /// <summary>
+    /// 判定頭貼下載失敗是否屬於永久性失敗（Permanent）：
+    /// 1. HTTP 404（NotFound）或 410（Gone）：遠端資源不存在。
+    /// 2. 緩衝溢位例外（HttpRequestError.ConfigurationLimitExceeded）：
+    ///    圖片實體大小超過 MaxResponseContentBufferSize，屬於過大圖片。
+    /// 一般網路錯誤（如逾時 TimeoutException、連線被拒 SocketError.ConnectionRefused、DNS 解析失敗、5xx 伺服器錯誤等）
+    /// 絕不判為永久失敗，維持 TransientFailure，保留重試機會。
+    /// </summary>
+    private static bool IsPermanentPictureDownloadFailure(Exception ex)
+    {
+        if (ex is HttpRequestException httpEx)
+        {
+            if (httpEx.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.Gone)
+            {
+                return true;
+            }
+
+            if (httpEx.HttpRequestError == HttpRequestError.ConfigurationLimitExceeded)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 }

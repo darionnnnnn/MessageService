@@ -746,4 +746,536 @@ public class DbProfileStoreTests : IDisposable
         var staleness = await store.GetStalenessAsync("g1", null, DateTimeOffset.UtcNow.AddMinutes(-5), CancellationToken.None);
         Assert.True(staleness.GroupStale);
     }
+
+    [Fact]
+    public async Task GetStalenessAsync_PictureUrlChanged_WithExistingPicture_IsStale()
+    {
+        // 核心修正：成員換頭貼後 PictureUrl 為新網址，但若先前下載失敗時名稱仍會寫入、UpdatedAt 落在有效期間內，
+        // 且既有舊圖仍在。缺圖子句不應被 hasPicture 短路，只要 PictureUrl 與 PictureFetchedUrl 不同即判為過期。
+        var store = new DbProfileStore(_dbContext, CreateCipher(false), NullLogger<DbProfileStore>.Instance);
+
+        _dbContext.Groups.Add(new Group
+        {
+            GroupId = "g1",
+            GroupName = "Group 1",
+            PictureUrl = "https://example.com/new-pic.png",
+            PictureFetchedUrl = "https://example.com/old-pic.png",
+            UpdatedAt = DateTimeOffset.UtcNow,
+            Picture = new GroupPicture { GroupId = "g1", Content = [1, 2, 3] }
+        });
+        _dbContext.GroupMembers.Add(new GroupMember
+        {
+            GroupId = "g1",
+            UserId = "u1",
+            DisplayName = "User 1",
+            PictureUrl = "https://example.com/new-member-pic.png",
+            PictureFetchedUrl = "https://example.com/old-member-pic.png",
+            UpdatedAt = DateTimeOffset.UtcNow,
+            Picture = new GroupMemberPicture { GroupId = "g1", UserId = "u1", Content = [4, 5, 6] }
+        });
+        await _dbContext.SaveChangesAsync();
+        _dbContext.ChangeTracker.Clear();
+
+        var staleness = await store.GetStalenessAsync("g1", "u1", DateTimeOffset.UtcNow.AddMinutes(-5), CancellationToken.None);
+
+        Assert.True(staleness.GroupStale);
+        Assert.True(staleness.MemberStale);
+    }
+
+    [Fact]
+    public async Task GetStalenessAsync_PictureUrlEqualsPictureFetchedUrl_IsNotStale()
+    {
+        // 永久失敗閂鎖：PictureFetchedUrl 等於 PictureUrl 代表該網址已記錄嘗試過（例如 404 或超過大小），未過期時不應再判為過期
+        var store = new DbProfileStore(_dbContext, CreateCipher(false), NullLogger<DbProfileStore>.Instance);
+
+        _dbContext.Groups.Add(new Group
+        {
+            GroupId = "g1",
+            GroupName = "Group 1",
+            PictureUrl = "https://example.com/pic1.png",
+            PictureFetchedUrl = "https://example.com/pic1.png",
+            UpdatedAt = DateTimeOffset.UtcNow
+        });
+        _dbContext.GroupMembers.Add(new GroupMember
+        {
+            GroupId = "g1",
+            UserId = "u1",
+            DisplayName = "User 1",
+            PictureUrl = "https://example.com/pic2.png",
+            PictureFetchedUrl = "https://example.com/pic2.png",
+            UpdatedAt = DateTimeOffset.UtcNow
+        });
+        await _dbContext.SaveChangesAsync();
+        _dbContext.ChangeTracker.Clear();
+
+        var staleness = await store.GetStalenessAsync("g1", "u1", DateTimeOffset.UtcNow.AddMinutes(-5), CancellationToken.None);
+
+        Assert.False(staleness.GroupStale);
+        Assert.False(staleness.MemberStale);
+    }
+
+    [Fact]
+    public async Task GetStalenessAsync_FreshUpdatedAt_SamePictureUrl_WithPicture_IsNotStale()
+    {
+        // UpdatedAt 未到期、網址相同且已有圖 → 不過期
+        var store = new DbProfileStore(_dbContext, CreateCipher(false), NullLogger<DbProfileStore>.Instance);
+
+        _dbContext.Groups.Add(new Group
+        {
+            GroupId = "g1",
+            GroupName = "Group 1",
+            PictureUrl = "https://example.com/group.png",
+            PictureFetchedUrl = "https://example.com/group.png",
+            UpdatedAt = DateTimeOffset.UtcNow,
+            Picture = new GroupPicture { GroupId = "g1", Content = [1, 2] }
+        });
+        _dbContext.GroupMembers.Add(new GroupMember
+        {
+            GroupId = "g1",
+            UserId = "u1",
+            DisplayName = "User 1",
+            PictureUrl = "https://example.com/user.png",
+            PictureFetchedUrl = "https://example.com/user.png",
+            UpdatedAt = DateTimeOffset.UtcNow,
+            Picture = new GroupMemberPicture { GroupId = "g1", UserId = "u1", Content = [3, 4] }
+        });
+        await _dbContext.SaveChangesAsync();
+        _dbContext.ChangeTracker.Clear();
+
+        var staleness = await store.GetStalenessAsync("g1", "u1", DateTimeOffset.UtcNow.AddMinutes(-5), CancellationToken.None);
+
+        Assert.False(staleness.GroupStale);
+        Assert.False(staleness.MemberStale);
+    }
+
+    [Fact]
+    public async Task UpsertGroupAsync_WithNullPictureUrl_DeletesChildPictureAndClearsMetadata()
+    {
+        var store = new DbProfileStore(_dbContext, CreateCipher(false), NullLogger<DbProfileStore>.Instance);
+
+        var group = new Group
+        {
+            GroupId = "g1",
+            GroupName = "Group 1",
+            PictureUrl = "https://example.com/pic1",
+            PictureFetchedUrl = "https://example.com/pic1",
+            PictureContentType = "image/jpeg",
+            PictureUpdatedAt = DateTimeOffset.UtcNow,
+            UpdatedAt = DateTimeOffset.UtcNow,
+            Picture = new GroupPicture { GroupId = "g1", Content = [1, 2, 3] }
+        };
+        _dbContext.Groups.Add(group);
+        await _dbContext.SaveChangesAsync();
+        _dbContext.ChangeTracker.Clear();
+
+        var summary = new GroupSummary("g1", "Group 1", null, null, null);
+        await store.UpsertGroupAsync("g1", summary, CancellationToken.None);
+
+        _dbContext.ChangeTracker.Clear();
+        var reloaded = await _dbContext.Groups.Include(g => g.Picture).FirstOrDefaultAsync(g => g.GroupId == "g1");
+        Assert.NotNull(reloaded);
+        Assert.Null(reloaded.Picture);
+        Assert.Null(reloaded.PictureUrl);
+        Assert.Null(reloaded.PictureContentType);
+        Assert.Null(reloaded.PictureFetchedUrl);
+        Assert.Null(reloaded.PictureUpdatedAt);
+        Assert.Equal(0, await _dbContext.GroupPictures.CountAsync(p => p.GroupId == "g1"));
+    }
+
+    [Fact]
+    public async Task UpsertMemberAsync_WithNullPictureUrl_DeletesChildPictureAndClearsMetadata()
+    {
+        var store = new DbProfileStore(_dbContext, CreateCipher(false), NullLogger<DbProfileStore>.Instance);
+
+        var member = new GroupMember
+        {
+            GroupId = "g1",
+            UserId = "u1",
+            DisplayName = "User 1",
+            PictureUrl = "https://example.com/pic1",
+            PictureFetchedUrl = "https://example.com/pic1",
+            PictureContentType = "image/jpeg",
+            PictureUpdatedAt = DateTimeOffset.UtcNow,
+            UpdatedAt = DateTimeOffset.UtcNow,
+            Picture = new GroupMemberPicture { GroupId = "g1", UserId = "u1", Content = [1, 2, 3] }
+        };
+        _dbContext.GroupMembers.Add(member);
+        await _dbContext.SaveChangesAsync();
+        _dbContext.ChangeTracker.Clear();
+
+        var profile = new MemberProfile("u1", "User 1", null, null, null);
+        await store.UpsertMemberAsync("g1", "u1", profile, CancellationToken.None);
+
+        _dbContext.ChangeTracker.Clear();
+        var reloaded = await _dbContext.GroupMembers.Include(m => m.Picture).FirstOrDefaultAsync(m => m.GroupId == "g1" && m.UserId == "u1");
+        Assert.NotNull(reloaded);
+        Assert.Null(reloaded.Picture);
+        Assert.Null(reloaded.PictureUrl);
+        Assert.Null(reloaded.PictureContentType);
+        Assert.Null(reloaded.PictureFetchedUrl);
+        Assert.Null(reloaded.PictureUpdatedAt);
+        Assert.Equal(0, await _dbContext.GroupMemberPictures.CountAsync(p => p.GroupId == "g1" && p.UserId == "u1"));
+    }
+
+    [Fact]
+    public async Task UpsertGroupAsync_WithPictureUrlAndNullPictureBytes_PreservesPictureRowAndUpdatesName()
+    {
+        var store = new DbProfileStore(_dbContext, CreateCipher(false), NullLogger<DbProfileStore>.Instance);
+
+        var originalTime = DateTimeOffset.UtcNow.AddHours(-2);
+        var group = new Group
+        {
+            GroupId = "g1",
+            GroupName = "舊群組名稱",
+            PictureUrl = "https://example.com/old-pic.png",
+            PictureFetchedUrl = "https://example.com/old-pic.png",
+            PictureContentType = "image/png",
+            PictureUpdatedAt = originalTime,
+            UpdatedAt = originalTime,
+            Picture = new GroupPicture { GroupId = "g1", Content = [10, 20, 30] }
+        };
+        _dbContext.Groups.Add(group);
+        await _dbContext.SaveChangesAsync();
+        _dbContext.ChangeTracker.Clear();
+
+        var summary = new GroupSummary("g1", "新群組名稱", "https://example.com/new-pic.png", null, null, PictureDownloadFailed: true);
+        await store.UpsertGroupAsync("g1", summary, CancellationToken.None);
+
+        _dbContext.ChangeTracker.Clear();
+        var reloaded = await _dbContext.Groups.Include(g => g.Picture).FirstOrDefaultAsync(g => g.GroupId == "g1");
+        Assert.NotNull(reloaded);
+        Assert.Equal("新群組名稱", reloaded.GroupName);
+        Assert.Equal("https://example.com/new-pic.png", reloaded.PictureUrl);
+        Assert.NotNull(reloaded.Picture);
+        Assert.Equal(new byte[] { 10, 20, 30 }, reloaded.Picture.Content);
+        Assert.Equal("image/png", reloaded.PictureContentType);
+        Assert.Equal("https://example.com/old-pic.png", reloaded.PictureFetchedUrl);
+    }
+
+    [Fact]
+    public async Task UpsertMemberAsync_WithPictureUrlAndNullPictureBytes_PreservesPictureRowAndUpdatesName()
+    {
+        var store = new DbProfileStore(_dbContext, CreateCipher(false), NullLogger<DbProfileStore>.Instance);
+
+        var originalTime = DateTimeOffset.UtcNow.AddHours(-2);
+        var member = new GroupMember
+        {
+            GroupId = "g1",
+            UserId = "u1",
+            DisplayName = "舊成員名稱",
+            PictureUrl = "https://example.com/old-member.png",
+            PictureFetchedUrl = "https://example.com/old-member.png",
+            PictureContentType = "image/png",
+            PictureUpdatedAt = originalTime,
+            UpdatedAt = originalTime,
+            Picture = new GroupMemberPicture { GroupId = "g1", UserId = "u1", Content = [40, 50, 60] }
+        };
+        _dbContext.GroupMembers.Add(member);
+        await _dbContext.SaveChangesAsync();
+        _dbContext.ChangeTracker.Clear();
+
+        var profile = new MemberProfile("u1", "新成員名稱", "https://example.com/new-member.png", null, null, PictureDownloadFailed: true);
+        await store.UpsertMemberAsync("g1", "u1", profile, CancellationToken.None);
+
+        _dbContext.ChangeTracker.Clear();
+        var reloaded = await _dbContext.GroupMembers.Include(m => m.Picture).FirstOrDefaultAsync(m => m.GroupId == "g1" && m.UserId == "u1");
+        Assert.NotNull(reloaded);
+        Assert.Equal("新成員名稱", reloaded.DisplayName);
+        Assert.Equal("https://example.com/new-member.png", reloaded.PictureUrl);
+        Assert.NotNull(reloaded.Picture);
+        Assert.Equal(new byte[] { 40, 50, 60 }, reloaded.Picture.Content);
+        Assert.Equal("image/png", reloaded.PictureContentType);
+        Assert.Equal("https://example.com/old-member.png", reloaded.PictureFetchedUrl);
+    }
+
+    [Fact]
+    public async Task UpsertGroupAsync_NameProtection_PreservesExistingNameWhenNewNameIsNullOrWhitespace()
+    {
+        var store = new DbProfileStore(_dbContext, CreateCipher(false), NullLogger<DbProfileStore>.Instance);
+
+        _dbContext.Groups.Add(new Group
+        {
+            GroupId = "g1",
+            GroupName = "甲",
+            UpdatedAt = DateTimeOffset.UtcNow
+        });
+        await _dbContext.SaveChangesAsync();
+        _dbContext.ChangeTracker.Clear();
+
+        // 帶 null -> 仍是「甲」
+        await store.UpsertGroupAsync("g1", new GroupSummary("g1", null, null), CancellationToken.None);
+        _dbContext.ChangeTracker.Clear();
+        var reloaded1 = await _dbContext.Groups.FindAsync("g1");
+        Assert.Equal("甲", reloaded1!.GroupName);
+
+        // 帶 "" -> 仍是「甲」
+        await store.UpsertGroupAsync("g1", new GroupSummary("g1", "", null), CancellationToken.None);
+        _dbContext.ChangeTracker.Clear();
+        var reloaded2 = await _dbContext.Groups.FindAsync("g1");
+        Assert.Equal("甲", reloaded2!.GroupName);
+
+        // 帶 "乙" -> 變「乙」
+        await store.UpsertGroupAsync("g1", new GroupSummary("g1", "乙", null), CancellationToken.None);
+        _dbContext.ChangeTracker.Clear();
+        var reloaded3 = await _dbContext.Groups.FindAsync("g1");
+        Assert.Equal("乙", reloaded3!.GroupName);
+    }
+
+    [Fact]
+    public async Task UpsertMemberAsync_NameProtection_PreservesExistingDisplayNameWhenNewDisplayNameIsNullOrWhitespace()
+    {
+        var store = new DbProfileStore(_dbContext, CreateCipher(false), NullLogger<DbProfileStore>.Instance);
+
+        _dbContext.GroupMembers.Add(new GroupMember
+        {
+            GroupId = "g1",
+            UserId = "u1",
+            DisplayName = "甲",
+            UpdatedAt = DateTimeOffset.UtcNow
+        });
+        await _dbContext.SaveChangesAsync();
+        _dbContext.ChangeTracker.Clear();
+
+        // 帶 null -> 仍是「甲」
+        await store.UpsertMemberAsync("g1", "u1", new MemberProfile("u1", null, null), CancellationToken.None);
+        _dbContext.ChangeTracker.Clear();
+        var reloaded1 = await _dbContext.GroupMembers.FindAsync("g1", "u1");
+        Assert.Equal("甲", reloaded1!.DisplayName);
+
+        // 帶 "" -> 仍是「甲」
+        await store.UpsertMemberAsync("g1", "u1", new MemberProfile("u1", "", null), CancellationToken.None);
+        _dbContext.ChangeTracker.Clear();
+        var reloaded2 = await _dbContext.GroupMembers.FindAsync("g1", "u1");
+        Assert.Equal("甲", reloaded2!.DisplayName);
+
+        // 帶 "乙" -> 變「乙」
+        await store.UpsertMemberAsync("g1", "u1", new MemberProfile("u1", "乙", null), CancellationToken.None);
+        _dbContext.ChangeTracker.Clear();
+        var reloaded3 = await _dbContext.GroupMembers.FindAsync("g1", "u1");
+        Assert.Equal("乙", reloaded3!.DisplayName);
+    }
+
+    [Fact]
+    public async Task GetStaleProfilesAsync_ReturnsStaleGroupAndMissingPictureMember_IgnoresFresh()
+    {
+        var cipher = CreateCipher(false);
+        var store = new DbProfileStore(_dbContext, cipher, NullLogger<DbProfileStore>.Instance);
+
+        var now = DateTimeOffset.UtcNow;
+        var cutoff = now.AddDays(-7);
+
+        // 1. UpdatedAt 過期的群組（LastMessageId 非 null＝側欄看得見，補刷只挑這種）
+        _dbContext.Groups.Add(new Group
+        {
+            GroupId = "g_stale",
+            GroupName = "過期群組",
+            UpdatedAt = now.AddDays(-8),
+            LastMessageId = 1
+        });
+
+        // 2. 缺圖的成員（有 PictureUrl 但沒有圖片子列且 PictureFetchedUrl != PictureUrl）
+        _dbContext.GroupMembers.Add(new GroupMember
+        {
+            GroupId = "g_member_missing_pic",
+            UserId = "u_missing_pic",
+            DisplayName = "缺圖成員",
+            PictureUrl = "https://example.com/pic.png",
+            PictureFetchedUrl = null,
+            UpdatedAt = now
+        });
+
+        // 3. 完全正常的群組（未過期、有圖且 PictureFetchedUrl == PictureUrl）
+        _dbContext.Groups.Add(new Group
+        {
+            GroupId = "g_normal",
+            GroupName = "正常群組",
+            PictureUrl = "https://example.com/normal.png",
+            PictureFetchedUrl = "https://example.com/normal.png",
+            UpdatedAt = now,
+            Picture = new GroupPicture { GroupId = "g_normal", Content = [1, 2] }
+        });
+
+        // 4. 永久失敗的群組（未過期、PictureFetchedUrl == PictureUrl 且無圖）
+        _dbContext.Groups.Add(new Group
+        {
+            GroupId = "g_perm_failed",
+            GroupName = "永久失敗群組",
+            PictureUrl = "https://example.com/perm.png",
+            PictureFetchedUrl = "https://example.com/perm.png",
+            UpdatedAt = now
+        });
+
+        await _dbContext.SaveChangesAsync();
+        _dbContext.ChangeTracker.Clear();
+
+        var results = await store.GetStaleProfilesAsync(100, cutoff, CancellationToken.None);
+
+        Assert.Equal(2, results.Count);
+        Assert.Contains(results, t => t.GroupId == "g_stale" && t.UserId == null);
+        Assert.Contains(results, t => t.GroupId == "g_member_missing_pic" && t.UserId == "u_missing_pic");
+        Assert.DoesNotContain(results, t => t.GroupId == "g_normal");
+        Assert.DoesNotContain(results, t => t.GroupId == "g_perm_failed");
+    }
+
+    [Fact]
+    public async Task GetStaleProfilesAsync_CandidatesExceedLimit_GroupsTakeAtMostHalfSoMembersAreNotStarved()
+    {
+        // 群組先吃到一半的名額就停，剩下讓給成員。沒有這個上限的話，
+        // 一批永遠刷不成功的群組（UpdatedAt 恆為最舊、排序永遠在最前）會把每一輪的名額吃光，
+        // 成員永遠輪不到
+        var cipher = CreateCipher(false);
+        var store = new DbProfileStore(_dbContext, cipher, NullLogger<DbProfileStore>.Instance);
+
+        var now = DateTimeOffset.UtcNow;
+        var cutoff = now.AddDays(-7);
+
+        for (var i = 0; i < 5; i++)
+        {
+            _dbContext.Groups.Add(new Group
+            {
+                GroupId = $"g_{i}",
+                UpdatedAt = now.AddDays(-10 - i),
+                LastMessageId = 1
+            });
+        }
+
+        for (var i = 0; i < 5; i++)
+        {
+            _dbContext.GroupMembers.Add(new GroupMember
+            {
+                GroupId = $"g_m_{i}",
+                UserId = $"u_m_{i}",
+                UpdatedAt = now.AddDays(-10 - i)
+            });
+        }
+
+        await _dbContext.SaveChangesAsync();
+        _dbContext.ChangeTracker.Clear();
+
+        // 上限 4：群組最多拿 2（4/2），剩下 2 個名額給成員
+        var limit4 = await store.GetStaleProfilesAsync(4, cutoff, CancellationToken.None);
+        Assert.Equal(4, limit4.Count);
+        Assert.Equal(2, limit4.Count(t => t.UserId == null));
+        Assert.Equal(2, limit4.Count(t => t.UserId != null));
+
+        // 上限 20：候選只有 10 筆，全部回傳
+        var limit20 = await store.GetStaleProfilesAsync(20, cutoff, CancellationToken.None);
+        Assert.Equal(10, limit20.Count);
+        Assert.Equal(5, limit20.Count(t => t.UserId == null));
+        Assert.Equal(5, limit20.Count(t => t.UserId != null));
+    }
+
+    [Fact]
+    public async Task GetStaleProfilesAsync_SkipsGroupsWithoutLastMessage()
+    {
+        // bot 被踢出、或訊息被保留期清光的群組在側欄根本看不到，
+        // 但它們的 UpdatedAt 永遠最舊、排序恆在最前，會把名額吃光
+        var cipher = CreateCipher(false);
+        var store = new DbProfileStore(_dbContext, cipher, NullLogger<DbProfileStore>.Instance);
+
+        var now = DateTimeOffset.UtcNow;
+        var cutoff = now.AddDays(-7);
+
+        _dbContext.Groups.Add(new Group
+        {
+            GroupId = "g_zombie",
+            UpdatedAt = now.AddDays(-100),
+            LastMessageId = null
+        });
+        _dbContext.Groups.Add(new Group
+        {
+            GroupId = "g_visible",
+            UpdatedAt = now.AddDays(-8),
+            LastMessageId = 1
+        });
+
+        await _dbContext.SaveChangesAsync();
+        _dbContext.ChangeTracker.Clear();
+
+        var result = await store.GetStaleProfilesAsync(10, cutoff, CancellationToken.None);
+
+        var task = Assert.Single(result);
+        Assert.Equal("g_visible", task.GroupId);
+    }
+
+    [Fact]
+    public async Task GetStaleProfilesAsync_PictureUrlChangedButOldPictureStillThere_IsCandidate()
+    {
+        // 與 IsStale 對齊：換了頭貼但新圖下載失敗時舊圖還在，
+        // 若候選條件要求「沒有圖」就會漏掉這種情況，等於本輪的過期判定修正只做了一半
+        var cipher = CreateCipher(false);
+        var store = new DbProfileStore(_dbContext, cipher, NullLogger<DbProfileStore>.Instance);
+
+        var now = DateTimeOffset.UtcNow;
+        var cutoff = now.AddDays(-7);
+
+        _dbContext.Groups.Add(new Group
+        {
+            GroupId = "g_changed_pic",
+            GroupName = "換了頭貼",
+            UpdatedAt = now,
+            LastMessageId = 1,
+            PictureUrl = "https://example.com/new.png",
+            PictureFetchedUrl = "https://example.com/old.png",
+            Picture = new GroupPicture { GroupId = "g_changed_pic", Content = [1, 2, 3] }
+        });
+
+        await _dbContext.SaveChangesAsync();
+        _dbContext.ChangeTracker.Clear();
+
+        var result = await store.GetStaleProfilesAsync(10, cutoff, CancellationToken.None);
+
+        var task = Assert.Single(result);
+        Assert.Equal("g_changed_pic", task.GroupId);
+        Assert.Null(task.UserId);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public async Task GetStaleProfilesAsync_MaxZeroOrNegative_ReturnsEmpty(int max)
+    {
+        var cipher = CreateCipher(false);
+        var store = new DbProfileStore(_dbContext, cipher, NullLogger<DbProfileStore>.Instance);
+
+        var results = await store.GetStaleProfilesAsync(max, DateTimeOffset.UtcNow, CancellationToken.None);
+        Assert.Empty(results);
+    }
+
+    [Fact]
+    public async Task UpsertGroupAsync_WithMemberCount_SavesMemberCount()
+    {
+        var cipher = CreateCipher(false);
+        var store = new DbProfileStore(_dbContext, cipher, NullLogger<DbProfileStore>.Instance);
+
+        var summary = new GroupSummary("g1", "Group 1", null, MemberCount: 25);
+        await store.UpsertGroupAsync("g1", summary, CancellationToken.None);
+
+        var group = await _dbContext.Groups.FirstOrDefaultAsync(g => g.GroupId == "g1");
+        Assert.NotNull(group);
+        Assert.Equal(25, group.MemberCount);
+    }
+
+    [Fact]
+    public async Task UpsertGroupAsync_WhenMemberCountIsNull_PreservesExistingMemberCount()
+    {
+        var cipher = CreateCipher(false);
+        var store = new DbProfileStore(_dbContext, cipher, NullLogger<DbProfileStore>.Instance);
+
+        var summary1 = new GroupSummary("g1", "Group 1", null, MemberCount: 42);
+        await store.UpsertGroupAsync("g1", summary1, CancellationToken.None);
+
+        var group1 = await _dbContext.Groups.FirstOrDefaultAsync(g => g.GroupId == "g1");
+        Assert.NotNull(group1);
+        Assert.Equal(42, group1.MemberCount);
+
+        // Update with MemberCount = null
+        var summary2 = new GroupSummary("g1", "Group 1 Renamed", null, MemberCount: null);
+        await store.UpsertGroupAsync("g1", summary2, CancellationToken.None);
+
+        var group2 = await _dbContext.Groups.FirstOrDefaultAsync(g => g.GroupId == "g1");
+        Assert.NotNull(group2);
+        Assert.Equal("Group 1 Renamed", group2.GroupName);
+        Assert.Equal(42, group2.MemberCount);
+    }
 }

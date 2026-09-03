@@ -14,7 +14,8 @@ namespace MessageService.Web.Controllers.Api;
 public class GroupsController(
     MessageDbContext dbContext,
     IMaskingService maskingService,
-    GroupDeletionService groupDeletionService) : ControllerBase
+    GroupDeletionService groupDeletionService,
+    IAnonymousIdentityService anonymousIdentityService) : ControllerBase
 {
     // 側欄未讀數的上限：超過就一律顯示「99+」，也順便讓 COUNT 查詢在 SQL 端就截斷，
     // 不必真的數完一個很久沒看的群組累積的成千上萬則
@@ -74,6 +75,74 @@ public class GroupsController(
             result.MaskKeywordScopeCount, result.HighlightScopeCount));
     }
 
+    /// <summary>解析指定成員的名稱、頭貼與代號，供前端就地補齊未快取成員資訊。</summary>
+    [HttpGet("{groupId}/members/resolved")]
+    public async Task<ActionResult<IReadOnlyList<ResolvedMemberDto>>> GetResolvedMembers(
+        string groupId,
+        [FromQuery] string? ids,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(ids))
+        {
+            return BadRequest("ids 參數不可為空。");
+        }
+
+        var rawIds = ids.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (rawIds.Length == 0)
+        {
+            return BadRequest("ids 參數不可為空。");
+        }
+
+        if (rawIds.Length > 200)
+        {
+            return BadRequest("一次最多查詢 200 個成員。");
+        }
+
+        var userIds = rawIds.Distinct().ToList();
+
+        var members = await dbContext.GroupMembers
+            .AsNoTracking()
+            .Where(m => m.GroupId == groupId && userIds.Contains(m.UserId))
+            .Select(m => new { m.UserId, m.DisplayName, m.PictureUrl, HasPicture = m.Picture != null })
+            .ToDictionaryAsync(m => m.UserId, cancellationToken);
+
+        var maskingRules = await maskingService.LoadRulesAsync(cancellationToken);
+
+        IReadOnlyDictionary<string, AnonymousIdentityInfo> anonymousIdentities =
+            new Dictionary<string, AnonymousIdentityInfo>();
+        if (maskingRules.RequiresAnonymousIdentity)
+        {
+            // 只對確實存在於這個群組的成員指派代號。ids 是使用者可控的 query 參數，
+            // 拿它直接去指派等於讓外部輸入在 AnonymousIdentities 建立永久列、
+            // 並消耗代號序號把真實成員的代號往後推；同一份約定見 MessagesController 的搜尋端點
+            var knownIds = userIds.Where(members.ContainsKey).ToList();
+            if (knownIds.Count > 0)
+            {
+                anonymousIdentities = await anonymousIdentityService.GetOrAssignAsync(groupId, knownIds, cancellationToken);
+            }
+        }
+
+        var result = new List<ResolvedMemberDto>(userIds.Count);
+        foreach (var userId in userIds)
+        {
+            members.TryGetValue(userId, out var member);
+            anonymousIdentities.TryGetValue(userId, out var identity);
+
+            var resolved = MemberProfileResolver.Resolve(
+                groupId,
+                userId,
+                member?.DisplayName,
+                member?.PictureUrl,
+                member?.HasPicture == true,
+                maskingRules,
+                identity);
+
+            result.Add(resolved);
+        }
+
+        return Ok(result);
+    }
+
     private async Task<ActionResult<IReadOnlyList<GroupDto>>> BuildGroupListAsync(
         IReadOnlyDictionary<string, long> readBaselines, CancellationToken cancellationToken)
     {
@@ -83,7 +152,7 @@ public class GroupsController(
         var groups = await dbContext.Groups
             .AsNoTracking()
             .Where(g => g.LastMessageId != null)
-            .Select(g => new { g.GroupId, g.GroupName, HasPicture = g.Picture != null, LastMessageId = g.LastMessageId!.Value })
+            .Select(g => new { g.GroupId, g.GroupName, HasPicture = g.Picture != null, LastMessageId = g.LastMessageId!.Value, g.MemberCount })
             .ToListAsync(cancellationToken);
 
         if (groups.Count == 0)
@@ -147,13 +216,17 @@ public class GroupsController(
 
             var preview = MessagePreviewFormatter.Format(lastMessage.MessageType, lastMessage.Text, maskingRules, g.GroupId);
 
+            // 成員數優先採用 LINE API 回傳的真實群組人數（Groups.MemberCount）；
+            // 若尚未抓取或抓取失敗（為 null），則回退為已快取的發言成員數量（GroupMembers COUNT）。
+            var memberCount = g.MemberCount ?? memberCounts.GetValueOrDefault(g.GroupId, 0);
+
             result.Add(new GroupDto(
                 g.GroupId,
                 g.GroupName ?? g.GroupId,
                 g.HasPicture ? $"api/groups/{g.GroupId}/avatar" : null,
                 preview,
                 lastMessage.EventTimestamp,
-                memberCounts.GetValueOrDefault(g.GroupId, 0),
+                memberCount,
                 lastMessage.Id,
                 unreadByGroup.GetValueOrDefault(g.GroupId, 0)));
         }

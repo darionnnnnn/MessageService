@@ -437,4 +437,244 @@ public class GroupsControllerTests : IDisposable
         var group = Assert.Single(groups!);
         Assert.Equal("api/groups/G1/avatar", group.PictureUrl);
     }
+
+    [Fact]
+    public async Task GetGroups_WhenMemberCountExists_UsesGroupsMemberCount()
+    {
+        var now = DateTimeOffset.UtcNow;
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            dbContext.Groups.Add(new Group
+            {
+                GroupId = "G1",
+                GroupName = "工作群組A",
+                MemberCount = 42,
+                UpdatedAt = now
+            });
+            dbContext.GroupMembers.Add(new GroupMember
+            {
+                GroupId = "G1",
+                UserId = "U1",
+                DisplayName = "User 1",
+                UpdatedAt = now
+            });
+            dbContext.GroupMessages.Add(new GroupMessage
+            {
+                WebhookEventId = "e1", LineMessageId = "m1", GroupId = "G1", MessageType = "text", Text = "hi",
+                EventTimestamp = now, ReceivedAt = now
+            });
+            await Task.CompletedTask;
+        });
+
+        var groups = await _fixture.Client.GetFromJsonAsync<List<GroupDto>>("/api/groups");
+
+        var group = Assert.Single(groups!);
+        Assert.Equal(42, group.MemberCount);
+    }
+
+    [Fact]
+    public async Task GetGroups_WhenMemberCountIsNull_FallsBackToCachedGroupMembersCount()
+    {
+        var now = DateTimeOffset.UtcNow;
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            dbContext.Groups.Add(new Group
+            {
+                GroupId = "G1",
+                GroupName = "工作群組A",
+                MemberCount = null,
+                UpdatedAt = now
+            });
+            dbContext.GroupMembers.Add(new GroupMember
+            {
+                GroupId = "G1",
+                UserId = "U1",
+                DisplayName = "User 1",
+                UpdatedAt = now
+            });
+            dbContext.GroupMembers.Add(new GroupMember
+            {
+                GroupId = "G1",
+                UserId = "U2",
+                DisplayName = "User 2",
+                UpdatedAt = now
+            });
+            dbContext.GroupMessages.Add(new GroupMessage
+            {
+                WebhookEventId = "e1", LineMessageId = "m1", GroupId = "G1", MessageType = "text", Text = "hi",
+                EventTimestamp = now, ReceivedAt = now
+            });
+            await Task.CompletedTask;
+        });
+
+        var groups = await _fixture.Client.GetFromJsonAsync<List<GroupDto>>("/api/groups");
+
+        var group = Assert.Single(groups!);
+        Assert.Equal(2, group.MemberCount);
+    }
+
+    [Fact]
+    public async Task GetResolvedMembers_MatchesMessageDtoResolution()
+    {
+        var now = DateTimeOffset.UtcNow;
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            dbContext.GroupMembers.Add(new GroupMember
+            {
+                GroupId = "G1",
+                UserId = "U1",
+                DisplayName = "小明",
+                PictureUrl = "https://example.com/u1.jpg",
+                Picture = new GroupMemberPicture { GroupId = "G1", UserId = "U1", Content = [1, 2, 3] },
+                UpdatedAt = now
+            });
+            dbContext.GroupMessages.Add(new GroupMessage
+            {
+                WebhookEventId = "e1", LineMessageId = "m1", GroupId = "G1", UserId = "U1", MessageType = "text", Text = "hi",
+                EventTimestamp = now, ReceivedAt = now
+            });
+            await Task.CompletedTask;
+        });
+
+        var page = await _fixture.Client.GetFromJsonAsync<MessagesPageDto>("/api/groups/G1/messages?days=3");
+        var msg = Assert.Single(page!.Messages);
+
+        var resolvedMembers = await _fixture.Client.GetFromJsonAsync<List<ResolvedMemberDto>>("/api/groups/G1/members/resolved?ids=U1");
+
+        Assert.NotNull(resolvedMembers);
+        var resolved = Assert.Single(resolvedMembers!);
+        Assert.Equal(msg.UserId, resolved.UserId);
+        Assert.Equal(msg.DisplayName, resolved.DisplayName);
+        Assert.Equal(msg.PictureUrl, resolved.PictureUrl);
+        Assert.Equal(msg.AvatarIcon, resolved.AvatarIcon);
+        Assert.Equal(msg.ProfileResolved, resolved.ProfileResolved);
+    }
+
+    [Fact]
+    public async Task GetResolvedMembers_IdsOver200OrEmpty_ReturnsBadRequest()
+    {
+        // 缺少 ids 參數
+        var missingResp = await _fixture.Client.GetAsync("/api/groups/G1/members/resolved");
+        Assert.Equal(System.Net.HttpStatusCode.BadRequest, missingResp.StatusCode);
+
+        // ids 為空字串
+        var emptyResp = await _fixture.Client.GetAsync("/api/groups/G1/members/resolved?ids=");
+        Assert.Equal(System.Net.HttpStatusCode.BadRequest, emptyResp.StatusCode);
+
+        // ids 只有空白或逗點
+        var whitespaceResp = await _fixture.Client.GetAsync("/api/groups/G1/members/resolved?ids=%20,%20");
+        Assert.Equal(System.Net.HttpStatusCode.BadRequest, whitespaceResp.StatusCode);
+
+        // ids 超過 200 個
+        var over200Ids = string.Join(",", Enumerable.Range(1, 201).Select(i => $"U{i}"));
+        var over200Resp = await _fixture.Client.GetAsync($"/api/groups/G1/members/resolved?ids={over200Ids}");
+        Assert.Equal(System.Net.HttpStatusCode.BadRequest, over200Resp.StatusCode);
+    }
+
+    [Fact]
+    public async Task GetResolvedMembers_AnonymousMode_DoesNotLeakRealName()
+    {
+        var now = DateTimeOffset.UtcNow;
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            (await dbContext.ViewerSettings.SingleAsync()).NameDisplayMode = NameDisplayMode.Anonymous;
+            dbContext.GroupMembers.Add(new GroupMember
+            {
+                GroupId = "G1", UserId = "U1", DisplayName = "真實姓名小明", UpdatedAt = now
+            });
+            await Task.CompletedTask;
+        });
+
+        var resolvedMembers = await _fixture.Client.GetFromJsonAsync<List<ResolvedMemberDto>>("/api/groups/G1/members/resolved?ids=U1");
+
+        Assert.NotNull(resolvedMembers);
+        var resolved = Assert.Single(resolvedMembers!);
+        Assert.NotEqual("真實姓名小明", resolved.DisplayName);
+        Assert.DoesNotContain("真實姓名小明", resolved.DisplayName);
+        Assert.Null(resolved.PictureUrl);
+        Assert.True(resolved.ProfileResolved);
+    }
+
+    [Fact]
+    public async Task GetResolvedMembers_AnonymousMode_CachedMemberWithoutRealName_IsResolved()
+    {
+        // 匿名模式顯示的是代號、根本不看真名。若這裡回 false，前端會把這個人
+        // 永遠留在待解析集合裡每 30 秒空打一次請求，而畫面上什麼都不會變
+        var now = DateTimeOffset.UtcNow;
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            (await dbContext.ViewerSettings.SingleAsync()).NameDisplayMode = NameDisplayMode.Anonymous;
+            dbContext.GroupMembers.Add(new GroupMember
+            {
+                GroupId = "G1", UserId = "U1", DisplayName = null, UpdatedAt = now
+            });
+            await Task.CompletedTask;
+        });
+
+        var resolvedMembers = await _fixture.Client.GetFromJsonAsync<List<ResolvedMemberDto>>(
+            "/api/groups/G1/members/resolved?ids=U1");
+
+        var resolved = Assert.Single(resolvedMembers!);
+        Assert.True(resolved.ProfileResolved);
+        Assert.False(string.IsNullOrWhiteSpace(resolved.DisplayName));
+    }
+
+    [Fact]
+    public async Task GetResolvedMembers_AnonymousMode_UnknownIds_DoNotGetIdentitiesAssigned()
+    {
+        // ids 是使用者可控的 query 參數。拿它直接去指派代號等於讓外部輸入在
+        // AnonymousIdentities 建立永久列，並消耗代號序號把真實成員的代號往後推
+        var now = DateTimeOffset.UtcNow;
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            (await dbContext.ViewerSettings.SingleAsync()).NameDisplayMode = NameDisplayMode.Anonymous;
+            dbContext.GroupMembers.Add(new GroupMember
+            {
+                GroupId = "G1", UserId = "U1", DisplayName = "成員甲", UpdatedAt = now
+            });
+            await Task.CompletedTask;
+        });
+
+        var resolvedMembers = await _fixture.Client.GetFromJsonAsync<List<ResolvedMemberDto>>(
+            "/api/groups/G1/members/resolved?ids=U1,U_NOT_A_MEMBER,U_ALSO_FAKE");
+
+        Assert.Equal(3, resolvedMembers!.Count);
+        Assert.True(resolvedMembers.Single(m => m.UserId == "U1").ProfileResolved);
+        Assert.False(resolvedMembers.Single(m => m.UserId == "U_NOT_A_MEMBER").ProfileResolved);
+
+        using var scope = _fixture.Factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+        var identities = await db.AnonymousIdentities.AsNoTracking()
+            .Where(a => a.GroupId == "G1").ToListAsync();
+        var identity = Assert.Single(identities);
+        Assert.Equal("U1", identity.UserId);
+    }
+
+    [Fact]
+    public async Task GetResolvedMembers_UncachedUser_ReturnsRecordWithProfileResolvedFalse()
+    {
+        var now = DateTimeOffset.UtcNow;
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            dbContext.GroupMembers.Add(new GroupMember
+            {
+                GroupId = "G1", UserId = "U1", DisplayName = "已快取成員", UpdatedAt = now
+            });
+            await Task.CompletedTask;
+        });
+
+        // 查詢包含已快取 U1 與未快取 U2
+        var resolvedMembers = await _fixture.Client.GetFromJsonAsync<List<ResolvedMemberDto>>("/api/groups/G1/members/resolved?ids=U1,U2");
+
+        Assert.NotNull(resolvedMembers);
+        Assert.Equal(2, resolvedMembers!.Count);
+
+        var u1 = resolvedMembers.Single(m => m.UserId == "U1");
+        Assert.True(u1.ProfileResolved);
+        Assert.Equal("已快取成員", u1.DisplayName);
+
+        var u2 = resolvedMembers.Single(m => m.UserId == "U2");
+        Assert.False(u2.ProfileResolved);
+        Assert.Equal("U2", u2.DisplayName);
+    }
 }

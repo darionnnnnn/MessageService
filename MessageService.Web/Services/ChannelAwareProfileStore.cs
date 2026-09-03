@@ -20,4 +20,8 @@ public class ChannelAwareProfileStore(
 
     public Task UpsertMemberAsync(string groupId, string userId, MemberProfile profile, CancellationToken cancellationToken) =>
         Active.UpsertMemberAsync(groupId, userId, profile, cancellationToken);
+
+    public Task<IReadOnlyList<ProfileRefreshTask>> GetStaleProfilesAsync(
+        int max, DateTimeOffset cutoff, CancellationToken cancellationToken) =>
+        Active.GetStaleProfilesAsync(max, cutoff, cancellationToken);
 }
