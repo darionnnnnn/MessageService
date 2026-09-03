@@ -13,4 +13,8 @@ public interface IMaskingRuleSet
 
     /// <summary>是否為完全匿名模式；為 true 時呼叫端需先用 IAnonymousIdentityService 查好代號才能組訊息。</summary>
     bool RequiresAnonymousIdentity { get; }
+
+    /// <summary>這個使用者在目前模式下有沒有設定別名——別名是最終顯示值，
+    /// 與有沒有抓到真名無關，供「名稱是否已解析」的判定使用。</summary>
+    bool HasAliasFor(string userId);
 }

@@ -73,16 +73,22 @@ public class DbProfileStore(MessageDbContext dbContext, FieldCipher cipher, ILog
             return [];
         }
 
+        // 條件必須與 IsStale 對齊：那裡刻意不看「有沒有圖」，因為換了頭貼但新圖下載失敗時
+        // 舊圖還在，看圖會讓這種情況被短路成「不過期」——正是本輪要修的情境。
+        // 另外只挑側欄看得見的群組（LastMessageId 非 null）：bot 已被踢出或訊息被保留期清光的
+        // 殭屍群組 UpdatedAt 永遠最舊，會排在最前面把名額吃光，讓真正需要刷新的永遠輪不到
+        var groupQuota = Math.Max(1, max / 2);
         var candidateGroups = await dbContext.Groups
-            .Where(g => g.UpdatedAt < cutoff
-                || (!string.IsNullOrWhiteSpace(g.PictureUrl)
-                    && g.Picture == null
-                    && (g.PictureFetchedUrl == null || g.PictureFetchedUrl != g.PictureUrl)))
+            .Where(g => g.LastMessageId != null
+                && (g.UpdatedAt < cutoff
+                    || (!string.IsNullOrWhiteSpace(g.PictureUrl)
+                        && (g.PictureFetchedUrl == null || g.PictureFetchedUrl != g.PictureUrl))))
             .OrderBy(g => g.UpdatedAt)
-            .Take(max)
+            .Take(groupQuota)
             .Select(g => g.GroupId)
             .ToListAsync(cancellationToken);
 
+        // 群組用不完的名額才讓給成員，但群組先被保證只吃一半，成員不會被餓死
         var remaining = max - candidateGroups.Count;
         List<(string GroupId, string UserId)> candidateMembers = [];
         if (remaining > 0)
@@ -90,7 +96,6 @@ public class DbProfileStore(MessageDbContext dbContext, FieldCipher cipher, ILog
             candidateMembers = await dbContext.GroupMembers
                 .Where(m => m.UpdatedAt < cutoff
                     || (!string.IsNullOrWhiteSpace(m.PictureUrl)
-                        && m.Picture == null
                         && (m.PictureFetchedUrl == null || m.PictureFetchedUrl != m.PictureUrl)))
                 .OrderBy(m => m.UpdatedAt)
                 .Take(remaining)

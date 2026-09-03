@@ -514,38 +514,6 @@ public class GroupsControllerTests : IDisposable
     }
 
     [Fact]
-    public async Task GetGroups_GroupNamePresent_NameResolvedIsTrue_AndNull_IsFalse()
-    {
-        var now = DateTimeOffset.UtcNow;
-        await _fixture.SeedAsync(async dbContext =>
-        {
-            // G1 有 GroupName，G2 的 GroupName 為 null
-            dbContext.Groups.Add(new Group { GroupId = "G1", GroupName = "工作群組A", UpdatedAt = now });
-            dbContext.Groups.Add(new Group { GroupId = "G2", GroupName = null, UpdatedAt = now });
-            dbContext.GroupMessages.Add(new GroupMessage
-            {
-                WebhookEventId = "e1", LineMessageId = "m1", GroupId = "G1", MessageType = "text", Text = "hi1",
-                EventTimestamp = now, ReceivedAt = now
-            });
-            dbContext.GroupMessages.Add(new GroupMessage
-            {
-                WebhookEventId = "e2", LineMessageId = "m2", GroupId = "G2", MessageType = "text", Text = "hi2",
-                EventTimestamp = now, ReceivedAt = now
-            });
-            await Task.CompletedTask;
-        });
-
-        var groups = await _fixture.Client.GetFromJsonAsync<List<GroupDto>>("/api/groups");
-
-        Assert.NotNull(groups);
-        var g1 = groups!.Single(g => g.GroupId == "G1");
-        var g2 = groups.Single(g => g.GroupId == "G2");
-
-        Assert.True(g1.NameResolved);
-        Assert.False(g2.NameResolved);
-    }
-
-    [Fact]
     public async Task GetResolvedMembers_MatchesMessageDtoResolution()
     {
         var now = DateTimeOffset.UtcNow;
@@ -625,6 +593,61 @@ public class GroupsControllerTests : IDisposable
         Assert.DoesNotContain("真實姓名小明", resolved.DisplayName);
         Assert.Null(resolved.PictureUrl);
         Assert.True(resolved.NameResolved);
+    }
+
+    [Fact]
+    public async Task GetResolvedMembers_AnonymousMode_CachedMemberWithoutRealName_IsResolved()
+    {
+        // 匿名模式顯示的是代號、根本不看真名。若這裡回 false，前端會把這個人
+        // 永遠留在待解析集合裡每 30 秒空打一次請求，而畫面上什麼都不會變
+        var now = DateTimeOffset.UtcNow;
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            (await dbContext.ViewerSettings.SingleAsync()).NameDisplayMode = NameDisplayMode.Anonymous;
+            dbContext.GroupMembers.Add(new GroupMember
+            {
+                GroupId = "G1", UserId = "U1", DisplayName = null, UpdatedAt = now
+            });
+            await Task.CompletedTask;
+        });
+
+        var resolvedMembers = await _fixture.Client.GetFromJsonAsync<List<ResolvedMemberDto>>(
+            "/api/groups/G1/members/resolved?ids=U1");
+
+        var resolved = Assert.Single(resolvedMembers!);
+        Assert.True(resolved.NameResolved);
+        Assert.False(string.IsNullOrWhiteSpace(resolved.DisplayName));
+    }
+
+    [Fact]
+    public async Task GetResolvedMembers_AnonymousMode_UnknownIds_DoNotGetIdentitiesAssigned()
+    {
+        // ids 是使用者可控的 query 參數。拿它直接去指派代號等於讓外部輸入在
+        // AnonymousIdentities 建立永久列，並消耗代號序號把真實成員的代號往後推
+        var now = DateTimeOffset.UtcNow;
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            (await dbContext.ViewerSettings.SingleAsync()).NameDisplayMode = NameDisplayMode.Anonymous;
+            dbContext.GroupMembers.Add(new GroupMember
+            {
+                GroupId = "G1", UserId = "U1", DisplayName = "成員甲", UpdatedAt = now
+            });
+            await Task.CompletedTask;
+        });
+
+        var resolvedMembers = await _fixture.Client.GetFromJsonAsync<List<ResolvedMemberDto>>(
+            "/api/groups/G1/members/resolved?ids=U1,U_NOT_A_MEMBER,U_ALSO_FAKE");
+
+        Assert.Equal(3, resolvedMembers!.Count);
+        Assert.True(resolvedMembers.Single(m => m.UserId == "U1").NameResolved);
+        Assert.False(resolvedMembers.Single(m => m.UserId == "U_NOT_A_MEMBER").NameResolved);
+
+        using var scope = _fixture.Factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
+        var identities = await db.AnonymousIdentities.AsNoTracking()
+            .Where(a => a.GroupId == "G1").ToListAsync();
+        var identity = Assert.Single(identities);
+        Assert.Equal("U1", identity.UserId);
     }
 
     [Fact]

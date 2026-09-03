@@ -219,7 +219,7 @@ public class LineProfileClient : ILineProfileClient
     /// <summary>
     /// 判定頭貼下載失敗是否屬於永久性失敗（Permanent）：
     /// 1. HTTP 404（NotFound）或 410（Gone）：遠端資源不存在。
-    /// 2. 緩衝溢位例外（HttpRequestError.ConfigurationLimitExceeded 或訊息包含緩衝上限關鍵字）：
+    /// 2. 緩衝溢位例外（HttpRequestError.ConfigurationLimitExceeded）：
     ///    圖片實體大小超過 MaxResponseContentBufferSize，屬於過大圖片。
     /// 一般網路錯誤（如逾時 TimeoutException、連線被拒 SocketError.ConnectionRefused、DNS 解析失敗、5xx 伺服器錯誤等）
     /// 絕不判為永久失敗，維持 TransientFailure，保留重試機會。
@@ -234,14 +234,6 @@ public class LineProfileClient : ILineProfileClient
             }
 
             if (httpEx.HttpRequestError == HttpRequestError.ConfigurationLimitExceeded)
-            {
-                return true;
-            }
-
-            if (httpEx.Message.Contains("buffer", StringComparison.OrdinalIgnoreCase) &&
-                (httpEx.Message.Contains("maximum", StringComparison.OrdinalIgnoreCase) ||
-                 httpEx.Message.Contains("limit", StringComparison.OrdinalIgnoreCase) ||
-                 httpEx.Message.Contains("exceeded", StringComparison.OrdinalIgnoreCase)))
             {
                 return true;
             }

@@ -7,6 +7,8 @@
     const GROUP_POLL_INTERVAL_MS = 10000;
     // 尚未解析成員（名稱與頭貼）的就地更新輪詢間隔
     const MEMBER_POLL_INTERVAL_MS = 30000;
+    // 同一個成員最多試這麼多輪就放棄（30 秒 × 10 ＝ 5 分鐘），避免解析不到的人被無限期輪詢
+    const MEMBER_RESOLVE_MAX_ATTEMPTS = 10;
     const NEAR_BOTTOM_THRESHOLD_PX = 80;
     const NEAR_TOP_THRESHOLD_PX = 40;
     const INITIAL_DAYS = 3;
@@ -80,6 +82,7 @@
         hadMobileChatOpenBeforeFullscreen: false,
         pendingContentIds: new Set(),
         pendingMemberIds: new Set(),
+        memberResolveAttempts: new Map(),
         memberPolling: false,
         chatHeaderData: null,
         lastAppendedDateKey: null,
@@ -2099,6 +2102,7 @@
         state.messagesCache.clear();
         state.pendingContentIds.clear();
         state.pendingMemberIds.clear();
+        state.memberResolveAttempts.clear();
         state.lastAppendedDateKey = null;
         state.lastAppendedSenderId = null;
     }
@@ -2317,6 +2321,17 @@
                 for (const member of members) {
                     if (member.nameResolved) {
                         state.pendingMemberIds.delete(member.userId);
+                        state.memberResolveAttempts.delete(member.userId);
+                    } else {
+                        // 有些人永遠解析不到（已退出群組、LINE 隱私設定擋住、bot 被踢出）。
+                        // 沒有上限的話這些 id 會一直留在待辦裡，每 30 秒空打一次請求到使用者換群組為止
+                        const attempts = (state.memberResolveAttempts.get(member.userId) ?? 0) + 1;
+                        if (attempts >= MEMBER_RESOLVE_MAX_ATTEMPTS) {
+                            state.pendingMemberIds.delete(member.userId);
+                            state.memberResolveAttempts.delete(member.userId);
+                        } else {
+                            state.memberResolveAttempts.set(member.userId, attempts);
+                        }
                     }
                     updateMemberNode(member);
                 }

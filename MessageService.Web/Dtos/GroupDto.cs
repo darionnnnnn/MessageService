@@ -10,5 +10,4 @@ public record GroupDto(
     DateTimeOffset? LastMessageAt,
     int MemberCount,
     long LastMessageId,
-    int UnreadCount,
-    bool NameResolved);
+    int UnreadCount);

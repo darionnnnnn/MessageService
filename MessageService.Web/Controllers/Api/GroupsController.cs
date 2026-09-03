@@ -112,7 +112,14 @@ public class GroupsController(
             new Dictionary<string, AnonymousIdentityInfo>();
         if (maskingRules.RequiresAnonymousIdentity)
         {
-            anonymousIdentities = await anonymousIdentityService.GetOrAssignAsync(groupId, userIds, cancellationToken);
+            // 只對確實存在於這個群組的成員指派代號。ids 是使用者可控的 query 參數，
+            // 拿它直接去指派等於讓外部輸入在 AnonymousIdentities 建立永久列、
+            // 並消耗代號序號把真實成員的代號往後推；同一份約定見 MessagesController 的搜尋端點
+            var knownIds = userIds.Where(members.ContainsKey).ToList();
+            if (knownIds.Count > 0)
+            {
+                anonymousIdentities = await anonymousIdentityService.GetOrAssignAsync(groupId, knownIds, cancellationToken);
+            }
         }
 
         var result = new List<ResolvedMemberDto>(userIds.Count);
@@ -220,8 +227,7 @@ public class GroupsController(
                 lastMessage.EventTimestamp,
                 memberCount,
                 lastMessage.Id,
-                unreadByGroup.GetValueOrDefault(g.GroupId, 0),
-                !string.IsNullOrWhiteSpace(g.GroupName)));
+                unreadByGroup.GetValueOrDefault(g.GroupId, 0)));
         }
 
         return Ok(result.OrderByDescending(g => g.LastMessageAt).ToList());

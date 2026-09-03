@@ -16,7 +16,10 @@ public static class MemberProfileResolver
         IMaskingRuleSet maskingRules,
         AnonymousIdentityInfo? anonymousIdentity)
     {
-        var nameResolved = !string.IsNullOrWhiteSpace(rawDisplayName);
+        // NameResolved 的語意是「目前這個模式下，畫面上的名稱已經是最終值」，
+        // 不是「有沒有抓到真名」——匿名模式顯示的是代號、根本不看真名，
+        // 若在那裡回 false，前端會把這些人永遠留在待解析集合裡每 30 秒空轉一次
+        bool nameResolved;
 
         string displayName;
         string? pictureUrl;
@@ -24,13 +27,19 @@ public static class MemberProfileResolver
 
         if (maskingRules.RequiresAnonymousIdentity)
         {
-            var label = anonymousIdentity?.Label ?? "(未知)";
-            displayName = maskingRules.ResolveDisplayName(userId, rawDisplayName, label);
+            // 代號已指派就是最終值；沒指派（例如成員不在這個群組）才算未解析
+            nameResolved = anonymousIdentity is not null;
+            displayName = maskingRules.ResolveDisplayName(userId, rawDisplayName, anonymousIdentity?.Label);
             pictureUrl = null;
-            avatarIcon = anonymousIdentity?.IconKey ?? AvatarIconCatalog.ForHash(userId).IconKey;
+            // fallback 的種子要與 AnonymousIdentityService 的指派邏輯一致（含 groupId），
+            // 否則同一個人在別處的代號圖示會對不起來
+            avatarIcon = anonymousIdentity?.IconKey ?? AvatarIconCatalog.ForHash($"{groupId}:{userId}").IconKey;
         }
         else
         {
+            // 別名模式下設過別名的人，顯示值就是別名、與真名無關，同樣算已解析
+            nameResolved = !string.IsNullOrWhiteSpace(rawDisplayName)
+                || maskingRules.HasAliasFor(userId);
             displayName = maskingRules.ResolveDisplayName(userId, rawDisplayName);
             // 非 Original 模式下真實頭貼一律不外流，即使前端不渲染，URL 本身就是身分線索
             pictureUrl = maskingRules.RevealsOriginalProfile && hasPicture

@@ -657,7 +657,7 @@ public class MessagesControllerTests : IDisposable
     }
 
     [Fact]
-    public async Task GetMessages_AnonymousMode_MemberCached_NameResolvedIsTrue()
+    public async Task GetMessages_AnonymousMode_AssignedIdentityCountsAsResolved()
     {
         var now = DateTimeOffset.UtcNow;
         await _fixture.SeedAsync(async dbContext =>
@@ -678,8 +678,10 @@ public class MessagesControllerTests : IDisposable
         var msgU1 = page!.Messages.Single(m => m.UserId == "U1");
         var msgU2 = page.Messages.Single(m => m.UserId == "U2");
 
-        // 匿名模式下雖然顯示代號，但只要成員已快取，NameResolved 仍為 true
+        // 匿名模式顯示的是代號、根本不看真名，所以只要代號已指派就是最終顯示值——
+        // 兩個人都算已解析，包含 profile 還沒快取的 U2。若這裡回 false，
+        // 前端會把他永遠留在待解析集合裡每 30 秒空打一次請求，而畫面上什麼都不會變
         Assert.True(msgU1.NameResolved);
-        Assert.False(msgU2.NameResolved);
+        Assert.True(msgU2.NameResolved);
     }
 }

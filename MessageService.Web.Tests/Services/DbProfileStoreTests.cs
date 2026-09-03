@@ -1064,12 +1064,13 @@ public class DbProfileStoreTests : IDisposable
         var now = DateTimeOffset.UtcNow;
         var cutoff = now.AddDays(-7);
 
-        // 1. UpdatedAt 過期的群組
+        // 1. UpdatedAt 過期的群組（LastMessageId 非 null＝側欄看得見，補刷只挑這種）
         _dbContext.Groups.Add(new Group
         {
             GroupId = "g_stale",
             GroupName = "過期群組",
-            UpdatedAt = now.AddDays(-8)
+            UpdatedAt = now.AddDays(-8),
+            LastMessageId = 1
         });
 
         // 2. 缺圖的成員（有 PictureUrl 但沒有圖片子列且 PictureFetchedUrl != PictureUrl）
@@ -1117,8 +1118,11 @@ public class DbProfileStoreTests : IDisposable
     }
 
     [Fact]
-    public async Task GetStaleProfilesAsync_CandidatesExceedLimit_ReturnsExactLimitWithGroupsFirst()
+    public async Task GetStaleProfilesAsync_CandidatesExceedLimit_GroupsTakeAtMostHalfSoMembersAreNotStarved()
     {
+        // 群組先吃到一半的名額就停，剩下讓給成員。沒有這個上限的話，
+        // 一批永遠刷不成功的群組（UpdatedAt 恆為最舊、排序永遠在最前）會把每一輪的名額吃光，
+        // 成員永遠輪不到
         var cipher = CreateCipher(false);
         var store = new DbProfileStore(_dbContext, cipher, NullLogger<DbProfileStore>.Instance);
 
@@ -1130,7 +1134,8 @@ public class DbProfileStoreTests : IDisposable
             _dbContext.Groups.Add(new Group
             {
                 GroupId = $"g_{i}",
-                UpdatedAt = now.AddDays(-10 - i)
+                UpdatedAt = now.AddDays(-10 - i),
+                LastMessageId = 1
             });
         }
 
@@ -1147,14 +1152,82 @@ public class DbProfileStoreTests : IDisposable
         await _dbContext.SaveChangesAsync();
         _dbContext.ChangeTracker.Clear();
 
-        var limit3 = await store.GetStaleProfilesAsync(3, cutoff, CancellationToken.None);
-        Assert.Equal(3, limit3.Count);
-        Assert.All(limit3, t => Assert.Null(t.UserId)); // 群組優先
+        // 上限 4：群組最多拿 2（4/2），剩下 2 個名額給成員
+        var limit4 = await store.GetStaleProfilesAsync(4, cutoff, CancellationToken.None);
+        Assert.Equal(4, limit4.Count);
+        Assert.Equal(2, limit4.Count(t => t.UserId == null));
+        Assert.Equal(2, limit4.Count(t => t.UserId != null));
 
-        var limit7 = await store.GetStaleProfilesAsync(7, cutoff, CancellationToken.None);
-        Assert.Equal(7, limit7.Count);
-        Assert.Equal(5, limit7.Count(t => t.UserId == null)); // 5 個群組
-        Assert.Equal(2, limit7.Count(t => t.UserId != null)); // 剩餘配額給 2 個成員
+        // 上限 20：候選只有 10 筆，全部回傳
+        var limit20 = await store.GetStaleProfilesAsync(20, cutoff, CancellationToken.None);
+        Assert.Equal(10, limit20.Count);
+        Assert.Equal(5, limit20.Count(t => t.UserId == null));
+        Assert.Equal(5, limit20.Count(t => t.UserId != null));
+    }
+
+    [Fact]
+    public async Task GetStaleProfilesAsync_SkipsGroupsWithoutLastMessage()
+    {
+        // bot 被踢出、或訊息被保留期清光的群組在側欄根本看不到，
+        // 但它們的 UpdatedAt 永遠最舊、排序恆在最前，會把名額吃光
+        var cipher = CreateCipher(false);
+        var store = new DbProfileStore(_dbContext, cipher, NullLogger<DbProfileStore>.Instance);
+
+        var now = DateTimeOffset.UtcNow;
+        var cutoff = now.AddDays(-7);
+
+        _dbContext.Groups.Add(new Group
+        {
+            GroupId = "g_zombie",
+            UpdatedAt = now.AddDays(-100),
+            LastMessageId = null
+        });
+        _dbContext.Groups.Add(new Group
+        {
+            GroupId = "g_visible",
+            UpdatedAt = now.AddDays(-8),
+            LastMessageId = 1
+        });
+
+        await _dbContext.SaveChangesAsync();
+        _dbContext.ChangeTracker.Clear();
+
+        var result = await store.GetStaleProfilesAsync(10, cutoff, CancellationToken.None);
+
+        var task = Assert.Single(result);
+        Assert.Equal("g_visible", task.GroupId);
+    }
+
+    [Fact]
+    public async Task GetStaleProfilesAsync_PictureUrlChangedButOldPictureStillThere_IsCandidate()
+    {
+        // 與 IsStale 對齊：換了頭貼但新圖下載失敗時舊圖還在，
+        // 若候選條件要求「沒有圖」就會漏掉這種情況，等於本輪的過期判定修正只做了一半
+        var cipher = CreateCipher(false);
+        var store = new DbProfileStore(_dbContext, cipher, NullLogger<DbProfileStore>.Instance);
+
+        var now = DateTimeOffset.UtcNow;
+        var cutoff = now.AddDays(-7);
+
+        _dbContext.Groups.Add(new Group
+        {
+            GroupId = "g_changed_pic",
+            GroupName = "換了頭貼",
+            UpdatedAt = now,
+            LastMessageId = 1,
+            PictureUrl = "https://example.com/new.png",
+            PictureFetchedUrl = "https://example.com/old.png",
+            Picture = new GroupPicture { GroupId = "g_changed_pic", Content = [1, 2, 3] }
+        });
+
+        await _dbContext.SaveChangesAsync();
+        _dbContext.ChangeTracker.Clear();
+
+        var result = await store.GetStaleProfilesAsync(10, cutoff, CancellationToken.None);
+
+        var task = Assert.Single(result);
+        Assert.Equal("g_changed_pic", task.GroupId);
+        Assert.Null(task.UserId);
     }
 
     [Theory]

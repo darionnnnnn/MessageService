@@ -20,9 +20,30 @@ public class ProfileBackfillService(
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        // 啟動先掃一次再進入週期，比照 ContentDownloadService：站台重啟後不必再等一個完整間隔，
+        // 而重啟正是「上一輪的刷新待辦全部遺失」的時刻，最需要立刻補
+        try
+        {
+            await RunBackfillAsync(stoppingToken);
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            return;
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Profile backfill startup scan failed; will retry at next scheduled run");
+        }
+
+        // 間隔設 0 表示只在啟動時掃一次，比照 ContentDownload:RequeueIntervalMinutes 的語意
+        if (_options.BackfillIntervalMinutes <= 0)
+        {
+            return;
+        }
+
         while (!stoppingToken.IsCancellationRequested)
         {
-            var interval = TimeSpan.FromMinutes(Math.Max(1, _options.BackfillIntervalMinutes));
+            var interval = TimeSpan.FromMinutes(_options.BackfillIntervalMinutes);
             try
             {
                 await Task.Delay(interval, timeProvider, stoppingToken);

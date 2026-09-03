@@ -15,6 +15,7 @@ public class ProfileCacheOptions
     /// <summary>背景補刷掃描間隔（分鐘）。目前唯一的刷新觸發是新訊息落地（IngestSideEffects），
     /// 安靜的群組或成員若當初抓取失敗或未及時刷新，就可能永遠停留在原始 Id 與代號圖示。
     /// 透過定期背景掃描主動將過期或缺圖的項目重新入列刷新。</summary>
+    /// 設 0 表示只在啟動時掃一次（比照 ContentDownload:RequeueIntervalMinutes 的語意）。
     public int BackfillIntervalMinutes { get; set; } = 15;
 
     /// <summary>每次背景補刷掃描最多挑選的候選筆數（群組與成員合計）。
