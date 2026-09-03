@@ -1,6 +1,6 @@
 # PROFILE-1 規劃：名稱與頭貼的即時同步與自癒
 
-> 狀態：實作中
+> 狀態：全案完成（2026-09-03）
 > 基準：dev@d392b49（1308 綠）
 > 來源：使用者回報兩個症狀 ＋ 一次即時同步路徑的正確性審查
 > 實作方式：整輪委派 **agy**，模型 `gemini-3.8-flash-high`（本輪起改用 3.8，中途不換）
@@ -151,10 +151,30 @@ ingest profile 端點的授權與其他 ingest 端點一致、兩支 upsert 是�
 
 | 作業 | 執行者 | 結果 | 驗收 | 落差與處置 |
 |---|---|---|---|---|
-| A | agy 3.8 | | | |
-| B | agy 3.8 | | | |
-| C | agy 3.8 | | | |
+| A | agy 3.8 ＋ 一次回饋輪 | 1308→1336 綠 | 過期判定、刪圖（含反例）、名稱保護、Edge 推送記冷卻皆有測試；突變測試釘住刪圖分支與 IsStale | agy 第一版把 `ProfileBackfillService` 註冊在 `RunsRetention`（Core），而 Core 在拆機拓撲是 `NullProfileRefreshQueue`，掃到的候選全被丟掉——正是使用者的拓撲。回饋輪改為：`IProfileStore` 新增 `GetStaleProfilesAsync`、Core 新增 `GET api/ingest/profiles/stale`、服務註冊在 `OutboundHere`（與 PLAN 原文「有資料庫的角色」不同，PLAN 原文是錯的） |
+| B | agy 3.8 | 1336→1352 綠 | 四模式群組頭貼 200／成員 404、空內容 404、304 帶 ETag、migration 一致性、成員數回退 | agy 寫成無條件 `catch (OperationCanceledException) { throw; }`，HttpClient 逾時會中止整個群組刷新，其逾時測試丟的還是錯的例外型別（假陽性）——Claude 改成看 token 並補真正的逾時測試。緩衝餘量 `+1` 改為 `+1024`（效果同） |
+| C | agy 3.8 | 1352→1359 綠 | 解析端點形狀／400／匿名不洩真名／與訊息 DTO 一致；瀏覽器實測就地更新（列上記號存活、捲動不動） | `GroupDto.nameResolved` 沒有消費端（側欄本來就十秒全量重建），終檢移除。`hasAvatar` 沒做，體檢輪併入旗標（見下） |
+
+實作輪終檢（Opus 5，兩個獨立審查代理）另修：匿名／別名模式下旗標永遠為假造成無限輪詢；解析端點對外部輸入的 id 指派代號（違反「代號只讀不指派」約定）；補刷候選查詢仍要求「沒有圖」與 IsStale 分岔；殭屍群組吃光補刷名額；補刷無啟動掃描且間隔 0 語意與既有服務相反；例外訊息字串比對的死碼。1359→1362 綠。
 
 ## 體檢交接
 
-（實作輪收官時填）
+- 實作：Claude Opus 5 規劃／驗收，agy `gemini-3.8-flash-high` 產出，實作輪終檢由 Opus 5 手改（commit `6b00ff5`）。
+- 體檢：Claude Fable 5.1（使用者 `/model` 切換後下收尾指令）。
+- 實作方最沒把握的地方：`6b00ff5` 的手改沒有任何獨立審查看過；拉取拓撲沒有背景補刷；`NameResolved` 語意剛改過。
+
+## 體檢輪修正（Fable 5.1）
+
+對 `dev..feature/profile-1` 全 diff 與 PLAN 逐條比對，重點掃 `6b00ff5`。
+
+1. **規劃落差：作業 C 定案的 `hasAvatar` 沒有實作**（前兩次審查都判 C-1 ✅ 而漏掉）。症狀：`Original` 模式下名稱先到、圖檔下載暫時失敗的人被判「已解析」，前端停止輪詢，之後補齊的頭貼要重新整理才看得到——正是使用者回報的「大頭照要刷新」。處置：不另加欄位，把頭貼併進同一個旗標並更名 `ProfileResolved`（名稱與頭貼都是最終值才為 true；非 `Original` 模式不看頭貼；LINE 端沒頭貼的人不用等）。兩個 controller 投影多帶 `PictureUrl`。迴歸測試：`GetMessages_OriginalMode_ProfileResolvedWaitsForPictureDownload`、`GetMessages_MaskMiddleMode_PendingPictureDoesNotBlockResolution`，突變（拿掉頭貼條件）確認紅燈。
+2. **升級順序的 log 洗版**：新版 Edge 打舊版 Core 的 `profiles/stale` 收 404 → `GetFromJsonAsync` 拋例外 → 每 15 分鐘一筆 error。處置：比照 `HttpIngestSink` 批次端點，404 只警告一次、回空清單；其他狀態碼維持拋出。測試：`GetStaleProfilesAsync_OldCoreWithoutEndpoint_ReturnsEmptyInsteadOfThrowing`、`_ServerError_StillThrows`。
+3. **log 等級與既有服務不一致**：補刷啟動掃描失敗記 Error（`ContentDownloadService` 同情境是 Warning，啟動時 DB／Core 未就緒是常態）；零筆的輪次記 Information（穩態每 15 分鐘一行，拉取方向的 Edge 永遠 0）。處置：啟動失敗降 Warning、零筆降 Debug。
+4. **304 路徑用全域加密開關決定 Cache-Control，200 路徑看 blob 表頭**：只在「加密開啟前寫入的舊圖」不一致，且方向是 304 更嚴（no-store），無外洩風險。處置：補註解說明，不改行為。
+5. 已確認無問題：拉取方向可在執行期切換（`EdgeChannelState.UsePullResources`），補刷服務必須維持註冊；`cutoff` 有 `Uri.EscapeDataString`；`LastMessageId != null` 與側欄可見性查詢同一條件；`showAvatarContextMenu` 只用 `userId`；本輪改動的 BOM 只在 EF migration（慣例允許）；`GetGroupMemberCountAsync` 每次群組刷新多打一次 LINE，但群組刷新本身有 7 天 TTL 與入列抑制，維持 PLAN 定案。
+
+測試：1362→1366 綠。
+
+## 終檢輪
+
+（併 dev 後填）

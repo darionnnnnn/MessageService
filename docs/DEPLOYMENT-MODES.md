@@ -99,6 +99,14 @@ Edge 與 EdgeProxy 的關係由兩個設定決定，可以組出三種環境：
 `ApiContentWorkSource`／`ApiProfileStore` 打 ingest API。一對拆機主機理論上兩邊都能設
 `OutboundHere=true`（例如 Core 端自己也連得到 LINE），但實務上通常只有一台需要。
 
+頭貼的**背景補刷**（`ProfileCache:BackfillIntervalMinutes`／`BackfillMaxPerScan`）同樣掛在
+`OutboundHere` 這一側——它的產物是丟進刷新佇列的工作，只有真的會消費佇列的那台跑才有意義；
+掛在「有資料庫」那側的話，Core＋`OutboundHere=false` 會把它註冊到 `NullProfileRefreshQueue` 上，
+每輪照掃、照記 log、沒有一筆被消費。候選來源由 `IProfileStore` 決定：有資料庫那端直接查表，
+Edge 打 Core 的 `GET /api/ingest/profiles/stale`。**拉取方向（`Ingest:Channel=Pull`，或 Auto 在推送
+暫停期間）目前沒有背景補刷**：Edge 不主動連 Core 所以撈不到候選，Core 端 `EdgePullService` 的
+刷新待辦只由剛落地的訊息播種，安靜的群組要等下一則訊息才會刷新。
+
 `AllInOne` 就是最初的單機行為：收 webhook、寫本機 outbox、由背景服務排空並直接寫進資料庫。
 沒有設定 `Deployment:Mode`、站台目錄下也沒有模式後綴設定檔時，就是這個模式。
 
@@ -283,7 +291,8 @@ Core 則沒有問題（參數預設值就是舊行為）。`startupAgeSeconds`�
 `ownerId` 參數同理：舊版 Core 忽略它們，只是少了「啟動時立即回收自己孤兒」的優化，等租約
 逾期仍會回收；舊版 Edge 只送得出 `isStartup=true`，新版 Core 收到它但沒有 `startupAgeSeconds`
 時**不做**啟動回收（沒有基準時刻就無法分辨孤兒與兄弟行程正在進行的下載，寧可等租約逾期）；
-舊版 Edge 沒帶 `ownerId` 時新版 Core 一律記成 `legacy-edge`。
+舊版 Edge 沒帶 `ownerId` 時新版 Core 一律記成 `legacy-edge`。`profiles/stale` 端點同理：新版 Edge
+的背景補刷打到舊版 Core 收到 404 時只記一次警告、當作該輪沒有候選，Core 升級後自動恢復。
 
 ## 設定
 
