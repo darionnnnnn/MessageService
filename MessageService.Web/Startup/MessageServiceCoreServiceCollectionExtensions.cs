@@ -348,6 +348,9 @@ public static class MessageServiceCoreServiceCollectionExtensions
 
             builder.Services.AddHostedService<ContentDownloadService>();
             builder.Services.AddHostedService<ProfileRefreshService>();
+            // 補刷的產物是「丟進刷新佇列的工作」，只有真的會消費佇列、也真的能打 LINE 的
+            // 那台跑才有意義；資料來源由 IProfileStore 決定，AllInOne 查本機資料庫、Edge 打 Core 的 ingest API。
+            builder.Services.AddHostedService<ProfileBackfillService>();
         }
         else
         {

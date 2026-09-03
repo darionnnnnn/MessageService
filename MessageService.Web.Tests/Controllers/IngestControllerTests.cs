@@ -374,6 +374,43 @@ public class IngestControllerTests
         Assert.Equal(profile, saved);
     }
 
+    [Fact]
+    public async Task GetStaleProfiles_DelegatesToStore_AndReturnsOk()
+    {
+        var store = new FakeProfileStore
+        {
+            StaleProfilesToReturn = [new("G1", null), new("G1", "U1")]
+        };
+        var controller = CreateController(profileStore: store);
+        var cutoff = DateTimeOffset.UtcNow;
+
+        var result = await controller.GetStaleProfiles(max: 10, cutoff: cutoff, CancellationToken.None);
+
+        var ok = Assert.IsType<OkObjectResult>(result.Result);
+        var items = Assert.IsAssignableFrom<IReadOnlyList<ProfileRefreshTask>>(ok.Value);
+        Assert.Equal(2, items.Count);
+        var call = Assert.Single(store.GetStaleProfilesCalls);
+        Assert.Equal(10, call.Max);
+        Assert.Equal(cutoff, call.Cutoff);
+    }
+
+    [Theory]
+    [InlineData(1000, 500)]
+    [InlineData(501, 500)]
+    [InlineData(0, 1)]
+    [InlineData(-10, 1)]
+    [InlineData(50, 50)]
+    public async Task GetStaleProfiles_ClampsMaxToRange(int requestedMax, int expectedMax)
+    {
+        var store = new FakeProfileStore();
+        var controller = CreateController(profileStore: store);
+
+        await controller.GetStaleProfiles(max: requestedMax, cutoff: DateTimeOffset.UtcNow, CancellationToken.None);
+
+        var call = Assert.Single(store.GetStaleProfilesCalls);
+        Assert.Equal(expectedMax, call.Max);
+    }
+
     // === heartbeat（Edge 代寫自己的存活狀態，見 HeartbeatRequest 說明）===
 
     [Fact]

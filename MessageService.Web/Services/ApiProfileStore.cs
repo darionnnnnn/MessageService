@@ -38,4 +38,13 @@ public class ApiProfileStore(IHttpClientFactory httpClientFactory) : IProfileSto
             "api/ingest/profiles/member", new MemberUpsertRequest(groupId, profile), cancellationToken);
         response.EnsureSuccessStatusCode();
     }
+
+    public async Task<IReadOnlyList<ProfileRefreshTask>> GetStaleProfilesAsync(
+        int max, DateTimeOffset cutoff, CancellationToken cancellationToken)
+    {
+        var query = $"max={max}&cutoff={Uri.EscapeDataString(cutoff.ToString("O"))}";
+        var result = await CreateClient().GetFromJsonAsync<List<ProfileRefreshTask>>(
+            $"api/ingest/profiles/stale?{query}", cancellationToken);
+        return result ?? [];
+    }
 }

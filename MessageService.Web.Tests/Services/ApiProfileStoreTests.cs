@@ -95,4 +95,32 @@ public class ApiProfileStoreTests
         await Assert.ThrowsAsync<HttpRequestException>(
             () => store.UpsertGroupAsync("G1", new GroupSummary("G1", null, null), CancellationToken.None));
     }
+
+    [Fact]
+    public async Task GetStaleProfilesAsync_BuildsQueryWithEscapedCutoff_AndParsesResponse()
+    {
+        var expectedTasks = new List<ProfileRefreshTask>
+        {
+            new("G1", null),
+            new("G1", "U1")
+        };
+        var (store, handler) = Create(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = JsonContent.Create(expectedTasks)
+        });
+        var cutoff = new DateTimeOffset(2026, 8, 12, 10, 0, 0, TimeSpan.Zero);
+
+        var tasks = await store.GetStaleProfilesAsync(50, cutoff, CancellationToken.None);
+
+        Assert.Equal(2, tasks.Count);
+        Assert.Equal("G1", tasks[0].GroupId);
+        Assert.Null(tasks[0].UserId);
+        Assert.Equal("G1", tasks[1].GroupId);
+        Assert.Equal("U1", tasks[1].UserId);
+
+        var uri = handler.LastRequest!.RequestUri!;
+        Assert.Equal("/api/ingest/profiles/stale", uri.AbsolutePath);
+        Assert.Contains("max=50", uri.Query);
+        Assert.Contains("cutoff=2026-08-12T10%3A00%3A00.0000000%2B00%3A00", uri.Query);
+    }
 }

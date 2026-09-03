@@ -25,7 +25,7 @@ public class DbProfileStore(MessageDbContext dbContext, FieldCipher cipher, ILog
             .FirstOrDefaultAsync(cancellationToken);
 
         var groupStale = group is null
-            || IsStale(group.UpdatedAt, group.PictureUrl, group.PictureFetchedUrl, group.HasPicture, cutoff);
+            || IsStale(group.UpdatedAt, group.PictureUrl, group.PictureFetchedUrl, cutoff);
         var groupFetchedUrl = group?.PictureFetchedUrl;
         var hasGroupPicture = group?.HasPicture ?? false;
 
@@ -46,24 +46,70 @@ public class DbProfileStore(MessageDbContext dbContext, FieldCipher cipher, ILog
             .FirstOrDefaultAsync(cancellationToken);
 
         var memberStale = member is null
-            || IsStale(member.UpdatedAt, member.PictureUrl, member.PictureFetchedUrl, member.HasPicture, cutoff);
+            || IsStale(member.UpdatedAt, member.PictureUrl, member.PictureFetchedUrl, cutoff);
         return new ProfileStaleness(groupStale, memberStale, groupFetchedUrl, member?.PictureFetchedUrl, hasGroupPicture, member?.HasPicture ?? false);
     }
 
-    /// <summary>除了 TTL，還要把「LINE 說有頭貼、我們卻沒有圖」算成過期——不然頭貼下載失敗後
-    /// 名稱的 UpdatedAt 已更新，這筆要等滿一整個 RefreshAfter 才會再試一次圖。
-    /// 例外是 PictureFetchedUrl 已經等於目前的網址：那代表這個網址試過而且永久拿不到
-    /// （檔案超過上限、404），再判為過期就會變成無限期的每 10 分鐘重抓。
+    /// <summary>除了 TTL，只要 LINE 回傳的 PictureUrl 與我們成功抓取或記錄過的 PictureFetchedUrl 不同，
+    /// 就視為過期需要重新抓取。
     ///
-    /// 取捨：成功下載過（FetchedUrl == PictureUrl）之後 blob 若被外力清掉（DB 還原、手動刪列），
-    /// 這條例外會讓它不再自癒——那種情況只能等 TTL 或換頭貼。權衡過：把「試過拿不到」
-    /// 從「blob 被外力弄丟」分出來需要新欄位，不值得為這個狹窄場景加 migration。</summary>
+    /// 為什麼不檢查「是否有圖」：成員換頭貼後 PictureUrl 為新網址，但若下載暫時失敗，
+    /// 名稱仍會寫入且 UpdatedAt 會被推到現在；此時舊的 blob 仍在，若檢查 hasPicture 會讓缺圖子句
+    /// 被短路而判定「不過期」，導致畫面上要等滿 RefreshAfter（預設 7 天）才會換成新頭貼。
+    /// 因此改為只要 PictureUrl 與 PictureFetchedUrl 不同即算過期。
+    /// 永久失敗的情況（例如檔案超過上限或 404）會將 PictureFetchedUrl 標記為該網址，
+    /// 仍由 PictureFetchedUrl == PictureUrl 擋住，不會變成無限重抓。</summary>
     private static bool IsStale(
-        DateTimeOffset updatedAt, string? pictureUrl, string? pictureFetchedUrl, bool hasPicture, DateTimeOffset cutoff) =>
+        DateTimeOffset updatedAt, string? pictureUrl, string? pictureFetchedUrl, DateTimeOffset cutoff) =>
         updatedAt < cutoff
         || (!string.IsNullOrWhiteSpace(pictureUrl)
-            && !hasPicture
             && !string.Equals(pictureUrl, pictureFetchedUrl, StringComparison.Ordinal));
+
+    public async Task<IReadOnlyList<ProfileRefreshTask>> GetStaleProfilesAsync(
+        int max, DateTimeOffset cutoff, CancellationToken cancellationToken)
+    {
+        if (max <= 0)
+        {
+            return [];
+        }
+
+        var candidateGroups = await dbContext.Groups
+            .Where(g => g.UpdatedAt < cutoff
+                || (!string.IsNullOrWhiteSpace(g.PictureUrl)
+                    && g.Picture == null
+                    && (g.PictureFetchedUrl == null || g.PictureFetchedUrl != g.PictureUrl)))
+            .OrderBy(g => g.UpdatedAt)
+            .Take(max)
+            .Select(g => g.GroupId)
+            .ToListAsync(cancellationToken);
+
+        var remaining = max - candidateGroups.Count;
+        List<(string GroupId, string UserId)> candidateMembers = [];
+        if (remaining > 0)
+        {
+            candidateMembers = await dbContext.GroupMembers
+                .Where(m => m.UpdatedAt < cutoff
+                    || (!string.IsNullOrWhiteSpace(m.PictureUrl)
+                        && m.Picture == null
+                        && (m.PictureFetchedUrl == null || m.PictureFetchedUrl != m.PictureUrl)))
+                .OrderBy(m => m.UpdatedAt)
+                .Take(remaining)
+                .Select(m => new ValueTuple<string, string>(m.GroupId, m.UserId))
+                .ToListAsync(cancellationToken);
+        }
+
+        var results = new List<ProfileRefreshTask>(candidateGroups.Count + candidateMembers.Count);
+        foreach (var groupId in candidateGroups)
+        {
+            results.Add(new ProfileRefreshTask(groupId, null));
+        }
+        foreach (var (groupId, userId) in candidateMembers)
+        {
+            results.Add(new ProfileRefreshTask(groupId, userId));
+        }
+
+        return results;
+    }
 
     public async Task UpsertGroupAsync(string groupId, GroupSummary summary, CancellationToken cancellationToken)
     {
@@ -102,7 +148,10 @@ public class DbProfileStore(MessageDbContext dbContext, FieldCipher cipher, ILog
         }
         else
         {
-            existing.GroupName = summary.GroupName;
+            if (!string.IsNullOrWhiteSpace(summary.GroupName))
+            {
+                existing.GroupName = summary.GroupName;
+            }
             existing.PictureUrl = summary.PictureUrl;
             existing.UpdatedAt = DateTimeOffset.UtcNow;
             if (summary.PictureBytes != null)
@@ -116,6 +165,11 @@ public class DbProfileStore(MessageDbContext dbContext, FieldCipher cipher, ILog
             else if (summary.PicturePermanentlyUnavailable)
             {
                 existing.PictureFetchedUrl = summary.PictureUrl;
+            }
+            else if (string.IsNullOrWhiteSpace(summary.PictureUrl))
+            {
+                await DeleteGroupPictureRowAsync(groupId, cancellationToken);
+                ClearPictureMetadata(existing);
             }
         }
 
@@ -158,7 +212,10 @@ public class DbProfileStore(MessageDbContext dbContext, FieldCipher cipher, ILog
         }
         else
         {
-            existing.DisplayName = profile.DisplayName;
+            if (!string.IsNullOrWhiteSpace(profile.DisplayName))
+            {
+                existing.DisplayName = profile.DisplayName;
+            }
             existing.PictureUrl = profile.PictureUrl;
             existing.UpdatedAt = DateTimeOffset.UtcNow;
             if (profile.PictureBytes != null)
@@ -172,6 +229,11 @@ public class DbProfileStore(MessageDbContext dbContext, FieldCipher cipher, ILog
             else if (profile.PicturePermanentlyUnavailable)
             {
                 existing.PictureFetchedUrl = profile.PictureUrl;
+            }
+            else if (string.IsNullOrWhiteSpace(profile.PictureUrl))
+            {
+                await DeleteMemberPictureRowAsync(groupId, userId, cancellationToken);
+                ClearPictureMetadata(existing);
             }
         }
 
@@ -212,6 +274,46 @@ public class DbProfileStore(MessageDbContext dbContext, FieldCipher cipher, ILog
         {
             dbContext.Add(picture);
         }
+    }
+
+    private async Task DeleteGroupPictureRowAsync(string groupId, CancellationToken cancellationToken)
+    {
+        var local = dbContext.GroupPictures.Local.FirstOrDefault(p => p.GroupId == groupId);
+        if (local is not null)
+        {
+            dbContext.GroupPictures.Remove(local);
+        }
+        else if (await dbContext.GroupPictures.AnyAsync(p => p.GroupId == groupId, cancellationToken))
+        {
+            dbContext.GroupPictures.Remove(new GroupPicture { GroupId = groupId, Content = [] });
+        }
+    }
+
+    private async Task DeleteMemberPictureRowAsync(string groupId, string userId, CancellationToken cancellationToken)
+    {
+        var local = dbContext.GroupMemberPictures.Local.FirstOrDefault(p => p.GroupId == groupId && p.UserId == userId);
+        if (local is not null)
+        {
+            dbContext.GroupMemberPictures.Remove(local);
+        }
+        else if (await dbContext.GroupMemberPictures.AnyAsync(p => p.GroupId == groupId && p.UserId == userId, cancellationToken))
+        {
+            dbContext.GroupMemberPictures.Remove(new GroupMemberPicture { GroupId = groupId, UserId = userId, Content = [] });
+        }
+    }
+
+    private static void ClearPictureMetadata(Group group)
+    {
+        group.PictureContentType = null;
+        group.PictureFetchedUrl = null;
+        group.PictureUpdatedAt = null;
+    }
+
+    private static void ClearPictureMetadata(GroupMember member)
+    {
+        member.PictureContentType = null;
+        member.PictureFetchedUrl = null;
+        member.PictureUpdatedAt = null;
     }
 
     /// <summary>頭貼的中繼欄位一律跟著 blob 一起更新，避免只改一邊造成「有圖但中繼資料是舊的」。

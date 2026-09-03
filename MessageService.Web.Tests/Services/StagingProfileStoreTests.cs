@@ -124,4 +124,12 @@ public class StagingProfileStoreTests
         // 否則單張大頭貼會永遠卡在佇列最前面，後面的誰也送不出去
         Assert.Single(staging.DrainResults());
     }
+
+    [Fact]
+    public async Task GetStaleProfilesAsync_ReturnsEmptyList()
+    {
+        var (store, _) = Create();
+        var results = await store.GetStaleProfilesAsync(50, DateTimeOffset.UtcNow, CancellationToken.None);
+        Assert.Empty(results);
+    }
 }

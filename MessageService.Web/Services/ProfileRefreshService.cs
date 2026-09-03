@@ -212,7 +212,22 @@ public class ProfileRefreshService(
             return;
         }
 
-        await profileStore.UpsertGroupAsync(groupId, summary, cancellationToken);
+        try
+        {
+            await profileStore.UpsertGroupAsync(groupId, summary, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            RecordFailure(groupId);
+            logger.LogWarning(ex, "Upserting group profile failed for group {GroupId}; backing off: {FailureReason}",
+                groupId, OutboundFailureClassifier.Classify(ex, _internalHost));
+            return;
+        }
+
         // 永久不可得的圖不進冷卻：staleness 已經把它記成「試過了」，不會再被判為缺圖
         if (summary.PictureDownloadFailed)
         {
@@ -251,7 +266,22 @@ public class ProfileRefreshService(
             return;
         }
 
-        await profileStore.UpsertMemberAsync(groupId, userId, profile, cancellationToken);
+        try
+        {
+            await profileStore.UpsertMemberAsync(groupId, userId, profile, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            RecordFailure(MemberKey(groupId, userId));
+            logger.LogWarning(ex, "Upserting member profile failed for group {GroupId} user {UserId}; backing off: {FailureReason}",
+                groupId, userId, OutboundFailureClassifier.Classify(ex, _internalHost));
+            return;
+        }
+
         if (profile.PictureDownloadFailed)
         {
             RecordFailure(MemberKey(groupId, userId));

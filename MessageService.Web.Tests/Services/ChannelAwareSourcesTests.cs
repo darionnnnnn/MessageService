@@ -109,4 +109,19 @@ public class ChannelAwareSourcesTests
         Assert.Equal([7L], await content.GetPendingIdsAsync(true, null, "owner", CancellationToken.None));
         Assert.True((await profile.GetStalenessAsync("G1", null, DateTimeOffset.UnixEpoch, CancellationToken.None)).GroupStale);
     }
+
+    [Fact]
+    public async Task ProfileStore_GetStaleProfilesAsync_SwitchesBetweenApiAndStaging()
+    {
+        var (_, profile, state, time, _, _) = Create();
+
+        // 推送通的時候：打 ApiProfileStore（假工廠丟例外證明走了該路徑）
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => profile.GetStaleProfilesAsync(10, DateTimeOffset.UtcNow, CancellationToken.None));
+
+        // 推送中斷時：改走 StagingProfileStore（回空清單）
+        PausePush(state, time);
+        var results = await profile.GetStaleProfilesAsync(10, DateTimeOffset.UtcNow, CancellationToken.None);
+        Assert.Empty(results);
+    }
 }

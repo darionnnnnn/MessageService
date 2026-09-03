@@ -576,6 +576,8 @@ public class ProfileRefreshServiceTests : IDisposable
 
         public Task UpsertGroupAsync(string groupId, GroupSummary summary, CancellationToken cancellationToken) => Task.CompletedTask;
         public Task UpsertMemberAsync(string groupId, string userId, MemberProfile profile, CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task<IReadOnlyList<ProfileRefreshTask>> GetStaleProfilesAsync(int max, DateTimeOffset cutoff, CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<ProfileRefreshTask>>([]);
     }
 
     [Fact]
@@ -642,5 +644,101 @@ public class ProfileRefreshServiceTests : IDisposable
         // Group 進入冷卻，第二次呼叫直接短路
         await service.ProcessAsync(new ProfileRefreshTask("G1", null), CancellationToken.None);
         Assert.Equal(1, store.GetStalenessCallCount);
+    }
+
+    private class ThrowingUpsertProfileStore(Action? onUpsertGroup = null, Action? onUpsertMember = null) : IProfileStore
+    {
+        public Task<ProfileStaleness> GetStalenessAsync(string groupId, string? userId, DateTimeOffset cutoff, CancellationToken cancellationToken) =>
+            Task.FromResult(new ProfileStaleness(true, userId != null));
+
+        public Task UpsertGroupAsync(string groupId, GroupSummary summary, CancellationToken cancellationToken)
+        {
+            onUpsertGroup?.Invoke();
+            return Task.CompletedTask;
+        }
+
+        public Task UpsertMemberAsync(string groupId, string userId, MemberProfile profile, CancellationToken cancellationToken)
+        {
+            onUpsertMember?.Invoke();
+            return Task.CompletedTask;
+        }
+
+        public Task<IReadOnlyList<ProfileRefreshTask>> GetStaleProfilesAsync(int max, DateTimeOffset cutoff, CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<ProfileRefreshTask>>([]);
+    }
+
+    [Fact]
+    public async Task ProcessAsync_GroupUpsertThrows_RecordsCooldownAndSkipsSubsequentLineCalls()
+    {
+        // 10. Edge 推送失敗記冷卻：upsert 拋例外後，同一 (groupId,userId) 在冷卻期內再收到任務時不會再打 LINE
+        var store = new ThrowingUpsertProfileStore(
+            onUpsertGroup: () => throw new HttpRequestException("Core ingest API down"));
+
+        _profileClient.OnGetGroupSummary = _ => new GroupSummary("G1", "GroupName", null);
+
+        var services = new ServiceCollection();
+        services.AddSingleton<IProfileStore>(store);
+        services.AddSingleton<ILineProfileClient>(_profileClient);
+        var provider = services.BuildServiceProvider();
+
+        var service = new ProfileRefreshService(
+            new FakeProfileRefreshQueue(),
+            provider.GetRequiredService<IServiceScopeFactory>(),
+            OptionsFactory.Create(new ProfileCacheOptions
+            {
+                RefreshAfter = TimeSpan.FromDays(7),
+                FailureRetryAfter = TimeSpan.FromMinutes(10)
+            }),
+            IngestOpts("http://core.example/"),
+            _time,
+            NullLogger<ProfileRefreshService>.Instance);
+
+        // 第一次處理：打 LINE API，但 upsert 拋出例外，應記錄冷卻
+        await service.ProcessAsync(new ProfileRefreshTask("G1", null), CancellationToken.None);
+        Assert.Single(_profileClient.GroupSummaryCalls);
+
+        // 第二次在冷卻期內再收到同一任務：group 處於冷卻期內被跳過，不打 LINE
+        await service.ProcessAsync(new ProfileRefreshTask("G1", null), CancellationToken.None);
+        Assert.Single(_profileClient.GroupSummaryCalls);
+    }
+
+    [Fact]
+    public async Task ProcessAsync_MemberUpsertThrows_RecordsCooldownAndSkipsSubsequentLineCalls()
+    {
+        // 10（成員版）. Edge 推送失敗記冷卻：member upsert 拋例外後，同一 (groupId,userId) 在冷卻期內再收到任務時不會再打 LINE
+        var store = new ThrowingUpsertProfileStore(
+            onUpsertGroup: () => { /* group upsert 成功 */ },
+            onUpsertMember: () => throw new HttpRequestException("Core ingest API down"));
+
+        _profileClient.OnGetGroupSummary = _ => new GroupSummary("G1", "GroupName", null);
+        _profileClient.OnGetGroupMemberProfile = (_, userId) => new MemberProfile(userId, "UserName", null);
+
+        var services = new ServiceCollection();
+        services.AddSingleton<IProfileStore>(store);
+        services.AddSingleton<ILineProfileClient>(_profileClient);
+        var provider = services.BuildServiceProvider();
+
+        var service = new ProfileRefreshService(
+            new FakeProfileRefreshQueue(),
+            provider.GetRequiredService<IServiceScopeFactory>(),
+            OptionsFactory.Create(new ProfileCacheOptions
+            {
+                RefreshAfter = TimeSpan.FromDays(7),
+                FailureRetryAfter = TimeSpan.FromMinutes(10)
+            }),
+            IngestOpts("http://core.example/"),
+            _time,
+            NullLogger<ProfileRefreshService>.Instance);
+
+        // 第一次處理：member upsert 拋出例外，記錄冷卻
+        await service.ProcessAsync(new ProfileRefreshTask("G1", "U1"), CancellationToken.None);
+        Assert.Single(_profileClient.GroupSummaryCalls);
+        Assert.Single(_profileClient.MemberProfileCalls);
+
+        // 第二次在冷卻期內（group 已成功進入 SuppressWindow，member 進入 FailureRetryAfter）：
+        // 兩者皆被抑制，不打 LINE
+        await service.ProcessAsync(new ProfileRefreshTask("G1", "U1"), CancellationToken.None);
+        Assert.Single(_profileClient.GroupSummaryCalls);
+        Assert.Single(_profileClient.MemberProfileCalls);
     }
 }

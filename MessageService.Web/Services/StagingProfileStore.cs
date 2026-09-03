@@ -22,4 +22,10 @@ public class StagingProfileStore(EdgeProfileStaging staging) : IProfileStore
         staging.EnqueueMember(groupId, userId, profile);
         return Task.CompletedTask;
     }
+
+    /// <summary>拉取模式下 Edge 沒有資料庫也沒有對外通道主動詢問 Core，故回傳空清單。
+    /// 拉取模式的刷新待辦由 Core 端的 EdgePullService._pendingProfileWork 派工，不需要 Edge 自己撈。</summary>
+    public Task<IReadOnlyList<ProfileRefreshTask>> GetStaleProfilesAsync(
+        int max, DateTimeOffset cutoff, CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlyList<ProfileRefreshTask>>([]);
 }

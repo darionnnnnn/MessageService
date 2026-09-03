@@ -13,4 +13,8 @@ public interface IProfileStore
     Task UpsertGroupAsync(string groupId, GroupSummary summary, CancellationToken cancellationToken);
 
     Task UpsertMemberAsync(string groupId, string userId, MemberProfile profile, CancellationToken cancellationToken);
+
+    /// <summary>挑出需要重新刷新的群組與成員（TTL 過期，或有 PictureUrl 但缺圖且不是永久失敗）。
+    /// 最多回 max 筆，群組與成員合計。</summary>
+    Task<IReadOnlyList<ProfileRefreshTask>> GetStaleProfilesAsync(int max, DateTimeOffset cutoff, CancellationToken cancellationToken);
 }

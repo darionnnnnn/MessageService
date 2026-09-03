@@ -184,6 +184,14 @@ public class IngestController(
         [FromQuery] string groupId, [FromQuery] string? userId, [FromQuery] DateTimeOffset cutoff, CancellationToken cancellationToken) =>
         Ok(await profileStore.GetStalenessAsync(groupId, userId, cutoff, cancellationToken));
 
+    [HttpGet("profiles/stale")]
+    public async Task<ActionResult<IReadOnlyList<ProfileRefreshTask>>> GetStaleProfiles(
+        [FromQuery] int max, [FromQuery] DateTimeOffset cutoff, CancellationToken cancellationToken)
+    {
+        var clampedMax = Math.Clamp(max, 1, 500);
+        return Ok(await profileStore.GetStaleProfilesAsync(clampedMax, cutoff, cancellationToken));
+    }
+
     [HttpPost("profiles/group")]
     public async Task<IActionResult> UpsertGroupProfile([FromBody] GroupSummary summary, CancellationToken cancellationToken)
     {
