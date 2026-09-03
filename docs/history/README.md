@@ -25,6 +25,7 @@
 | `2026-09-01_EDGEOPS-2-PLAN.md` | edge-admin 表單與轉址改帶 `Request.PathBase` 前綴（修 IIS 子 application 下測試按鈕 404）、`OutboundTargetResolver`（DNS 取 IP、TTL 快取）、連線測試表格加「請求網址／IP」欄與失敗寫 log、outbound 失敗 log 補目標（LINE 轉發另帶 IP、內部通道只帶網址）。含 agy 委派驗收與 5 次突變測試記錄 |
 | `2026-09-02_EDGEOPS-3-PLAN.md` | 單向拓撲（僅 Core→Edge）快速收斂：心跳失敗計入通道切換（安靜站台也會切換）、staleness 失敗標對內部通道並縮短冷卻、Core 保留名稱／頭貼待辦每 30 秒節流重派（上限 40 次）、媒體派工立即入列、outbox ack 競態放生降噪、連線測試逾時誤報與缺主詞修正。含體檢抓到的「`when (ex is not OperationCanceledException)` 讓 HttpClient 逾時穿出背景服務、預設 StopHost」潛在站台中止 bug 及規格寫錯的 WithHost 回歸 |
 | `2026-09-02_VIEWER-1-PLAN.md` | 檢視端兩段共八個作業：側欄群組右鍵刪除群組／刪除歷史訊息（`GroupDeletionService` 逐表清理裸 GroupId 的關聯表，刪除＝重置）、訊息高亮（三張新表、八支 API、設定頁第五分頁、前端命中判定、頭貼右鍵人員規則）、字級下限 8px 與等比縮放、高亮強度與命中關鍵字粗體、頁面內全螢幕、載入更早只在頂部、跟隨模式釘底。含 agy 委派逐段驗收、兩次終檢與換模型體檢抓到的缺陷（跨批次漏清高亮規則、Bootstrap hide() 淡入中被忽略、ResizeObserver 初始回呼把載入更早拉回底部、補捲重設保護期讓使用者捲不上去、agy 寫成 Big5）與驗證環境節流限制 |
+| `2026-09-03_PROFILE-1-PLAN.md` | 名稱與頭貼的即時同步與自癒：使用者回報「名稱／頭貼要重新整理才出現、群組照片永遠不出現」的十三條核對結果與根因、三段作業（資料層自癒＋背景補刷、頭貼 API 閘門與過大圖片分類與成員數、前端就地更新與 `profileResolved` 旗標）。含 agy 3.8 委派紀錄（背景服務註冊錯拓撲、無條件重拋取消例外）、兩個獨立終檢審查（匿名模式無限輪詢、GET 端點對外部輸入指派代號、補刷候選與過期判定分岔、殭屍群組餓死）、換模型體檢（`hasAvatar` 規劃落差、舊版 Core 404 洗 log）與拉取拓撲尚無補刷的定案 |
 | `DEPLOYMENT-MODES-DECISIONS.md` | `docs/DEPLOYMENT-MODES.md` 移出的設計決策理由、雙行程端到端驗證紀錄、原始建置分期 |
 | `WEB-UI-DESIGN-NOTES.md` | 檢視端 UI 歷次改版的設計決策理由、放棄的替代方案、已知限制 |
 
