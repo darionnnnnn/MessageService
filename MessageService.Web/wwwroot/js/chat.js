@@ -5,6 +5,8 @@
     // 側欄（新群組/預覽/排序）不需要跟訊息輪詢一樣即時，且 /api/groups 一次要跑好幾個查詢，
     // 沒必要用同一個頻率打
     const GROUP_POLL_INTERVAL_MS = 10000;
+    // 尚未解析成員（名稱與頭貼）的就地更新輪詢間隔
+    const MEMBER_POLL_INTERVAL_MS = 30000;
     const NEAR_BOTTOM_THRESHOLD_PX = 80;
     const NEAR_TOP_THRESHOLD_PX = 40;
     const INITIAL_DAYS = 3;
@@ -77,6 +79,9 @@
         // 進入全螢幕前手機版是否已在對話面板，離開時據此還原 mobile-chat-open
         hadMobileChatOpenBeforeFullscreen: false,
         pendingContentIds: new Set(),
+        pendingMemberIds: new Set(),
+        memberPolling: false,
+        chatHeaderData: null,
         lastAppendedDateKey: null,
         lastAppendedSenderId: null,
         connectionOk: true,
@@ -1290,6 +1295,9 @@
         const row = document.createElement('div');
         row.className = 'message-row' + (showAvatarAndName ? ' show-avatar' : '');
         row.dataset.messageId = String(message.id);
+        if (message.userId) {
+            row.dataset.userId = message.userId;
+        }
 
         const avatar = buildAvatarElement('', {
             pictureUrl: message.pictureUrl,
@@ -1299,6 +1307,7 @@
         avatar.title = message.userId ? `${message.displayName}（${message.userId}）` : message.displayName;
 
         if (message.userId) {
+            avatar.dataset.userId = message.userId;
             const consumeAvatarClick = attachContextMenuTriggers(
                 avatar, (e) => showAvatarContextMenu(e, message));
             avatar.addEventListener('click', (e) => {
@@ -1367,6 +1376,9 @@
         const list = els.messageList;
         for (const message of messages) {
             state.messagesCache.set(message.id, { text: message.text, userId: message.userId });
+            if (message.userId && message.nameResolved === false) {
+                state.pendingMemberIds.add(message.userId);
+            }
             const key = dateKey(message.eventTimestamp);
             if (key !== state.lastAppendedDateKey) {
                 list.appendChild(createDateSeparator(message.eventTimestamp));
@@ -1408,6 +1420,9 @@
         let lastSenderId = null;
         for (const message of messages) {
             state.messagesCache.set(message.id, { text: message.text, userId: message.userId });
+            if (message.userId && message.nameResolved === false) {
+                state.pendingMemberIds.add(message.userId);
+            }
             const key = dateKey(message.eventTimestamp);
             if (key !== lastDateKey) {
                 fragment.appendChild(createDateSeparator(message.eventTimestamp));
@@ -1734,6 +1749,12 @@
     }
 
     function updateChatHeader(group) {
+        state.chatHeaderData = group ? {
+            displayName: group.displayName,
+            pictureUrl: group.pictureUrl,
+            memberCount: group.memberCount
+        } : null;
+
         els.chatHeaderAvatar.replaceWith(buildAvatarElement('chat-header-avatar', {
             pictureUrl: group?.pictureUrl,
             iconKey: 'group',
@@ -1743,6 +1764,15 @@
 
         els.chatHeaderName.textContent = group?.displayName ?? '選擇一個群組';
         els.chatHeaderMembers.textContent = group && group.memberCount > 0 ? `(${group.memberCount})` : '';
+    }
+
+    function hasHeaderChanged(group) {
+        if (!state.chatHeaderData) {
+            return true;
+        }
+        return state.chatHeaderData.displayName !== group.displayName ||
+               state.chatHeaderData.pictureUrl !== group.pictureUrl ||
+               state.chatHeaderData.memberCount !== group.memberCount;
     }
 
     // === 訊息搜尋 ===
@@ -1966,6 +1996,11 @@
             if (state.groupId !== null && !groups.some(g => g.groupId === state.groupId)) {
                 resetChatPanel();
                 showToast('目前的群組已不存在或訊息已被清空');
+            } else if (state.groupId !== null) {
+                const currentGroup = groups.find(g => g.groupId === state.groupId);
+                if (currentGroup && hasHeaderChanged(currentGroup)) {
+                    updateChatHeader(currentGroup);
+                }
             }
 
             // 側欄每 10 秒更新一次；latch 生效後只要該群組的 lastMessageId 真的變了（有新訊息，
@@ -2063,6 +2098,7 @@
         els.messageList.innerHTML = '';
         state.messagesCache.clear();
         state.pendingContentIds.clear();
+        state.pendingMemberIds.clear();
         state.lastAppendedDateKey = null;
         state.lastAppendedSenderId = null;
     }
@@ -2257,6 +2293,69 @@
                 if (!isDownloadInProgress(status.downloadStatus)) {
                     state.pendingContentIds.delete(status.contentId);
                     updateContentNode(status);
+                }
+            }
+        }
+    }
+
+    async function pollPendingMembers() {
+        if (!state.groupId || document.hidden || state.memberPolling || state.pendingMemberIds.size === 0) {
+            return;
+        }
+        const token = state.requestToken;
+        state.memberPolling = true;
+        try {
+            const pendingArray = Array.from(state.pendingMemberIds);
+            for (let i = 0; i < pendingArray.length; i += STATUS_POLL_BATCH_SIZE) {
+                const batch = pendingArray.slice(i, i + STATUS_POLL_BATCH_SIZE);
+                const ids = batch.map(encodeURIComponent).join(',');
+                const members = await fetchJson(
+                    `api/groups/${encodeURIComponent(state.groupId)}/members/resolved?ids=${ids}`);
+                if (token !== state.requestToken) {
+                    return;
+                }
+                for (const member of members) {
+                    if (member.nameResolved) {
+                        state.pendingMemberIds.delete(member.userId);
+                    }
+                    updateMemberNode(member);
+                }
+            }
+        } catch {
+            // 輪詢失敗靜默略過，下一輪 30 秒再試
+        } finally {
+            state.memberPolling = false;
+        }
+    }
+
+    function updateMemberNode(member) {
+        const selector = `[data-user-id="${CSS.escape(member.userId)}"]`;
+        const nodes = els.messageList.querySelectorAll(selector);
+        for (const node of nodes) {
+            if (node.classList.contains('message-row')) {
+                const nameEl = node.querySelector('.message-sender-name');
+                if (nameEl) {
+                    nameEl.textContent = member.displayName;
+                }
+            } else if (node.classList.contains('avatar')) {
+                node.title = `${member.displayName}（${member.userId}）`;
+                if (member.pictureUrl) {
+                    const newAvatar = buildAvatarElement('', {
+                        pictureUrl: member.pictureUrl,
+                        iconKey: member.avatarIcon,
+                        colorSeed: member.userId || member.displayName || '?'
+                    });
+                    newAvatar.dataset.userId = member.userId;
+                    newAvatar.title = `${member.displayName}（${member.userId}）`;
+                    const consumeAvatarClick = attachContextMenuTriggers(
+                        newAvatar, (e) => showAvatarContextMenu(e, { userId: member.userId }));
+                    newAvatar.addEventListener('click', (e) => {
+                        if (consumeAvatarClick()) {
+                            e.preventDefault();
+                            e.stopPropagation();
+                        }
+                    });
+                    node.replaceWith(newAvatar);
                 }
             }
         }
@@ -2765,6 +2864,7 @@
         loadGroups().catch(() => setConnectionOk(false));
         setInterval(pollNewer, POLL_INTERVAL_MS);
         setInterval(pollGroups, GROUP_POLL_INTERVAL_MS);
+        setInterval(pollPendingMembers, MEMBER_POLL_INTERVAL_MS);
         checkDatabaseFallback();
     }
 

@@ -14,7 +14,8 @@ namespace MessageService.Web.Controllers.Api;
 public class GroupsController(
     MessageDbContext dbContext,
     IMaskingService maskingService,
-    GroupDeletionService groupDeletionService) : ControllerBase
+    GroupDeletionService groupDeletionService,
+    IAnonymousIdentityService anonymousIdentityService) : ControllerBase
 {
     // 側欄未讀數的上限：超過就一律顯示「99+」，也順便讓 COUNT 查詢在 SQL 端就截斷，
     // 不必真的數完一個很久沒看的群組累積的成千上萬則
@@ -72,6 +73,66 @@ public class GroupsController(
         return Ok(new GroupDeletionResultDto(
             result.MessageCount, result.MemberCount, result.AnonymousIdentityCount,
             result.MaskKeywordScopeCount, result.HighlightScopeCount));
+    }
+
+    /// <summary>解析指定成員的名稱、頭貼與代號，供前端就地補齊未快取成員資訊。</summary>
+    [HttpGet("{groupId}/members/resolved")]
+    public async Task<ActionResult<IReadOnlyList<ResolvedMemberDto>>> GetResolvedMembers(
+        string groupId,
+        [FromQuery] string? ids,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(ids))
+        {
+            return BadRequest("ids 參數不可為空。");
+        }
+
+        var rawIds = ids.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (rawIds.Length == 0)
+        {
+            return BadRequest("ids 參數不可為空。");
+        }
+
+        if (rawIds.Length > 200)
+        {
+            return BadRequest("一次最多查詢 200 個成員。");
+        }
+
+        var userIds = rawIds.Distinct().ToList();
+
+        var members = await dbContext.GroupMembers
+            .AsNoTracking()
+            .Where(m => m.GroupId == groupId && userIds.Contains(m.UserId))
+            .Select(m => new { m.UserId, m.DisplayName, HasPicture = m.Picture != null })
+            .ToDictionaryAsync(m => m.UserId, cancellationToken);
+
+        var maskingRules = await maskingService.LoadRulesAsync(cancellationToken);
+
+        IReadOnlyDictionary<string, AnonymousIdentityInfo> anonymousIdentities =
+            new Dictionary<string, AnonymousIdentityInfo>();
+        if (maskingRules.RequiresAnonymousIdentity)
+        {
+            anonymousIdentities = await anonymousIdentityService.GetOrAssignAsync(groupId, userIds, cancellationToken);
+        }
+
+        var result = new List<ResolvedMemberDto>(userIds.Count);
+        foreach (var userId in userIds)
+        {
+            members.TryGetValue(userId, out var member);
+            anonymousIdentities.TryGetValue(userId, out var identity);
+
+            var resolved = MemberProfileResolver.Resolve(
+                groupId,
+                userId,
+                member?.DisplayName,
+                member?.HasPicture == true,
+                maskingRules,
+                identity);
+
+            result.Add(resolved);
+        }
+
+        return Ok(result);
     }
 
     private async Task<ActionResult<IReadOnlyList<GroupDto>>> BuildGroupListAsync(
@@ -159,7 +220,8 @@ public class GroupsController(
                 lastMessage.EventTimestamp,
                 memberCount,
                 lastMessage.Id,
-                unreadByGroup.GetValueOrDefault(g.GroupId, 0)));
+                unreadByGroup.GetValueOrDefault(g.GroupId, 0),
+                !string.IsNullOrWhiteSpace(g.GroupName)));
         }
 
         return Ok(result.OrderByDescending(g => g.LastMessageAt).ToList());

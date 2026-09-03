@@ -630,4 +630,56 @@ public class MessagesControllerTests : IDisposable
         Assert.Equal(["before-1", "before-2", "anchor", "after-1"], page!.Messages.Select(m => m.Text));
         Assert.False(page.Truncated);
     }
+
+    [Fact]
+    public async Task GetMessages_MemberCached_NameResolvedIsTrue_AndUncached_IsFalse()
+    {
+        var now = DateTimeOffset.UtcNow;
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            dbContext.GroupMembers.Add(new GroupMember
+            {
+                GroupId = GroupId, UserId = "U1", DisplayName = "小明", UpdatedAt = now
+            });
+            dbContext.GroupMessages.Add(TextMessage("e1", "U1", now.AddMinutes(1), "msg-u1"));
+            dbContext.GroupMessages.Add(TextMessage("e2", "U2", now.AddMinutes(2), "msg-u2"));
+            await Task.CompletedTask;
+        });
+
+        var page = await _fixture.Client.GetFromJsonAsync<MessagesPageDto>($"/api/groups/{GroupId}/messages?days=3");
+
+        Assert.NotNull(page);
+        var msgU1 = page!.Messages.Single(m => m.UserId == "U1");
+        var msgU2 = page.Messages.Single(m => m.UserId == "U2");
+
+        Assert.True(msgU1.NameResolved);
+        Assert.False(msgU2.NameResolved);
+    }
+
+    [Fact]
+    public async Task GetMessages_AnonymousMode_MemberCached_NameResolvedIsTrue()
+    {
+        var now = DateTimeOffset.UtcNow;
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            (await dbContext.ViewerSettings.SingleAsync()).NameDisplayMode = NameDisplayMode.Anonymous;
+            dbContext.GroupMembers.Add(new GroupMember
+            {
+                GroupId = GroupId, UserId = "U1", DisplayName = "小明", UpdatedAt = now
+            });
+            dbContext.GroupMessages.Add(TextMessage("e1", "U1", now.AddMinutes(1), "msg-u1"));
+            dbContext.GroupMessages.Add(TextMessage("e2", "U2", now.AddMinutes(2), "msg-u2"));
+            await Task.CompletedTask;
+        });
+
+        var page = await _fixture.Client.GetFromJsonAsync<MessagesPageDto>($"/api/groups/{GroupId}/messages?days=3");
+
+        Assert.NotNull(page);
+        var msgU1 = page!.Messages.Single(m => m.UserId == "U1");
+        var msgU2 = page.Messages.Single(m => m.UserId == "U2");
+
+        // 匿名模式下雖然顯示代號，但只要成員已快取，NameResolved 仍為 true
+        Assert.True(msgU1.NameResolved);
+        Assert.False(msgU2.NameResolved);
+    }
 }
