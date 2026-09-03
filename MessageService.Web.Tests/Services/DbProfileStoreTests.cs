@@ -1168,4 +1168,41 @@ public class DbProfileStoreTests : IDisposable
         var results = await store.GetStaleProfilesAsync(max, DateTimeOffset.UtcNow, CancellationToken.None);
         Assert.Empty(results);
     }
+
+    [Fact]
+    public async Task UpsertGroupAsync_WithMemberCount_SavesMemberCount()
+    {
+        var cipher = CreateCipher(false);
+        var store = new DbProfileStore(_dbContext, cipher, NullLogger<DbProfileStore>.Instance);
+
+        var summary = new GroupSummary("g1", "Group 1", null, MemberCount: 25);
+        await store.UpsertGroupAsync("g1", summary, CancellationToken.None);
+
+        var group = await _dbContext.Groups.FirstOrDefaultAsync(g => g.GroupId == "g1");
+        Assert.NotNull(group);
+        Assert.Equal(25, group.MemberCount);
+    }
+
+    [Fact]
+    public async Task UpsertGroupAsync_WhenMemberCountIsNull_PreservesExistingMemberCount()
+    {
+        var cipher = CreateCipher(false);
+        var store = new DbProfileStore(_dbContext, cipher, NullLogger<DbProfileStore>.Instance);
+
+        var summary1 = new GroupSummary("g1", "Group 1", null, MemberCount: 42);
+        await store.UpsertGroupAsync("g1", summary1, CancellationToken.None);
+
+        var group1 = await _dbContext.Groups.FirstOrDefaultAsync(g => g.GroupId == "g1");
+        Assert.NotNull(group1);
+        Assert.Equal(42, group1.MemberCount);
+
+        // Update with MemberCount = null
+        var summary2 = new GroupSummary("g1", "Group 1 Renamed", null, MemberCount: null);
+        await store.UpsertGroupAsync("g1", summary2, CancellationToken.None);
+
+        var group2 = await _dbContext.Groups.FirstOrDefaultAsync(g => g.GroupId == "g1");
+        Assert.NotNull(group2);
+        Assert.Equal("Group 1 Renamed", group2.GroupName);
+        Assert.Equal(42, group2.MemberCount);
+    }
 }

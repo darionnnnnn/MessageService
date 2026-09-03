@@ -437,4 +437,79 @@ public class GroupsControllerTests : IDisposable
         var group = Assert.Single(groups!);
         Assert.Equal("api/groups/G1/avatar", group.PictureUrl);
     }
+
+    [Fact]
+    public async Task GetGroups_WhenMemberCountExists_UsesGroupsMemberCount()
+    {
+        var now = DateTimeOffset.UtcNow;
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            dbContext.Groups.Add(new Group
+            {
+                GroupId = "G1",
+                GroupName = "工作群組A",
+                MemberCount = 42,
+                UpdatedAt = now
+            });
+            dbContext.GroupMembers.Add(new GroupMember
+            {
+                GroupId = "G1",
+                UserId = "U1",
+                DisplayName = "User 1",
+                UpdatedAt = now
+            });
+            dbContext.GroupMessages.Add(new GroupMessage
+            {
+                WebhookEventId = "e1", LineMessageId = "m1", GroupId = "G1", MessageType = "text", Text = "hi",
+                EventTimestamp = now, ReceivedAt = now
+            });
+            await Task.CompletedTask;
+        });
+
+        var groups = await _fixture.Client.GetFromJsonAsync<List<GroupDto>>("/api/groups");
+
+        var group = Assert.Single(groups!);
+        Assert.Equal(42, group.MemberCount);
+    }
+
+    [Fact]
+    public async Task GetGroups_WhenMemberCountIsNull_FallsBackToCachedGroupMembersCount()
+    {
+        var now = DateTimeOffset.UtcNow;
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            dbContext.Groups.Add(new Group
+            {
+                GroupId = "G1",
+                GroupName = "工作群組A",
+                MemberCount = null,
+                UpdatedAt = now
+            });
+            dbContext.GroupMembers.Add(new GroupMember
+            {
+                GroupId = "G1",
+                UserId = "U1",
+                DisplayName = "User 1",
+                UpdatedAt = now
+            });
+            dbContext.GroupMembers.Add(new GroupMember
+            {
+                GroupId = "G1",
+                UserId = "U2",
+                DisplayName = "User 2",
+                UpdatedAt = now
+            });
+            dbContext.GroupMessages.Add(new GroupMessage
+            {
+                WebhookEventId = "e1", LineMessageId = "m1", GroupId = "G1", MessageType = "text", Text = "hi",
+                EventTimestamp = now, ReceivedAt = now
+            });
+            await Task.CompletedTask;
+        });
+
+        var groups = await _fixture.Client.GetFromJsonAsync<List<GroupDto>>("/api/groups");
+
+        var group = Assert.Single(groups!);
+        Assert.Equal(2, group.MemberCount);
+    }
 }

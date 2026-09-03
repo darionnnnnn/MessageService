@@ -19,11 +19,8 @@ public class AvatarsController(
     [HttpGet("api/groups/{groupId}/avatar")]
     public async Task<IActionResult> GetGroupAvatar(string groupId, CancellationToken cancellationToken)
     {
-        var maskingRules = await maskingService.LoadRulesAsync(cancellationToken);
-        if (!maskingRules.RevealsOriginalProfile)
-        {
-            return NotFound();
-        }
+        // 群組照片是「群組」的識別，不是個人資料；匿名／別名模式保護的是「這則訊息是誰說的」，
+        // 把群組本身的照片也擋掉並沒有保護到任何人，反而讓側欄給了網址卻必定 404。成員頭貼是個人資料，維持受限。
 
         // 採取兩段查詢：先投影出輕量中繼資料比對 ETag，若命中 304 即可避免撈取 blob 本體；
         // 雖然 200 路徑會多一次輕量查詢，但因 no-cache 快取策略使 304 成為常態，這筆交易是划算的。
@@ -41,7 +38,7 @@ public class AvatarsController(
         var etag = FormatETag(groupId, meta.PictureUpdatedAt);
         if (IsIfNoneMatchHit(etag))
         {
-            return StatusCode(StatusCodes.Status304NotModified);
+            return NotModified(etag);
         }
 
         var content = await dbContext.Groups
@@ -50,7 +47,7 @@ public class AvatarsController(
             .Select(g => g.Picture == null ? null : g.Picture.Content)
             .FirstOrDefaultAsync(cancellationToken);
 
-        if (content is null)
+        if (content is null or { Length: 0 })
         {
             return NotFound();
         }
@@ -83,7 +80,7 @@ public class AvatarsController(
         var etag = FormatETag(userId, meta.PictureUpdatedAt);
         if (IsIfNoneMatchHit(etag))
         {
-            return StatusCode(StatusCodes.Status304NotModified);
+            return NotModified(etag);
         }
 
         var content = await dbContext.GroupMembers
@@ -92,7 +89,7 @@ public class AvatarsController(
             .Select(m => m.Picture == null ? null : m.Picture.Content)
             .FirstOrDefaultAsync(cancellationToken);
 
-        if (content is null)
+        if (content is null or { Length: 0 })
         {
             return NotFound();
         }
@@ -107,6 +104,20 @@ public class AvatarsController(
     {
         var ifNoneMatch = Request.Headers.IfNoneMatch.ToString();
         return !string.IsNullOrEmpty(ifNoneMatch) && (ifNoneMatch == "*" || ifNoneMatch.Contains(etag));
+    }
+
+    private IActionResult NotModified(string etag)
+    {
+        SetAvatarHeaders(etag, cipher.Enabled);
+        return StatusCode(StatusCodes.Status304NotModified);
+    }
+
+    private void SetAvatarHeaders(string etag, bool isEncrypted)
+    {
+        // 加密內容送 no-store 是因為解密後的明文屬於受保護的個資，不該讓瀏覽器跨工作階段保留在磁碟快取上。
+        // 未加密內容則送 private, no-cache，允許快取但每次載入都要用 ETag 重新驗證，既省頻寬又能即時套用去識別化遮蔽或更新頭貼。
+        Response.Headers.CacheControl = isEncrypted ? "no-store" : "private, no-cache";
+        Response.Headers.ETag = etag;
     }
 
     private IActionResult ProcessAvatarContent(string idForLog, byte[] content, string? contentType, string etag)
@@ -155,10 +166,7 @@ public class AvatarsController(
             }
         }
 
-        // 加密內容送 no-store 是因為解密後的明文屬於受保護的個資，不該讓瀏覽器跨工作階段保留在磁碟快取上。
-        // 未加密內容則送 private, no-cache，允許快取但每次載入都要用 ETag 重新驗證，既省頻寬又能即時套用去識別化遮蔽或更新頭貼。
-        Response.Headers.CacheControl = isEncrypted ? "no-store" : "private, no-cache";
-        Response.Headers.ETag = etag;
+        SetAvatarHeaders(etag, isEncrypted);
         Response.Headers.XContentTypeOptions = "nosniff";
 
         var normalizedContentType = ContentStreamService.NormalizeContentType(contentType);

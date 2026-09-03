@@ -10,4 +10,6 @@ public record GroupSummary(
     bool PictureDownloadFailed = false,
     /// <summary>這個頭貼網址永久拿不到（檔案超過上限、404／410）：重試多少次都一樣，
     /// 落地時會把它記進 PictureFetchedUrl，讓 staleness 不再把這筆判為缺圖。</summary>
-    bool PicturePermanentlyUnavailable = false);
+    bool PicturePermanentlyUnavailable = false,
+    /// <summary>LINE 群組成員總數。為 null 代表尚未抓取或抓取失敗。</summary>
+    int? MemberCount = null);

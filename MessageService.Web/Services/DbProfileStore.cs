@@ -133,6 +133,7 @@ public class DbProfileStore(MessageDbContext dbContext, FieldCipher cipher, ILog
                 GroupId = groupId,
                 GroupName = summary.GroupName,
                 PictureUrl = summary.PictureUrl,
+                MemberCount = summary.MemberCount,
                 UpdatedAt = DateTimeOffset.UtcNow
             };
             if (summary.PictureBytes != null)
@@ -151,6 +152,11 @@ public class DbProfileStore(MessageDbContext dbContext, FieldCipher cipher, ILog
             if (!string.IsNullOrWhiteSpace(summary.GroupName))
             {
                 existing.GroupName = summary.GroupName;
+            }
+            // 成員數保護：MemberCount 有值才寫入；抓取失敗或為 null 時保留既有值，避免洗掉已存在的成員數
+            if (summary.MemberCount.HasValue)
+            {
+                existing.MemberCount = summary.MemberCount.Value;
             }
             existing.PictureUrl = summary.PictureUrl;
             existing.UpdatedAt = DateTimeOffset.UtcNow;

@@ -63,6 +63,9 @@ namespace MessageService.Data.Migrations.SqlServer
                     b.Property<long?>("LastMessageId")
                         .HasColumnType("bigint");
 
+                    b.Property<int?>("MemberCount")
+                        .HasColumnType("int");
+
                     b.Property<string>("PictureContentType")
                         .HasColumnType("nvarchar(max)");
 

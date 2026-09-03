@@ -83,7 +83,7 @@ public class GroupsController(
         var groups = await dbContext.Groups
             .AsNoTracking()
             .Where(g => g.LastMessageId != null)
-            .Select(g => new { g.GroupId, g.GroupName, HasPicture = g.Picture != null, LastMessageId = g.LastMessageId!.Value })
+            .Select(g => new { g.GroupId, g.GroupName, HasPicture = g.Picture != null, LastMessageId = g.LastMessageId!.Value, g.MemberCount })
             .ToListAsync(cancellationToken);
 
         if (groups.Count == 0)
@@ -147,13 +147,17 @@ public class GroupsController(
 
             var preview = MessagePreviewFormatter.Format(lastMessage.MessageType, lastMessage.Text, maskingRules, g.GroupId);
 
+            // 成員數優先採用 LINE API 回傳的真實群組人數（Groups.MemberCount）；
+            // 若尚未抓取或抓取失敗（為 null），則回退為已快取的發言成員數量（GroupMembers COUNT）。
+            var memberCount = g.MemberCount ?? memberCounts.GetValueOrDefault(g.GroupId, 0);
+
             result.Add(new GroupDto(
                 g.GroupId,
                 g.GroupName ?? g.GroupId,
                 g.HasPicture ? $"api/groups/{g.GroupId}/avatar" : null,
                 preview,
                 lastMessage.EventTimestamp,
-                memberCounts.GetValueOrDefault(g.GroupId, 0),
+                memberCount,
                 lastMessage.Id,
                 unreadByGroup.GetValueOrDefault(g.GroupId, 0)));
         }
