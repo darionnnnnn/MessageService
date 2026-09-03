@@ -32,7 +32,8 @@ public class ProfileBackfillService(
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "Profile backfill startup scan failed; will retry at next scheduled run");
+            // 啟動時 DB／Core 還沒就緒是常態（migration、對端還在起），比照 ContentDownloadService 記 Warning
+            logger.LogWarning(ex, "Profile backfill startup scan failed（{Minutes} 分鐘後的週期掃描會自動再試）", _options.BackfillIntervalMinutes);
         }
 
         // 間隔設 0 表示只在啟動時掃一次，比照 ContentDownload:RequeueIntervalMinutes 的語意
@@ -98,7 +99,9 @@ public class ProfileBackfillService(
             queue.Enqueue(task);
         }
 
-        logger.LogInformation(
+        // 穩態下每輪都是 0 筆（拉取方向的 Edge 更是永遠 0），這種輪次不值得一行 Information
+        logger.Log(
+            tasks.Count == 0 ? LogLevel.Debug : LogLevel.Information,
             "Profile backfill enqueued {GroupCount} group(s) and {MemberCount} member(s).",
             groupCount, memberCount);
     }

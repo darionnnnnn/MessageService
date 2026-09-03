@@ -108,6 +108,8 @@ public class AvatarsController(
 
     private IActionResult NotModified(string etag)
     {
+        // 304 路徑刻意不撈 blob，判不出這一筆實際有沒有加密，改用全域開關：開關開著就送 no-store。
+        // 加密開啟前寫入的舊圖會因此比 200 路徑保守（no-store 而非 no-cache），方向是更嚴、不會外洩
         SetAvatarHeaders(etag, cipher.Enabled);
         return StatusCode(StatusCodes.Status304NotModified);
     }

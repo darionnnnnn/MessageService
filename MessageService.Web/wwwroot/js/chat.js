@@ -1379,7 +1379,7 @@
         const list = els.messageList;
         for (const message of messages) {
             state.messagesCache.set(message.id, { text: message.text, userId: message.userId });
-            if (message.userId && message.nameResolved === false) {
+            if (message.userId && message.profileResolved === false) {
                 state.pendingMemberIds.add(message.userId);
             }
             const key = dateKey(message.eventTimestamp);
@@ -1423,7 +1423,7 @@
         let lastSenderId = null;
         for (const message of messages) {
             state.messagesCache.set(message.id, { text: message.text, userId: message.userId });
-            if (message.userId && message.nameResolved === false) {
+            if (message.userId && message.profileResolved === false) {
                 state.pendingMemberIds.add(message.userId);
             }
             const key = dateKey(message.eventTimestamp);
@@ -2319,7 +2319,7 @@
                     return;
                 }
                 for (const member of members) {
-                    if (member.nameResolved) {
+                    if (member.profileResolved) {
                         state.pendingMemberIds.delete(member.userId);
                         state.memberResolveAttempts.delete(member.userId);
                     } else {

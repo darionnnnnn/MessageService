@@ -103,7 +103,7 @@ public class GroupsController(
         var members = await dbContext.GroupMembers
             .AsNoTracking()
             .Where(m => m.GroupId == groupId && userIds.Contains(m.UserId))
-            .Select(m => new { m.UserId, m.DisplayName, HasPicture = m.Picture != null })
+            .Select(m => new { m.UserId, m.DisplayName, m.PictureUrl, HasPicture = m.Picture != null })
             .ToDictionaryAsync(m => m.UserId, cancellationToken);
 
         var maskingRules = await maskingService.LoadRulesAsync(cancellationToken);
@@ -132,6 +132,7 @@ public class GroupsController(
                 groupId,
                 userId,
                 member?.DisplayName,
+                member?.PictureUrl,
                 member?.HasPicture == true,
                 maskingRules,
                 identity);

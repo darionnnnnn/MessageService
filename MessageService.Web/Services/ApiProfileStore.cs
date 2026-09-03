@@ -1,4 +1,6 @@
+using System.Net;
 using System.Net.Http.Json;
+using Microsoft.Extensions.Logging;
 
 namespace MessageService.Services;
 
@@ -6,8 +8,13 @@ namespace MessageService.Services;
 /// upsert 快取，取代 DbProfileStore 直接查資料庫的角色。頭貼快取是非關鍵資料
 /// （見 IProfileStore 介面說明），這裡的例外一律往外拋，由 ProfileRefreshService
 /// 既有的「記 log、不重試」處理，不需要額外的重試機制。</summary>
-public class ApiProfileStore(IHttpClientFactory httpClientFactory) : IProfileStore
+public class ApiProfileStore(IHttpClientFactory httpClientFactory, ILogger<ApiProfileStore> logger) : IProfileStore
 {
+    // 與 HttpIngestSink 的批次端點同一套處理：舊版 Core 沒有 profiles/stale 端點時回 404，
+    // 只警告一次、當作沒有候選，避免升級過渡期每輪補刷都洗一筆 error log。
+    // static 是因為 ApiProfileStore 是 scoped、每輪補刷各拿到新實例。
+    private static int _staleEndpointNotFoundWarned;
+
     private HttpClient CreateClient() => httpClientFactory.CreateClient("ingest");
 
     public async Task<ProfileStaleness> GetStalenessAsync(
@@ -43,8 +50,20 @@ public class ApiProfileStore(IHttpClientFactory httpClientFactory) : IProfileSto
         int max, DateTimeOffset cutoff, CancellationToken cancellationToken)
     {
         var query = $"max={max}&cutoff={Uri.EscapeDataString(cutoff.ToString("O"))}";
-        var result = await CreateClient().GetFromJsonAsync<List<ProfileRefreshTask>>(
-            $"api/ingest/profiles/stale?{query}", cancellationToken);
+        using var response = await CreateClient().GetAsync($"api/ingest/profiles/stale?{query}", cancellationToken);
+        if (response.StatusCode == HttpStatusCode.NotFound)
+        {
+            if (Interlocked.CompareExchange(ref _staleEndpointNotFoundWarned, 1, 0) == 0)
+            {
+                logger.LogWarning(
+                    "Core 端 ingest API 找不到 GET /api/ingest/profiles/stale（404）——可能還沒升級，" +
+                    "背景補刷暫時沒有候選可掃。升級順序請先升 Core 再升 Edge，見 docs/DEPLOYMENT-MODES.md。");
+            }
+            return [];
+        }
+
+        response.EnsureSuccessStatusCode();
+        var result = await response.Content.ReadFromJsonAsync<List<ProfileRefreshTask>>(cancellationToken);
         return result ?? [];
     }
 }

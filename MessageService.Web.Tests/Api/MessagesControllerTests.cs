@@ -632,7 +632,7 @@ public class MessagesControllerTests : IDisposable
     }
 
     [Fact]
-    public async Task GetMessages_MemberCached_NameResolvedIsTrue_AndUncached_IsFalse()
+    public async Task GetMessages_MemberCached_ProfileResolvedIsTrue_AndUncached_IsFalse()
     {
         var now = DateTimeOffset.UtcNow;
         await _fixture.SeedAsync(async dbContext =>
@@ -652,8 +652,68 @@ public class MessagesControllerTests : IDisposable
         var msgU1 = page!.Messages.Single(m => m.UserId == "U1");
         var msgU2 = page.Messages.Single(m => m.UserId == "U2");
 
-        Assert.True(msgU1.NameResolved);
-        Assert.False(msgU2.NameResolved);
+        Assert.True(msgU1.ProfileResolved);
+        Assert.False(msgU2.ProfileResolved);
+    }
+
+    [Fact]
+    public async Task GetMessages_OriginalMode_ProfileResolvedWaitsForPictureDownload()
+    {
+        // 名稱先到、圖檔還沒下載成功的人不能算已解析——前端一旦停止輪詢，之後補齊的頭貼
+        // 就要重新整理才看得到。LINE 端沒有頭貼（PictureUrl 空）的人沒東西可等，直接算已解析
+        var now = DateTimeOffset.UtcNow;
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            (await dbContext.ViewerSettings.SingleAsync()).NameDisplayMode = NameDisplayMode.Original;
+            dbContext.GroupMembers.Add(new GroupMember
+            {
+                GroupId = GroupId, UserId = "U_PENDING", DisplayName = "圖還沒好", UpdatedAt = now,
+                PictureUrl = "https://example.com/p.png"
+            });
+            dbContext.GroupMembers.Add(new GroupMember
+            {
+                GroupId = GroupId, UserId = "U_NO_PIC", DisplayName = "沒頭貼", UpdatedAt = now,
+                PictureUrl = null
+            });
+            dbContext.GroupMembers.Add(new GroupMember
+            {
+                GroupId = GroupId, UserId = "U_DONE", DisplayName = "圖好了", UpdatedAt = now,
+                PictureUrl = "https://example.com/p.png",
+                Picture = new GroupMemberPicture { GroupId = GroupId, UserId = "U_DONE", Content = [1, 2, 3] }
+            });
+            dbContext.GroupMessages.Add(TextMessage("e1", "U_PENDING", now.AddMinutes(1), "a"));
+            dbContext.GroupMessages.Add(TextMessage("e2", "U_NO_PIC", now.AddMinutes(2), "b"));
+            dbContext.GroupMessages.Add(TextMessage("e3", "U_DONE", now.AddMinutes(3), "c"));
+            await Task.CompletedTask;
+        });
+
+        var page = await _fixture.Client.GetFromJsonAsync<MessagesPageDto>($"/api/groups/{GroupId}/messages?days=3");
+
+        Assert.False(page!.Messages.Single(m => m.UserId == "U_PENDING").ProfileResolved);
+        Assert.True(page.Messages.Single(m => m.UserId == "U_NO_PIC").ProfileResolved);
+        Assert.True(page.Messages.Single(m => m.UserId == "U_DONE").ProfileResolved);
+    }
+
+    [Fact]
+    public async Task GetMessages_MaskMiddleMode_PendingPictureDoesNotBlockResolution()
+    {
+        // 非 Original 模式不顯示真實頭貼，圖檔有沒有下載完與畫面無關，名稱到了就是最終值
+        var now = DateTimeOffset.UtcNow;
+        await _fixture.SeedAsync(async dbContext =>
+        {
+            (await dbContext.ViewerSettings.SingleAsync()).NameDisplayMode = NameDisplayMode.MaskMiddle;
+            dbContext.GroupMembers.Add(new GroupMember
+            {
+                GroupId = GroupId, UserId = "U1", DisplayName = "王小明", UpdatedAt = now,
+                PictureUrl = "https://example.com/p.png"
+            });
+            dbContext.GroupMessages.Add(TextMessage("e1", "U1", now.AddMinutes(1), "a"));
+            await Task.CompletedTask;
+        });
+
+        var page = await _fixture.Client.GetFromJsonAsync<MessagesPageDto>($"/api/groups/{GroupId}/messages?days=3");
+
+        Assert.True(page!.Messages.Single(m => m.UserId == "U1").ProfileResolved);
     }
 
     [Fact]
@@ -681,7 +741,7 @@ public class MessagesControllerTests : IDisposable
         // 匿名模式顯示的是代號、根本不看真名，所以只要代號已指派就是最終顯示值——
         // 兩個人都算已解析，包含 profile 還沒快取的 U2。若這裡回 false，
         // 前端會把他永遠留在待解析集合裡每 30 秒空打一次請求，而畫面上什麼都不會變
-        Assert.True(msgU1.NameResolved);
-        Assert.True(msgU2.NameResolved);
+        Assert.True(msgU1.ProfileResolved);
+        Assert.True(msgU2.ProfileResolved);
     }
 }

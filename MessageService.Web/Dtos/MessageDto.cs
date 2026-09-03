@@ -11,4 +11,4 @@ public record MessageDto(
     string? PictureUrl,
     string? AvatarIcon,
     string? StickerId,
-    bool NameResolved);
+    bool ProfileResolved);

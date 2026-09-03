@@ -547,7 +547,7 @@ public class GroupsControllerTests : IDisposable
         Assert.Equal(msg.DisplayName, resolved.DisplayName);
         Assert.Equal(msg.PictureUrl, resolved.PictureUrl);
         Assert.Equal(msg.AvatarIcon, resolved.AvatarIcon);
-        Assert.Equal(msg.NameResolved, resolved.NameResolved);
+        Assert.Equal(msg.ProfileResolved, resolved.ProfileResolved);
     }
 
     [Fact]
@@ -592,7 +592,7 @@ public class GroupsControllerTests : IDisposable
         Assert.NotEqual("真實姓名小明", resolved.DisplayName);
         Assert.DoesNotContain("真實姓名小明", resolved.DisplayName);
         Assert.Null(resolved.PictureUrl);
-        Assert.True(resolved.NameResolved);
+        Assert.True(resolved.ProfileResolved);
     }
 
     [Fact]
@@ -615,7 +615,7 @@ public class GroupsControllerTests : IDisposable
             "/api/groups/G1/members/resolved?ids=U1");
 
         var resolved = Assert.Single(resolvedMembers!);
-        Assert.True(resolved.NameResolved);
+        Assert.True(resolved.ProfileResolved);
         Assert.False(string.IsNullOrWhiteSpace(resolved.DisplayName));
     }
 
@@ -639,8 +639,8 @@ public class GroupsControllerTests : IDisposable
             "/api/groups/G1/members/resolved?ids=U1,U_NOT_A_MEMBER,U_ALSO_FAKE");
 
         Assert.Equal(3, resolvedMembers!.Count);
-        Assert.True(resolvedMembers.Single(m => m.UserId == "U1").NameResolved);
-        Assert.False(resolvedMembers.Single(m => m.UserId == "U_NOT_A_MEMBER").NameResolved);
+        Assert.True(resolvedMembers.Single(m => m.UserId == "U1").ProfileResolved);
+        Assert.False(resolvedMembers.Single(m => m.UserId == "U_NOT_A_MEMBER").ProfileResolved);
 
         using var scope = _fixture.Factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<MessageDbContext>();
@@ -651,7 +651,7 @@ public class GroupsControllerTests : IDisposable
     }
 
     [Fact]
-    public async Task GetResolvedMembers_UncachedUser_ReturnsRecordWithNameResolvedFalse()
+    public async Task GetResolvedMembers_UncachedUser_ReturnsRecordWithProfileResolvedFalse()
     {
         var now = DateTimeOffset.UtcNow;
         await _fixture.SeedAsync(async dbContext =>
@@ -670,11 +670,11 @@ public class GroupsControllerTests : IDisposable
         Assert.Equal(2, resolvedMembers!.Count);
 
         var u1 = resolvedMembers.Single(m => m.UserId == "U1");
-        Assert.True(u1.NameResolved);
+        Assert.True(u1.ProfileResolved);
         Assert.Equal("已快取成員", u1.DisplayName);
 
         var u2 = resolvedMembers.Single(m => m.UserId == "U2");
-        Assert.False(u2.NameResolved);
+        Assert.False(u2.ProfileResolved);
         Assert.Equal("U2", u2.DisplayName);
     }
 }

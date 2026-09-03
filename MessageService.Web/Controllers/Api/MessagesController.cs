@@ -118,7 +118,7 @@ public class MessagesController(
         var members = await dbContext.GroupMembers
             .AsNoTracking()
             .Where(m => m.GroupId == groupId && userIds.Contains(m.UserId))
-            .Select(m => new { m.UserId, m.DisplayName, HasPicture = m.Picture != null })
+            .Select(m => new { m.UserId, m.DisplayName, m.PictureUrl, HasPicture = m.Picture != null })
             .ToDictionaryAsync(m => m.UserId, cancellationToken);
 
         // 一個請求只載入一次遮蔽規則，套用到每則訊息時全是同步運算，不會每則訊息各打一次 DB
@@ -151,6 +151,7 @@ public class MessagesController(
                 groupId,
                 r.UserId,
                 member?.DisplayName,
+                member?.PictureUrl,
                 member?.HasPicture == true,
                 maskingRules,
                 identity);
@@ -166,7 +167,7 @@ public class MessagesController(
                 profile.PictureUrl,
                 profile.AvatarIcon,
                 r.StickerId,
-                profile.NameResolved);
+                profile.ProfileResolved);
         }).ToList();
 
         // hasMore：初載/往前加載都要判斷是否還有更早的訊息；輪詢（afterId）不需要，省一次查詢

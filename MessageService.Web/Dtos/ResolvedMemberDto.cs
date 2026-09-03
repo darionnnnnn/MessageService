@@ -5,4 +5,4 @@ public record ResolvedMemberDto(
     string DisplayName,
     string? PictureUrl,
     string AvatarIcon,
-    bool NameResolved);
+    bool ProfileResolved);
